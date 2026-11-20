@@ -1,18 +1,11 @@
 [workspace]
 members = [
     "crates/codegraph-core",
-    "crates/codegraph-vector",
     "crates/codegraph-parser",
     "crates/codegraph-mcp",
-
-
-    "crates/codegraph-concurrent",
     "crates/codegraph-graph",
-    "crates/codegraph-zerocopy",
-
     "crates/codegraph-mcp-core",
     "crates/codegraph-mcp-tools",
-    "crates/codegraph-mcp-rig",
     "crates/codegraph-mcp-server",
     "crates/codegraph-mcp-daemon",
 ]
@@ -30,53 +23,6 @@ rust-version = "1.95"
 authors = ["CodeGraph Team"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/codegraph/embedding-system"
-
-# Feature groups for common development scenarios
-[workspace.metadata.cargo-features]
-# Minimal build for MCP server development (fastest build times)
-mcp-minimal = [
-    "ai-enhanced",
-    "embeddings-ollama"
-]
-
-# MCP development with LM Studio support
-mcp-lmstudio = [
-    "ai-enhanced",
-    "embeddings-ollama",
-    "embeddings-lmstudio"
-]
-
-# Full local stack (no cloud dependencies)
-local-stack = [
-    "daemon",
-    "ai-enhanced",
-    "embeddings-ollama",
-    "embeddings-lmstudio",
-    "embeddings-local"
-]
-
-# Cloud-enabled build
-cloud-enabled = [
-    "daemon",
-    "ai-enhanced",
-    "cloud",
-    "embeddings-jina",
-    "server-http"
-]
-
-# Everything (development/testing)
-full = [
-    "daemon",
-    "ai-enhanced",
-    "cloud",
-    "embeddings",
-    "embeddings-local",
-    "embeddings-openai",
-    "embeddings-ollama",
-    "embeddings-jina",
-    "embeddings-lmstudio",
-    "server-http"
-]
 
 [workspace.dependencies]
 fastrand = "2.5.0"
@@ -252,10 +198,7 @@ lru = "0.18.5"
 codegraph-core = { path = "crates/codegraph-core" }
 codegraph-graph = { path = "crates/codegraph-graph" }
 codegraph-parser = { path = "crates/codegraph-parser" }
-codegraph-vector = { path = "crates/codegraph-vector", default-features = false }
 codegraph-mcp = { path = "crates/codegraph-mcp" }
-
-codegraph-zerocopy = { path = "crates/codegraph-zerocopy" }
 
 
 

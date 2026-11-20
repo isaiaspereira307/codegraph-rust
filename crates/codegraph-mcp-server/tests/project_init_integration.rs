@@ -74,8 +74,8 @@ fn all_hook_choices_install_only_selected_harnesses_and_merge_both_guides() {
                 assert!(text.contains("using your Bash or shell execution tool"));
                 assert!(text.contains("`command -v codegraph`"));
                 assert!(!text.contains("Old guidance."));
-                for tool in ["context", "impact", "architecture", "quality"] {
-                    assert!(text.contains(&format!("codegraph agent {tool}")));
+                for tool in ["find_nodes_by_name", "get_reverse_dependencies"] {
+                    assert!(text.contains(&format!("codegraph tool run {tool}")));
                 }
                 text
             })

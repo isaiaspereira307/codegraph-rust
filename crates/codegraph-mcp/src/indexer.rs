@@ -15,10 +15,6 @@ use codegraph_graph::{
     edge::CodeEdge,
 };
 use codegraph_parser::TreeSitterParser;
-#[cfg(feature = "embeddings")]
-use codegraph_vector::prep::chunker::ChunkPlan;
-#[cfg(feature = "ai-enhanced")]
-use futures::{StreamExt, stream};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use num_cpus;
 use rayon::prelude::*;
@@ -240,47 +236,11 @@ pub struct ProjectIndexer {
     policies: crate::policy::InferencePolicies,
     startup_ms: u64,
     lsp_support: TokioMutex<Option<String>>,
-    #[cfg(feature = "embeddings")]
-    cpu_pool: Arc<rayon::ThreadPool>,
-    #[cfg(feature = "embeddings")]
-    embedder: Option<codegraph_vector::EmbeddingGenerator>,
 }
 
 use crate::writer::SurrealWriterHandle;
 
 impl ProjectIndexer {
-    #[cfg(feature = "ai-enhanced")]
-    async fn compute_node_degrees(&self) -> Result<std::collections::HashMap<NodeId, i32>> {
-        // Lightweight degree map using already-enqueued edges would require DB reads; to keep indexing fast
-        // and avoid extra I/O, return empty map for now (degrees default to 0 in tie-breaks).
-        Ok(std::collections::HashMap::new())
-    }
-    #[cfg(feature = "ai-enhanced")]
-    fn symbol_embedding_batch_settings(&self) -> (usize, usize) {
-        let config_batch = self
-            .config
-            .symbol_batch_size
-            .unwrap_or(self.config.batch_size);
-        let config_concurrent = self
-            .config
-            .symbol_max_concurrent
-            .unwrap_or_else(|| self.config.max_concurrent.max(2));
-
-        let batch_size = std::env::var("CODEGRAPH_SYMBOL_BATCH_SIZE")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(config_batch)
-            .max(1);
-
-        let max_concurrent = std::env::var("CODEGRAPH_SYMBOL_MAX_CONCURRENT")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(config_concurrent)
-            .clamp(1, 32);
-
-        (batch_size, max_concurrent)
-    }
-
     async fn validate_analyzer_tools(
         languages: &[codegraph_core::Language],
         settings: AnalyzerSettings,
@@ -352,12 +312,6 @@ impl ProjectIndexer {
                 .filter(|threads| *threads > 0)
                 .or(env_workers)
                 .unwrap_or(config.workers);
-            #[cfg(feature = "embeddings")]
-            let cpu_pool = Arc::new(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(requested.max(1).min(available.max(1)))
-                    .build()?,
-            );
 
             // Environment defaults are resolved by ConfigManager. Keep the caller's
             // batch authoritative and pass the same value into every provider.
@@ -378,141 +332,13 @@ impl ProjectIndexer {
             let organization_id = std::env::var("CODEGRAPH_ORGANIZATION_ID").ok();
             let repository_url = std::env::var("CODEGRAPH_REPOSITORY_URL").ok();
             let domain = std::env::var("CODEGRAPH_DOMAIN").ok();
-            #[cfg(feature = "embeddings")]
-            let embedder = if policies.needs_provider() {
-                let embedder = {
-                    use codegraph_vector::EmbeddingGenerator;
-                    // Use global config for embedding provider
-                    let provider = global_config.embedding.provider.to_lowercase();
-                    if provider == "local" {
-                        #[cfg(feature = "embeddings-local")]
-                        {
-                            use codegraph_vector::embeddings::generator::{
-                                AdvancedEmbeddingGenerator, EmbeddingEngineConfig,
-                                LocalDeviceTypeCompat, LocalEmbeddingConfigCompat,
-                                LocalPoolingCompat,
-                            };
-                            let mut cfg = EmbeddingEngineConfig {
-                                prefer_local_first: true,
-                                batch_size: config.batch_size,
-                                ..Default::default()
-                            };
-                            let device = match config
-                                .device
-                                .as_deref()
-                                .unwrap_or("")
-                                .to_lowercase()
-                                .as_str()
-                            {
-                                "metal" => LocalDeviceTypeCompat::Metal,
-                                d if d.starts_with("cuda:") => {
-                                    let id =
-                                        d.trim_start_matches("cuda:").parse::<usize>().unwrap_or(0);
-                                    LocalDeviceTypeCompat::Cuda(id)
-                                }
-                                _ => LocalDeviceTypeCompat::Cpu,
-                            };
-                            let model_name =
-                                global_config.embedding.model.clone().unwrap_or_else(|| {
-                                    "sentence-transformers/all-MiniLM-L6-v2".to_string()
-                                });
-                            cfg.local = Some(LocalEmbeddingConfigCompat {
-                                model_name,
-                                device,
-                                cache_dir: None,
-                                max_sequence_length: config.max_seq_len.max(32),
-                                pooling_strategy: LocalPoolingCompat::Mean,
-                            });
-                            // Try to construct advanced engine; fall back to simple generator on error
-                            match AdvancedEmbeddingGenerator::new(cfg).await {
-                                Ok(engine) => {
-                                    if !engine.has_provider() {
-                                        return Err(anyhow::anyhow!(
-                                            "Local embedding provider constructed without a backend. Ensure the model is BERT-compatible with safetensors and try --device metal or --device cpu"
-                                        ));
-                                    }
-                                    let mut g = EmbeddingGenerator::default();
-                                    g.set_advanced_engine(std::sync::Arc::new(engine));
-                                    tracing::info!(
-                                        target: "codegraph_mcp::indexer",
-                                        "Active embeddings: Local (device: {}, max_seq_len: {}, batch_size: {})",
-                                        config.device.as_deref().unwrap_or("cpu"),
-                                        config.max_seq_len,
-                                        config.batch_size
-                                    );
-                                    g
-                                }
-                                Err(e) => {
-                                    return Err(anyhow::anyhow!(
-                                        "Failed to initialize local embedding provider: {}",
-                                        e
-                                    ));
-                                }
-                            }
-                        }
-                        #[cfg(not(feature = "embeddings-local"))]
-                        {
-                            tracing::warn!(
-                                target: "codegraph_mcp::indexer",
-                                "CODEGRAPH_EMBEDDING_PROVIDER=local requested but the 'embeddings-local' feature is not enabled; using auto provider"
-                            );
-                            let g = EmbeddingGenerator::with_auto_from_env().await?;
-                            // Set batch_size and max_concurrent for Jina provider if applicable
-                            #[cfg(feature = "embeddings-jina")]
-                            {
-                                g.set_jina_batch_size(config.batch_size);
-                                g.set_jina_max_concurrent(config.max_concurrent);
-                            }
-                            g
-                        }
-                    } else {
-                        #[allow(unused_mut)]
-                        let mut g = EmbeddingGenerator::with_config(&global_config).await?;
-                        // Set batch_size and max_concurrent for Jina provider if applicable
-                        #[cfg(feature = "embeddings-jina")]
-                        {
-                            g.set_jina_batch_size(config.batch_size);
-                            g.set_jina_max_concurrent(config.max_concurrent);
-                        }
-                        tracing::info!(
-                            target: "codegraph_mcp::indexer",
-                            "Active embeddings: {} (batch_size: {}, max_concurrent: {})",
-                            global_config.embedding.provider,
-                            config.batch_size,
-                            config.max_concurrent
-                        );
-                        g
-                    }
-                };
-                if !embedder.has_provider() {
-                    return Err(anyhow!(
-                        "No embedding backend initialized for provider {}. Configure a supported provider or set both inference policies to off/deferred.",
-                        global_config.embedding.provider
-                    ));
-                }
-                Some(embedder)
-            } else {
-                None
-            };
             let embedding_model_name = global_config
                 .embedding
                 .model
                 .clone()
                 .unwrap_or_else(|| "jina-embeddings-v4".to_string());
 
-            let embedder_dimension = {
-                #[cfg(feature = "embeddings")]
-                {
-                    embedder
-                        .as_ref()
-                        .map(|embedder| embedder.dimension())
-                        .unwrap_or(global_config.embedding.dimension)
-                }
-                #[cfg(not(feature = "embeddings"))]
-                {
-                    config.vector_dimension
-                }
-            };
+            let embedder_dimension = config.vector_dimension;
 
             let env_vector_dim = std::env::var("CODEGRAPH_EMBEDDING_DIMENSION")
                 .ok()
@@ -550,35 +376,6 @@ impl ProjectIndexer {
                 )
                 .await?;
             }
-            #[cfg(feature = "embeddings")]
-            let embedder = if let Some(mut embedder) = embedder {
-                let mut identity = serde_json::to_value(&global_config.embedding)?;
-                identity.as_object_mut().unwrap().remove("openai_api_key");
-                identity.as_object_mut().unwrap().remove("jina_api_key");
-                identity.as_object_mut().unwrap().insert(
-                    "active_model".into(),
-                    serde_json::json!(embedding_model_name),
-                );
-                identity.as_object_mut().unwrap().insert(
-                    "runtime".into(),
-                    serde_json::json!([
-                        std::env::var("CODEGRAPH_LOCAL_DTYPE").unwrap_or_default(),
-                        std::env::var("CODEGRAPH_ONNX_MODEL_FILE").unwrap_or_default(),
-                        std::env::var("CODEGRAPH_ONNX_EP").unwrap_or_default(),
-                        std::env::var("CODEGRAPH_COREML_LOW_PRECISION").unwrap_or_default(),
-                    ]),
-                );
-                embedder.configure_index_cache(
-                    project_root.join(".codegraph/index-cache"),
-                    &identity,
-                    vector_dim,
-                    &global_config.embedding.provider,
-                    config.batch_size,
-                )?;
-                Some(embedder)
-            } else {
-                None
-            };
             Ok(Self {
                 config,
                 global_config: global_config.clone(),
@@ -599,10 +396,6 @@ impl ProjectIndexer {
                 policies,
                 startup_ms: startup.elapsed().as_millis() as u64,
                 lsp_support: TokioMutex::new(None),
-                #[cfg(feature = "embeddings")]
-                cpu_pool,
-                #[cfg(feature = "embeddings")]
-                embedder,
             })
         })
     }
@@ -663,12 +456,6 @@ impl ProjectIndexer {
                 .as_ref()
                 .map(|writer| writer.metrics())
                 .unwrap_or_default();
-            #[cfg(feature = "embeddings")]
-            let inference_before = self
-                .embedder
-                .as_ref()
-                .map(|embedder| embedder.inference_stats())
-                .unwrap_or_default();
             info!("Starting project indexing: {:?}", path);
             self.log_surrealdb_status("pre-parse");
 
@@ -702,13 +489,6 @@ impl ProjectIndexer {
             })
             .await??;
             let mut embedding_config = serde_json::to_value(&self.global_config.embedding)?;
-            #[cfg(feature = "embeddings")]
-            if let Some(embedder) = &self.embedder {
-                embedding_config.as_object_mut().unwrap().insert(
-                    "input_policy".into(),
-                    serde_json::json!(embedder.input_identity()?),
-                );
-            }
             embedding_config
                 .as_object_mut()
                 .unwrap()
@@ -802,8 +582,8 @@ impl ProjectIndexer {
                         &policy,
                         self.policies.enabled_identity(),
                         self.config.max_seq_len,
-                        cfg!(feature = "embeddings"),
-                        cfg!(feature = "ai-enhanced"),
+                        false,
+                        false,
                     ))
                 };
             let mut input_fingerprint = make_fingerprint(&external_support)?;
@@ -1388,70 +1168,9 @@ impl ProjectIndexer {
             let total_nodes_extracted = nodes.len();
             let total_edges_extracted = edges.len();
 
-            // Build chunk plan early so we can annotate nodes with chunk counts before persistence
-            #[cfg(feature = "embeddings")]
-            let chunk_plan: ChunkPlan = if self.policies.embeddings
-                == crate::policy::StagePolicy::Sync
-            {
-                let start = std::time::Instant::now();
-                // Spinner to show chunking progress (Rayon internal; no granular ticks available)
-                let chunk_pb = self.progress.add(ProgressBar::new_spinner());
-                chunk_pb.set_style(
-                    ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
-                        .unwrap()
-                        .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
-                );
-                chunk_pb.set_message("🧩 Building chunk plan (chunking nodes)");
-                chunk_pb.enable_steady_tick(std::time::Duration::from_millis(120));
-
-                let chunker = || {
-                    self.embedder
-                        .as_ref()
-                        .expect("sync provider initialized")
-                        .chunk_nodes_with_source_lookup(&nodes, |file| {
-                            source_snapshots
-                                .get(file)
-                                .and_then(|snapshot| snapshot.contents().ok())
-                        })
-                };
-                let plan = self.cpu_pool.install(chunker)?;
-                let elapsed = start.elapsed();
-                self.finish_bar(
-                    chunk_pb,
-                    format!(
-                        "🧩 Chunk plan built: {} nodes → {} chunks in {:.1?}",
-                        plan.stats.total_nodes, plan.stats.total_chunks, elapsed
-                    ),
-                )?;
-                if plan.stats.total_chunks == 0 && !nodes.is_empty() {
-                    warn!(
-                        "Chunking produced zero chunks. Check CODEGRAPH_EMBEDDING_SKIP_CHUNKING, embedding provider availability, and model max_tokens settings."
-                    );
-                }
-                plan
-            } else {
-                ChunkPlan::empty()
-            };
-            #[cfg(not(feature = "embeddings"))]
             {
                 info!("⚠️ Embeddings feature disabled at compile time; chunking skipped");
                 let _chunk_plan: Option<()> = None;
-            }
-
-            #[cfg(feature = "embeddings")]
-            {
-                let mut node_chunk_counts: std::collections::HashMap<usize, usize> =
-                    std::collections::HashMap::new();
-                for meta in &chunk_plan.metas {
-                    *node_chunk_counts.entry(meta.node_index).or_insert(0) += 1;
-                }
-
-                for (idx, node) in nodes.iter_mut().enumerate() {
-                    let count = node_chunk_counts.get(&idx).cloned().unwrap_or(0);
-                    node.metadata
-                        .attributes
-                        .insert("chunk_count".to_string(), count.to_string());
-                }
             }
 
             phase_ms.insert(
@@ -1586,9 +1305,6 @@ impl ProjectIndexer {
             self.finish_bar(store_nodes_pb, "📈 Nodes stored")?;
             self.log_surreal_node_count(total_nodes_extracted).await;
 
-            #[cfg(feature = "embeddings")]
-            let total_chunks = chunk_plan.chunks.len() as u64;
-            #[cfg(not(feature = "embeddings"))]
             let total_chunks = 0u64;
             let embed_pb = self.create_batch_progress_bar(
                 total_chunks,
@@ -1607,9 +1323,6 @@ impl ProjectIndexer {
                 chunk_embedding_db_batch_size(batch)
             );
             #[allow(unused_mut)]
-            #[cfg(feature = "embeddings")]
-            let mut processed: u64 = 0;
-            #[cfg(not(feature = "embeddings"))]
             let processed: u64 = 0;
 
             // Enhanced embedding phase logging
@@ -1637,122 +1350,6 @@ impl ProjectIndexer {
                 persist_start.elapsed().as_millis() as u64,
             );
             let embedding_start = std::time::Instant::now();
-            // Embed chunks and persist chunk embeddings
-            #[cfg(feature = "embeddings")]
-            if self.policies.embeddings == crate::policy::StagePolicy::Sync {
-                use futures::stream::{self, StreamExt};
-                use std::sync::atomic::{AtomicU64, Ordering};
-
-                // Inference row limits are independent of the smaller database write batches.
-                let chunk_batch_size = batch.max(1);
-
-                let mut pending_chunks = Vec::new();
-                for (index, (chunk, meta)) in
-                    chunk_plan.chunks.iter().zip(&chunk_plan.metas).enumerate()
-                {
-                    let node = &nodes[meta.node_index];
-                    let id = ChunkEmbeddingRecord::identity(&node.id.to_string(), meta.chunk_index);
-                    let hash = fingerprint(&(
-                        &chunk.text,
-                        &embedding_config,
-                        &policy,
-                        &self.embedding_model,
-                        self.vector_dim,
-                        mutable_model_epoch,
-                    ))?;
-                    if previous
-                        .as_ref()
-                        .and_then(|state| state.chunk_hashes.get(&id))
-                        != Some(&hash)
-                    {
-                        pending_chunks.push(index);
-                    }
-                    next_catalog.chunks.insert(id.clone());
-                    next_catalog.chunk_hashes.insert(id, hash);
-                }
-                let reused_chunks = chunk_plan.chunks.len() - pending_chunks.len();
-                let chunk_batches =
-                    (0..pending_chunks.len())
-                        .step_by(chunk_batch_size)
-                        .map(|start| {
-                            let indices = &pending_chunks
-                                [start..(start + chunk_batch_size).min(pending_chunks.len())];
-                            (
-                                indices
-                                    .iter()
-                                    .map(|index| chunk_plan.chunks[*index].text.clone())
-                                    .collect::<Vec<_>>(),
-                                indices
-                                    .iter()
-                                    .map(|index| chunk_plan.metas[*index].clone())
-                                    .collect::<Vec<_>>(),
-                            )
-                        });
-
-                let processed_atomic = Arc::new(AtomicU64::new(0));
-                let max_concurrent = self.config.max_concurrent.max(1);
-                // DB batch size: prefer explicit env override, otherwise match embedding batch size
-                let chunk_db_batch = chunk_embedding_db_batch_size(batch);
-                let embedder = self.embedder.as_ref().expect("sync provider initialized");
-
-                let mut batch_stream =
-                    stream::iter(chunk_batches.map(|(texts, metas)| async move {
-                        let embs = embedder.embed_texts_batched(&texts).await;
-                        (texts, metas, embs)
-                    }))
-                    .buffer_unordered(max_concurrent);
-
-                while let Some((texts, metas, embs_result)) = batch_stream.next().await {
-                    let embs: Vec<Vec<f32>> = embs_result?;
-                    if embs.len() != metas.len() {
-                        return Err(anyhow!(
-                            "Chunk embedding cardinality mismatch: {} vectors for {} inputs",
-                            embs.len(),
-                            metas.len()
-                        ));
-                    }
-
-                    let mut records: Vec<ChunkEmbeddingRecord> = Vec::with_capacity(metas.len());
-                    for ((meta, text), emb) in metas.iter().zip(texts.iter()).zip(embs.iter()) {
-                        if let Some(node) = nodes.get(meta.node_index) {
-                            if emb.len() != self.vector_dim
-                                || emb.iter().any(|value| !value.is_finite())
-                            {
-                                return Err(anyhow!(
-                                    "Invalid chunk vector for {}: dimension {}, expected {}",
-                                    node.id,
-                                    emb.len(),
-                                    self.vector_dim
-                                ));
-                            }
-                            records.push(ChunkEmbeddingRecord::new(
-                                &node.id.to_string(),
-                                meta.chunk_index,
-                                text.clone(),
-                                emb,
-                                &self.embedding_model,
-                                self.embedding_column.column_name(),
-                                &self.project_id,
-                            ));
-                        }
-                    }
-
-                    next_catalog
-                        .chunks
-                        .extend(records.iter().map(|record| record.id.clone()));
-                    for batch in records.chunks(chunk_db_batch) {
-                        self.enqueue_chunk_embeddings(batch.to_vec()).await?;
-                    }
-
-                    let done = processed_atomic.fetch_add(metas.len() as u64, Ordering::Relaxed)
-                        + metas.len() as u64;
-                    embed_pb.set_position(done.min(total_chunks));
-                    chunk_store_pb.set_position(done.min(total_chunks));
-                }
-
-                processed = processed_atomic.load(Ordering::Relaxed) + reused_chunks as u64;
-            }
-            #[cfg(not(feature = "embeddings"))]
             let processed: u64 = 0;
             let embedding_rate = if total_chunks > 0 {
                 processed as f64 / total_chunks as f64 * 100.0
@@ -1779,20 +1376,6 @@ impl ProjectIndexer {
                 ),
             )?;
 
-            #[cfg(feature = "embeddings")]
-            {
-                // Ensure all chunk embeddings are flushed to SurrealDB before continuing
-                self.flush_surreal_writer().await?;
-                self.log_surreal_chunk_count(total_chunks as usize).await;
-            }
-
-            // Node embedding: keep pooled embedding as average of its chunks
-            #[cfg(feature = "embeddings")]
-            {
-                // For now, skip storing node-level embedding when chunking is enabled.
-                // Retrieval should use chunk embeddings directly.
-            }
-
             stats.embeddings = processed as usize;
 
             // Enhanced embedding completion statistics
@@ -1809,19 +1392,6 @@ impl ProjectIndexer {
             info!(
                 "   🔍 Capabilities unlocked: Vector search, semantic analysis, AI-powered tools"
             );
-
-            // CRITICAL FIX: Preserve working ONNX embedding session for AI semantic matching
-            // Original reset caused fresh embedder creation to fail with ONNX resource conflicts,
-            // falling back to random hash embeddings (0% AI effectiveness).
-            // Keeping the working ONNX session ensures real embeddings for AI semantic matching.
-            // Tradeoff: Slightly more memory usage during post-processing (acceptable on M4 Max).
-            #[cfg(feature = "embeddings")]
-            {
-                // self.embedder = codegraph_vector::EmbeddingGenerator::default();
-                tracing::info!(
-                    "🔧 Preserving working ONNX embedder session for AI semantic matching"
-                );
-            }
 
             tracing::info!(
                 target: "codegraph_mcp::indexer",
@@ -1890,111 +1460,6 @@ impl ProjectIndexer {
                 "resolution_exact_lexical".into(),
                 resolution_start.elapsed().as_millis() as u64,
             );
-            #[cfg(feature = "ai-enhanced")]
-            {
-                if self.policies.semantic == crate::policy::StagePolicy::Sync {
-                    let candidates_start = std::time::Instant::now();
-                    let limit = std::env::var("CODEGRAPH_SEMANTIC_CANDIDATES")
-                        .ok()
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(0);
-                    let mut candidates_by_target = HashMap::new();
-                    let mut candidate_symbols = HashMap::new();
-                    for (edge, target) in edges.iter().zip(&targets) {
-                        if target.is_some()
-                            || catalog.ambiguous(&edge.to)
-                            || Self::semantic_stop_symbol(&edge.to)
-                        {
-                            continue;
-                        }
-                        let candidates = candidates_by_target
-                            .entry(edge.to.clone())
-                            .or_insert_with(|| catalog.semantic_candidates(&edge.to, limit));
-                        for alias in candidates {
-                            candidate_symbols.insert(alias.clone(), symbol_map[alias]);
-                        }
-                    }
-                    let unresolved: Vec<_> = candidates_by_target
-                        .iter()
-                        .filter(|(_, candidates)| !candidates.is_empty())
-                        .map(|(target, _)| target.clone())
-                        .collect();
-                    phase_ms.insert(
-                        "resolution_semantic_candidates".into(),
-                        candidates_start.elapsed().as_millis() as u64,
-                    );
-                    if !unresolved.is_empty() {
-                        info!(
-                            "🧠 Relationship symbol embeddings starting: {} candidate names, {} unresolved names",
-                            candidate_symbols.len(),
-                            unresolved.len()
-                        );
-                        let symbol_embedding_start = std::time::Instant::now();
-                        let known = self
-                            .embed_symbol_texts(
-                                candidate_symbols.keys().cloned().collect(),
-                                &candidate_symbols,
-                            )
-                            .await?;
-                        let unknown = self.embed_symbol_texts(unresolved, &HashMap::new()).await?;
-                        info!(
-                            "🧠 Relationship symbol embeddings complete in {:?}",
-                            symbol_embedding_start.elapsed()
-                        );
-                        phase_ms.insert(
-                            "resolution_symbol_embeddings".into(),
-                            symbol_embedding_start.elapsed().as_millis() as u64,
-                        );
-                        info!(
-                            "🔎 Semantic scoring starting: {} unresolved names, {} candidate vectors, {} workers",
-                            unknown.len(),
-                            known.len(),
-                            self.cpu_pool.current_num_threads()
-                        );
-                        let scoring_start = std::time::Instant::now();
-                        let pool = Arc::clone(&self.cpu_pool);
-                        let scoring = tokio::task::spawn_blocking(move || {
-                            pool.install(|| {
-                                crate::semantic_scoring::resolve_targets(
-                                    &candidates_by_target,
-                                    &candidate_symbols,
-                                    &known,
-                                    &unknown,
-                                )
-                            })
-                        })
-                        .await
-                        .context("Semantic scoring task failed")?;
-                        let scoring_elapsed = scoring_start.elapsed();
-                        phase_ms.insert(
-                            "resolution_semantic_scoring".into(),
-                            scoring_elapsed.as_millis() as u64,
-                        );
-                        info!(
-                            "🔎 Semantic scoring complete: {} matches, {} comparisons, {} cached vector norms in {:?}",
-                            scoring.targets.len(),
-                            scoring.comparisons,
-                            scoring.vector_norms,
-                            scoring_elapsed
-                        );
-                        let semantic_targets = scoring.targets;
-                        for (index, (edge, target)) in edges.iter().zip(&mut targets).enumerate() {
-                            if target.is_none()
-                                && let Some((id, score)) = semantic_targets.get(&edge.to).copied()
-                            {
-                                *target = Some(id);
-                                resolution_provenance[index] = ("semantic", score as f64);
-                            }
-                        }
-                        let symbol_flush_start = std::time::Instant::now();
-                        self.flush_surreal_writer().await?;
-                        phase_ms.insert(
-                            "resolution_symbol_writes_flush".into(),
-                            symbol_flush_start.elapsed().as_millis() as u64,
-                        );
-                    }
-                }
-            }
             let edge_persistence_start = std::time::Instant::now();
             let resolved_count = targets.iter().filter(|target| target.is_some()).count();
             let mut resolved_edges = Vec::with_capacity(resolved_count);
@@ -2195,17 +1660,6 @@ impl ProjectIndexer {
                     },
                 )?;
             }
-            #[cfg(feature = "embeddings")]
-            {
-                let after = self
-                    .embedder
-                    .as_ref()
-                    .map(|embedder| embedder.inference_stats())
-                    .unwrap_or_default();
-                stats.embedding_cache_hits = after.0.saturating_sub(inference_before.0);
-                stats.inference_texts = after.1.saturating_sub(inference_before.1);
-                stats.inference_tokens = after.2.saturating_sub(inference_before.2);
-            }
             self.persist_project_metadata(&stats, stats.nodes, stats.edges, &input_fingerprint)
                 .await?;
             self.flush_surreal_writer().await?;
@@ -2291,57 +1745,6 @@ impl ProjectIndexer {
                 | "fmt"
                 | "str"
         )
-    }
-
-    #[cfg(feature = "ai-enhanced")]
-    async fn embed_symbol_texts(
-        &self,
-        mut texts: Vec<String>,
-        node_ids: &HashMap<String, NodeId>,
-    ) -> Result<HashMap<String, Vec<f32>>> {
-        texts.sort();
-        texts.dedup();
-        let (batch_size, concurrency) = self.symbol_embedding_batch_settings();
-        let mut results = HashMap::new();
-        let texts = &texts;
-        let mut batches = stream::iter((0..texts.len()).step_by(batch_size).map(
-            |start| async move {
-                let batch = &texts[start..(start + batch_size).min(texts.len())];
-                let vectors = self
-                    .embedder
-                    .as_ref()
-                    .expect("sync provider initialized")
-                    .embed_texts_batched(batch)
-                    .await?;
-                if vectors.len() != batch.len()
-                    || vectors.iter().any(|vector| {
-                        vector.len() != self.vector_dim
-                            || vector.iter().any(|value| !value.is_finite())
-                    })
-                {
-                    return Err(anyhow!(
-                        "Symbol provider returned invalid cardinality, dimensions or values"
-                    ));
-                }
-                Ok::<_, anyhow::Error>((batch, vectors))
-            },
-        ))
-        .buffer_unordered(concurrency);
-        while let Some(result) = batches.next().await {
-            let (batch, vectors) = result?;
-            let mut records = Vec::with_capacity(batch.len());
-            for (text, vector) in batch.iter().zip(vectors) {
-                records.push(self.build_symbol_embedding_record(
-                    text,
-                    node_ids.get(text).copied(),
-                    None,
-                    &vector,
-                ));
-                results.insert(text.clone(), vector);
-            }
-            self.persist_symbol_embedding_records(records).await?;
-        }
-        Ok(results)
     }
 
     async fn index_file(
@@ -2851,36 +2254,6 @@ impl ProjectIndexer {
 
     pub async fn surreal_storage(&self) -> Arc<TokioMutex<SurrealDbStorage>> {
         Arc::clone(&self.surreal)
-    }
-
-    #[cfg(feature = "embeddings")]
-    async fn log_surreal_chunk_count(&self, expected: usize) {
-        let db = {
-            let storage = self.surreal.lock().await;
-            storage.db()
-        };
-
-        match db
-            .query("SELECT count() AS count FROM chunks WHERE project_id = $project_id GROUP ALL;")
-            .bind(("project_id", self.project_id.clone()))
-            .await
-        {
-            Ok(mut resp) => match resp.take::<Vec<JsonValue>>(0) {
-                Ok(rows) => match extract_count(rows) {
-                    Ok(count) => {
-                        info!(
-                            "🧩 SurrealDB chunks persisted: {} (expected ≈ {})",
-                            count, expected
-                        );
-                    }
-                    Err(e) => warn!("⚠️ Failed to interpret SurrealDB chunk count: {}", e),
-                },
-                Err(e) => warn!("⚠️ Failed to read SurrealDB chunk count: {}", e),
-            },
-            Err(e) => {
-                warn!("⚠️ SurrealDB chunk count query failed: {}", e);
-            }
-        }
     }
 
     #[cfg(test)]
@@ -3397,20 +2770,6 @@ impl ProjectIndexer {
         );
         pb.set_message(message.to_string());
         pb
-    }
-
-    #[cfg(feature = "embeddings")]
-    fn load_file_sources(
-        &self,
-        files: &Vec<(PathBuf, u64)>,
-    ) -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
-        for (p, _) in files {
-            if let Ok(content) = std::fs::read_to_string(p) {
-                map.insert(p.to_string_lossy().to_string(), content);
-            }
-        }
-        map
     }
 
     /// Create enhanced progress bar with dual metrics for files and success rates
@@ -3954,5 +3313,3 @@ struct FileStats {
     traits: usize,
     embeddings: usize,
 }
-#[cfg(feature = "embeddings")]
-use codegraph_vector::prep::chunker::ChunkMeta;

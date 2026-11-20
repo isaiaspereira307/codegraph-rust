@@ -19,15 +19,43 @@ impl GraphToolSchemas {
     /// Get all tool schemas for registration with LLM
     pub fn all() -> Vec<ToolSchema> {
         vec![
+            Self::find_nodes_by_name(),
             Self::get_transitive_dependencies(),
             Self::detect_circular_dependencies(),
             Self::trace_call_chain(),
             Self::calculate_coupling_metrics(),
             Self::get_hub_nodes(),
             Self::get_reverse_dependencies(),
-            Self::semantic_code_search(),
             Self::find_complexity_hotspots(),
         ]
+    }
+
+    /// Schema for find_nodes_by_name function (entrypoint for obtaining node IDs)
+    pub fn find_nodes_by_name() -> ToolSchema {
+        ToolSchema {
+            name: "find_nodes_by_name".to_string(),
+            description: "Find code nodes whose name contains the given text. \
+                   Returns node IDs, names, kinds and file locations. \
+                   Use this first to obtain the node_id required by the other graph tools."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Symbol name or fragment to search for (e.g., 'parse_file', 'Config')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (1-50, defaults to 10)",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "default": 10
+                    }
+                },
+                "required": ["name"]
+            }),
+        }
     }
 
     /// Schema for get_transitive_dependencies function
@@ -189,40 +217,6 @@ impl GraphToolSchemas {
     }
     }
 
-    /// Schema for semantic_code_search function (agentic entrypoint)
-    pub fn semantic_code_search() -> ToolSchema {
-        ToolSchema {
-            name: "semantic_code_search".to_string(),
-            description: "Primary code discovery tool using advanced hybrid search with graph-traversal. \
-                   Accepts natural language queries ((e.g., How is authentication handled?, database models, error handling code etc.) be robust in your queries). \
-                   Works for both conceptual searches and specific identifiers. \
-                   Returns relevant code snippets, definitions, and related nodes ranked by relevance. Best practice: start with a low threshold (e.g., 0.2–0.4) and raise it in follow-up queries to narrow scope.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language search query (e.g., 'authentication logic', 'error handling')."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results (1-50, defaults to 10)",
-                        "minimum": 1,
-                        "maximum": 50,
-                        "default": 10
-                    },
-                    "threshold": {
-                        "type": "number",
-                        "description": "Similarity threshold 0.0–1.0 (optional, defaults to env CODEGRAPH_SEMSEARCH_THRESHOLD or 0.6)",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    }
-                },
-                "required": ["query"]
-            }),
-        }
-    }
-
     /// Schema for find_complexity_hotspots function
     pub fn find_complexity_hotspots() -> ToolSchema {
         ToolSchema {
@@ -300,13 +294,13 @@ mod tests {
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
         assert_eq!(names.len(), 8);
+        assert!(names.contains(&"find_nodes_by_name".to_string()));
         assert!(names.contains(&"get_transitive_dependencies".to_string()));
         assert!(names.contains(&"detect_circular_dependencies".to_string()));
         assert!(names.contains(&"trace_call_chain".to_string()));
         assert!(names.contains(&"calculate_coupling_metrics".to_string()));
         assert!(names.contains(&"get_hub_nodes".to_string()));
         assert!(names.contains(&"get_reverse_dependencies".to_string()));
-        assert!(names.contains(&"semantic_code_search".to_string()));
         assert!(names.contains(&"find_complexity_hotspots".to_string()));
     }
 

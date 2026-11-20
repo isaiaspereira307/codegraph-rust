@@ -43,14 +43,8 @@ pub struct InferencePolicies {
 impl InferencePolicies {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
-            embeddings: StagePolicy::from_env(
-                "CODEGRAPH_EMBEDDING_POLICY",
-                cfg!(feature = "embeddings"),
-            )?,
-            semantic: StagePolicy::from_env(
-                "CODEGRAPH_SEMANTIC_RESOLUTION",
-                cfg!(feature = "ai-enhanced"),
-            )?,
+            embeddings: StagePolicy::from_env("CODEGRAPH_EMBEDDING_POLICY", false)?,
+            semantic: StagePolicy::from_env("CODEGRAPH_SEMANTIC_RESOLUTION", false)?,
         })
     }
     pub fn enabled_identity(self) -> (bool, bool) {
@@ -104,11 +98,8 @@ pub fn completion_policies(root: &Path, project: &str) -> Result<InferencePolici
         .get(project)
         .ok_or_else(|| anyhow::anyhow!("No pending indexing job for this project"))?;
     let policies = job.policies.finish();
-    if !cfg!(feature = "embeddings") && policies.embeddings == StagePolicy::Sync {
-        bail!("Completing this job requires the embeddings feature");
-    }
-    if !cfg!(feature = "ai-enhanced") && policies.semantic == StagePolicy::Sync {
-        bail!("Completing this job requires ai-enhanced");
+    if policies.embeddings == StagePolicy::Sync || policies.semantic == StagePolicy::Sync {
+        bail!("Completing this job requires inference, which this build does not include");
     }
     Ok(policies)
 }

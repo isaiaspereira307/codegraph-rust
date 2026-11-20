@@ -6,7 +6,7 @@ pub mod indexer;
 pub mod policy;
 mod reconciliation;
 mod resolution;
-#[cfg(any(test, feature = "ai-enhanced"))]
+#[cfg(test)]
 mod semantic_scoring;
 pub mod transport;
 pub mod utils;
@@ -23,8 +23,6 @@ pub use codegraph_mcp_core::{
     protocol::*,
     version::*,
 };
-#[cfg(feature = "embeddings")]
-pub use codegraph_mcp_tools::{CacheStats, GraphToolExecutor, GraphToolSchemas, ToolSchema};
 pub use connection::*;
 pub use estimation::{
     EmbeddingThroughputConfig, RepositoryEstimate, RepositoryEstimator, TimeEstimates,

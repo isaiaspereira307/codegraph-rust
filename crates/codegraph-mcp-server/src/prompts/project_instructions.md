@@ -4,31 +4,25 @@ CodeGraph is a CLI tool available through Bash as the `codegraph` command. Run t
 commands below using your Bash or shell execution tool. Check that CodeGraph is
 on PATH with `command -v codegraph`.
 
-When CodeGraph is available and the project is indexed, start code exploration
-with its CLI agent commands. Ask a specific question about the task, relevant
-symbols or paths instead of starting with broad grep/rg searches:
+When CodeGraph is available and the project is indexed, use its graph tools for
+structural questions (who calls this, what depends on it, what is risky) before
+broad grep/rg searches:
 
-- `codegraph agent context "Find the implementation and callers for <task>" --focus search`
-  locates code; use `--focus builder` to gather implementation context or `question`
-  to explain behavior.
-- `codegraph agent impact "What depends on <symbol> and what would <change> affect?"`
-  checks dependencies before editing; `--focus call_chain` follows call flows.
-- `codegraph agent architecture "Describe <area> and its interfaces"`
-  maps structure; `--focus api_surface` inspects public interfaces.
-- `codegraph agent quality "Assess coupling, complexity and risks in <area>"`
-  supports refactoring decisions and targeted follow-up checks.
+- `codegraph tool run find_nodes_by_name --params '{"name": "<symbol>"}'`
+  resolves a symbol to node IDs and file locations.
+- `codegraph tool run get_reverse_dependencies --params '{"node_id": "<id>", "edge_type": "Calls"}'`
+  shows what a change to that node would affect; check it before editing.
+- `codegraph tool run trace_call_chain --params '{"from_node": "<id>"}'`
+  follows call flows from a function.
+- `codegraph tool run find_complexity_hotspots` and `get_hub_nodes`
+  point at risky or central code for review and refactoring.
 
 Run from the indexed project root, or append `--project /path/to/project`; retain
-the indexed `--project-id` if one was configured. Prefer the default JSON output:
-inspect source locations, findings and partial-result warnings, then read the
-specific files/lines before editing. Reuse useful findings and narrow follow-up
-questions rather than repeating broad queries. After changes, verify against
-current source and run relevant tests; the index may lag uncommitted work.
+the indexed `--project-id` if one was configured. Read the specific files/lines a
+result points to before editing. After changes, verify against current source and
+run relevant tests; the index may lag uncommitted work.
 
-If CodeGraph is unavailable, the project is not indexed, a command fails or returns
-insufficient evidence, fall back to targeted source reads and rg/grep. Known file
-locations and exact-string verification also warrant direct reads/searches.
-Do not install CodeGraph, download models or reindex solely to satisfy these
-instructions. Agent queries use the configured model and may incur provider costs.
-Use the four public agent commands; internal graph tools belong to CodeGraph's
-built-in agents. Reload usage details with `codegraph agent instructions`.
+If CodeGraph is unavailable, the project is not indexed, or a command fails or returns
+insufficient evidence, fall back to targeted source reads and rg/grep. Do not install
+CodeGraph or reindex solely to satisfy these instructions. List all tools with
+`codegraph tool list`; reload usage details with `codegraph tool instructions`.

@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"format":1,"profile":if cfg!(debug_assertions){"debug"}else{"release"},"files":files,"repeats":repeats,"features":{"embeddings":cfg!(feature="embeddings"),"ai_enhanced":cfg!(feature="ai-enhanced")},"analyzers_env":std::env::var("CODEGRAPH_ANALYZERS").unwrap_or_default(),"samples":samples})
+            &json!({"format":1,"profile":if cfg!(debug_assertions){"debug"}else{"release"},"files":files,"repeats":repeats,"features":{"embeddings":false,"ai_enhanced":false},"analyzers_env":std::env::var("CODEGRAPH_ANALYZERS").unwrap_or_default(),"samples":samples})
         )?
     );
     Ok(())

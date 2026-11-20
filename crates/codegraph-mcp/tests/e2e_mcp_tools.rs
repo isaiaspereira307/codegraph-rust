@@ -2,8 +2,7 @@
 // ABOUTME: Validates tool behavior via an rmcp client against a real server process.
 /// E2E Tests for CodeGraph MCP Server Tools
 ///
-/// Tests consolidated MCP tools against the indexed Rust codebase
-/// using the official rmcp client library for authentic protocol testing.
+/// Tests the graph tool surface using the official rmcp client library.
 use anyhow::{Result, anyhow};
 use rmcp::{RoleClient, ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
 use serde_json::Value;
@@ -94,12 +93,18 @@ fn ensure_codegraph_bin() -> PathBuf {
         .clone()
 }
 
-/// Start CodeGraph MCP server as a child process for testing
-async fn start_mcp_server() -> Result<rmcp::service::RunningService<RoleClient, ()>> {
+/// Start CodeGraph MCP server as a child process in an empty project directory, so the
+/// lazily opened store never touches the workspace.
+async fn start_mcp_server_in(
+    project: &std::path::Path,
+) -> Result<rmcp::service::RunningService<RoleClient, ()>> {
     let codegraph_bin = ensure_codegraph_bin();
 
     let mut cmd = TokioCommand::new(codegraph_bin);
     cmd.args(["start", "stdio"])
+        .current_dir(project)
+        .env_remove("CODEGRAPH_SURREALDB_URL")
+        .env_remove("CODEGRAPH_PROJECT_ID")
         .env("RUST_LOG", "error") // Minimize log noise during testing
         .env("CODEGRAPH_DEBUG", "0"); // Force-disable debug log files in tests
 
@@ -111,41 +116,10 @@ async fn start_mcp_server() -> Result<rmcp::service::RunningService<RoleClient, 
     Ok(service)
 }
 
-async fn assert_agentic_tool_is_disabled(
-    service: &rmcp::service::RunningService<RoleClient, ()>,
-    tool_name: &str,
-    args: Value,
-    timeout_duration: Duration,
-) -> Result<()> {
-    let arguments = args
-        .as_object()
-        .ok_or_else(|| anyhow!("Expected object arguments for '{}'", tool_name))?
-        .clone();
-
-    let result = timeout(
-        timeout_duration,
-        service
-            .call_tool(CallToolRequestParams::new(tool_name.to_string()).with_arguments(arguments)),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(_response)) => Err(anyhow!(
-            "Expected '{}' to be disabled without the 'ai-enhanced' server feature",
-            tool_name
-        )),
-        Ok(Err(e)) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("ai-enhanced"),
-                "Unexpected error for '{}': {}",
-                tool_name,
-                msg
-            );
-            Ok(())
-        }
-        Err(_) => Err(anyhow!("Timed out calling '{}'", tool_name)),
-    }
+async fn start_mcp_server() -> Result<rmcp::service::RunningService<RoleClient, ()>> {
+    let project = std::env::temp_dir().join(format!("codegraph-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&project)?;
+    start_mcp_server_in(&project).await
 }
 
 #[tokio::test]
@@ -153,35 +127,33 @@ async fn test_tool_discovery() -> Result<()> {
     println!("🔍 Testing MCP tool discovery...");
 
     let service = start_mcp_server().await?;
-
-    // Test that the consolidated tool surface is discoverable
     let tools = service.list_tools(Default::default()).await?;
 
-    let expected_tools = vec![
-        "agentic_context",
-        "agentic_impact",
-        "agentic_architecture",
-        "agentic_quality",
+    let mut discovered: Vec<String> = tools
+        .tools
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    discovered.sort();
+    let mut expected = vec![
+        "calculate_coupling_metrics",
+        "detect_circular_dependencies",
+        "find_complexity_hotspots",
+        "find_nodes_by_name",
+        "get_hub_nodes",
+        "get_reverse_dependencies",
+        "get_transitive_dependencies",
+        "trace_call_chain",
     ];
+    expected.sort();
+    assert_eq!(discovered, expected);
 
-    println!("📋 Discovered {} tools", tools.tools.len());
-
-    for expected_tool in &expected_tools {
-        let found = tools.tools.iter().any(|tool| tool.name == *expected_tool);
-        assert!(
-            found,
-            "Tool '{}' not found in discovered tools",
-            expected_tool
-        );
-        println!("✅ Tool '{}' discovered", expected_tool);
-    }
-
-    // Verify no unwanted tools are present
     for tool in &tools.tools {
-        let tool_name: &str = tool.name.as_ref();
-        if !expected_tools.contains(&tool_name) {
-            panic!("❌ Unexpected tool found: {}", tool.name);
-        }
+        assert!(
+            tool.input_schema.get("properties").is_some(),
+            "Tool '{}' must publish a parameter schema",
+            tool.name
+        );
     }
 
     service.cancel().await?;
@@ -190,226 +162,35 @@ async fn test_tool_discovery() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_agentic_context_focus_search_is_gated_without_ai_enhanced() -> Result<()> {
-    println!("🔍 Testing agentic_context (focus=search) gating...");
+async fn test_graph_tool_runs_against_an_empty_project() -> Result<()> {
+    println!("🧪 Testing a graph tool call against an unindexed project...");
 
-    let service = start_mcp_server().await?;
+    let project = tempfile::tempdir()?;
+    let service = start_mcp_server_in(project.path()).await?;
     let config = TestConfig::default();
 
-    let test_cases = vec![
-        (
-            "async function",
-            "Should find async functions in the codebase",
-        ),
-        ("trait implementation", "Should find trait impls"),
-        ("error handling", "Should find Result and Error patterns"),
-        ("MCP tool", "Should find tool definitions"),
-    ];
-
-    for (query, description) in test_cases {
-        println!("🧪 Testing query: '{}' - {}", query, description);
-        assert_agentic_tool_is_disabled(
-            &service,
-            "agentic_context",
-            json!({"query": query, "limit": 1, "focus": "search"}),
-            config.tool_timeout,
-        )
-        .await?;
-    }
-
-    service.cancel().await?;
-    println!("🎉 Agentic context (focus=search) gating test passed!");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_agentic_context_basic_is_gated_without_ai_enhanced() -> Result<()> {
-    println!("🔍 Testing agentic_context gating (basic args)...");
-
-    let service = start_mcp_server().await?;
-    let config = TestConfig::default();
-
-    let test_cases = vec![
-        (json!({"query": "async fn", "limit": 1}), "Basic query"),
-        (
-            json!({"query": "struct", "limit": 2}),
-            "Basic query with limit",
-        ),
-        (
-            json!({"query": "error handling", "limit": 1, "focus": "builder"}),
-            "Optional focus parameter",
-        ),
-    ];
-
-    for (params, description) in test_cases {
-        println!("🧪 Testing: {}", description);
-        assert_agentic_tool_is_disabled(&service, "agentic_context", params, config.tool_timeout)
-            .await?;
-    }
-
-    service.cancel().await?;
-    println!("🎉 Agentic context gating (basic args) test passed!");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_agentic_context_focus_question_is_gated_without_ai_enhanced() -> Result<()> {
-    println!("🧠 Testing agentic_context (focus=question) gating...");
-
-    let service = start_mcp_server().await?;
-    let config = TestConfig::default();
-
-    let test_cases = vec![
-        (
-            json!({
-                "query": "Explain the MCP server architecture",
-                "limit": 1,
-                "focus": "question"
-            }),
-            "MCP server architecture question",
-        ),
-        (
-            json!({
-                "query": "How does the semantic analysis work?",
-                "limit": 1,
-                "focus": "question"
-            }),
-            "Semantic analysis explanation",
-        ),
-        (
-            json!({
-                "query": "Describe the parser pipeline",
-                "limit": 1,
-                "focus": "question"
-            }),
-            "Parser pipeline analysis",
-        ),
-    ];
-
-    for (params, description) in test_cases {
-        println!("🧪 Testing: {}", description);
-        assert_agentic_tool_is_disabled(&service, "agentic_context", params, config.tool_timeout)
-            .await?;
-    }
-
-    service.cancel().await?;
-    println!("🎉 Agentic context (focus=question) gating test passed!");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_agentic_impact_focus_dependencies_is_gated_without_ai_enhanced() -> Result<()> {
-    println!("⚡ Testing agentic_impact (focus=dependencies) gating...");
-
-    let service = start_mcp_server().await?;
-    let config = TestConfig::default();
-
-    let test_cases = vec![
-        (
-            json!({
-                "query": "CodeGraphMCPServer",
-                "limit": 1,
-                "focus": "dependencies"
-            }),
-            "MCP server dependency impact",
-        ),
-        (
-            json!({
-                "query": "agentic_context",
-                "limit": 1,
-                "focus": "dependencies"
-            }),
-            "Tool impact analysis",
-        ),
-    ];
-
-    for (params, description) in test_cases {
-        println!("🧪 Testing: {}", description);
-        assert_agentic_tool_is_disabled(&service, "agentic_impact", params, config.tool_timeout)
-            .await?;
-    }
-
-    service.cancel().await?;
-    println!("🎉 Agentic impact (focus=dependencies) gating test passed!");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_pattern_detection() -> Result<()> {
-    println!("🎯 Testing agentic_quality (focus=hotspots) gating...");
-
-    let service = start_mcp_server().await?;
-    let config = TestConfig::default();
-
-    assert_agentic_tool_is_disabled(
-        &service,
-        "agentic_quality",
-        json!({"query": "quality hotspots", "limit": 1, "focus": "hotspots"}),
+    let response = timeout(
         config.tool_timeout,
+        service.call_tool(
+            CallToolRequestParams::new("find_nodes_by_name")
+                .with_arguments(json!({"name": "main"}).as_object().unwrap().clone()),
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| anyhow!("Timed out calling find_nodes_by_name"))??;
+
+    assert_ne!(response.is_error, Some(true), "{response:?}");
+    let text = response
+        .content
+        .iter()
+        .find_map(|block| block.as_text().map(|text| text.text.clone()))
+        .ok_or_else(|| anyhow!("Expected a text result"))?;
+    let result: Value = serde_json::from_str(&text)?;
+    assert_eq!(result["tool"], "find_nodes_by_name");
+    assert_eq!(result["result"], json!([]));
 
     service.cancel().await?;
-    println!("🎉 Agentic quality (focus=hotspots) gating test passed!");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_performance_metrics() -> Result<()> {
-    println!("📊 Testing agentic_quality (focus=coupling) gating...");
-
-    let service = start_mcp_server().await?;
-    let config = TestConfig::default();
-
-    assert_agentic_tool_is_disabled(
-        &service,
-        "agentic_quality",
-        json!({"query": "coupling metrics", "limit": 1, "focus": "coupling"}),
-        config.tool_timeout,
-    )
-    .await?;
-
-    service.cancel().await?;
-    println!("🎉 Agentic quality (focus=coupling) gating test passed!");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_workflow_integration() -> Result<()> {
-    println!("🔗 Testing tool workflow integration...");
-
-    let service = start_mcp_server().await?;
-    let config = TestConfig::default();
-
-    println!("🧪 Step 1: agentic_context");
-    assert_agentic_tool_is_disabled(
-        &service,
-        "agentic_context",
-        json!({"query": "pub struct", "limit": 1}),
-        config.tool_timeout,
-    )
-    .await?;
-
-    println!("🧪 Step 2: agentic_impact");
-    assert_agentic_tool_is_disabled(
-        &service,
-        "agentic_impact",
-        json!({"query": "CodeGraphMCPServer", "limit": 1}),
-        config.tool_timeout,
-    )
-    .await?;
-
-    println!("🧪 Step 3: agentic_architecture");
-    assert_agentic_tool_is_disabled(
-        &service,
-        "agentic_architecture",
-        json!({"query": "How are the MCP tools organized in the codebase?", "limit": 1}),
-        config.tool_timeout,
-    )
-    .await?;
-
-    service.cancel().await?;
-    println!("🎉 Workflow integration test passed!");
+    println!("🎉 Empty-project tool call test passed!");
     Ok(())
 }
 
@@ -423,10 +204,10 @@ async fn test_error_conditions() -> Result<()> {
     println!("🧪 Testing invalid parameters...");
     let result = service
         .call_tool(
-            CallToolRequestParams::new("agentic_context").with_arguments(
+            CallToolRequestParams::new("find_nodes_by_name").with_arguments(
                 json!({
                     "invalid_param": "test"
-                    // Missing required "query" parameter
+                    // Missing required "name" parameter
                 })
                 .as_object()
                 .unwrap()
@@ -448,7 +229,7 @@ async fn test_error_conditions() -> Result<()> {
         Err(e) => {
             let msg = e.to_string();
             assert!(
-                msg.contains("query") || msg.contains("Invalid") || msg.contains("invalid"),
+                msg.contains("name") || msg.contains("Invalid") || msg.contains("invalid"),
                 "Unexpected error for invalid parameters: {}",
                 msg
             );
@@ -468,13 +249,13 @@ async fn test_error_conditions() -> Result<()> {
     assert!(result.is_err(), "Should error for non-existent tool");
     println!("✅ Properly rejected non-existent tool");
 
-    // Test 3: Invalid graph node UUID (when we add graph tools)
+    // Test 3: Invalid parameter types
     println!("🧪 Testing invalid parameter types...");
     let result = service
         .call_tool(
-            CallToolRequestParams::new("agentic_context").with_arguments(
+            CallToolRequestParams::new("find_nodes_by_name").with_arguments(
                 json!({
-                    "query": "type mismatch test",
+                    "name": "type mismatch test",
                     "limit": "not-a-number"
                 })
                 .as_object()
@@ -499,77 +280,6 @@ async fn test_error_conditions() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_rust_specific_patterns() -> Result<()> {
-    println!("🦀 Testing Rust-specific pattern recognition...");
-
-    let service = start_mcp_server().await?;
-    let config = TestConfig::default();
-
-    // Test Rust-specific queries that should work well with this codebase
-    let rust_queries = vec![
-        "ownership and borrowing",
-        "trait bounds and generics",
-        "async await patterns",
-        "error propagation with ?",
-        "macro definitions",
-        "unsafe blocks",
-    ];
-
-    for query in rust_queries {
-        println!("🧪 Testing Rust pattern: '{}'", query);
-        assert_agentic_tool_is_disabled(
-            &service,
-            "agentic_context",
-            json!({"query": query, "limit": 1, "focus": "search"}),
-            config.tool_timeout,
-        )
-        .await?;
-        println!("✅ Rust pattern query validated: {}", query);
-    }
-
-    service.cancel().await?;
-    println!("🎉 Rust-specific pattern test passed!");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_comprehensive_tool_suite() -> Result<()> {
-    println!("🎯 Testing consolidated tool surface comprehensively...");
-
-    let service = start_mcp_server().await?;
-    let config = TestConfig::default();
-
-    let tool_tests = vec![
-        (
-            "agentic_context",
-            json!({"query": "semantic analysis", "limit": 1}),
-        ),
-        (
-            "agentic_impact",
-            json!({"query": "codebase impact overview", "limit": 1}),
-        ),
-        (
-            "agentic_architecture",
-            json!({"query": "codebase architecture overview", "limit": 1}),
-        ),
-        (
-            "agentic_quality",
-            json!({"query": "quality hotspots", "limit": 1}),
-        ),
-    ];
-
-    for (tool_name, params) in tool_tests {
-        println!("🧪 Testing tool: {}", tool_name);
-        assert_agentic_tool_is_disabled(&service, tool_name, params, config.tool_timeout).await?;
-    }
-
-    service.cancel().await?;
-    println!("🎉 Consolidated tool surface test passed!");
-    Ok(())
-}
-
-/// Helper function to verify the server is responding
 #[tokio::test]
 async fn test_server_health() -> Result<()> {
     println!("🏥 Testing MCP server health and responsiveness...");

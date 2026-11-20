@@ -1,50 +1,44 @@
-# CodeGraph agentic CLI
+# CodeGraph graph CLI
 
 CodeGraph is a CLI tool available through Bash as the `codegraph` command. Run the
 commands below using your Bash or shell execution tool. Check that CodeGraph is
 on PATH with `command -v codegraph`.
 
-Use CodeGraph's built-in reasoning agents for code discovery, change impact,
-architecture, and quality questions. They gather evidence with internal graph tools
-and return synthesized answers with source locations. Call these public commands:
+CodeGraph answers structural questions about an indexed project from its code graph.
+Results are deterministic graph data (node IDs, names, kinds, file locations); no
+language model is involved and no provider costs apply.
 
-| Need | Command | Optional `--focus` |
+Start with `find_nodes_by_name` to turn a symbol name into a `node_id`, then pass
+that ID to the other tools:
+
+| Need | Tool | Parameters |
 | --- | --- | --- |
-| Find code or gather context | `codegraph agent context "question or task"` | `search`, `builder` (default), `question` |
-| Assess a proposed change | `codegraph agent impact "what would change?"` | `dependencies` (default), `call_chain` |
-| Explain structure/interfaces | `codegraph agent architecture "area to understand"` | `structure` (default), `api_surface` |
-| Identify quality risks | `codegraph agent quality "area to assess"` | `complexity`, `coupling`, `hotspots` (all use the quality workflow) |
+| Resolve a symbol to node IDs | `find_nodes_by_name` | `name`, `limit` |
+| What does X depend on? | `get_transitive_dependencies` | `node_id`, `edge_type`, `depth` |
+| What breaks if X changes? | `get_reverse_dependencies` | `node_id`, `edge_type`, `depth` |
+| Follow calls from a function | `trace_call_chain` | `from_node`, `max_depth` |
+| Find dependency cycles | `detect_circular_dependencies` | `edge_type` |
+| Coupling of a node | `calculate_coupling_metrics` | `node_id` |
+| Central components | `get_hub_nodes` | `min_degree` |
+| Risky functions to review | `find_complexity_hotspots` | `min_complexity`, `limit` |
+
+`edge_type` is one of `Calls`, `Imports`, `Uses`, `Extends`, `Implements`, `References`.
 
 Examples:
 ```sh
-codegraph agent context "Where is request authentication implemented?" --focus search
-codegraph agent impact "What breaks if token validation changes?" --focus call_chain
-codegraph agent architecture "Describe the public authentication interfaces" --focus api_surface
-codegraph agent quality "Find coupling and hotspots in authentication" --focus coupling
+codegraph tool run find_nodes_by_name --params '{"name": "parse_file"}'
+codegraph tool run get_reverse_dependencies --params '{"node_id": "<id>", "edge_type": "Calls"}'
+codegraph tool run find_complexity_hotspots --params '{"limit": 10}'
 ```
 
 Run from the indexed project root, or pass `--project /path/to/project`. For a custom
-indexed identifier, pass `--project-id ID` or retain `CODEGRAPH_PROJECT_ID`. Existing
-CodeGraph provider/database configuration applies; no running MCP server is needed.
-The binary must be built with `ai-enhanced` (or `full`), and the project must already
-be indexed in SurrealDB. Calls use the configured model and can incur provider costs.
+indexed identifier, pass `--project-id ID` or retain `CODEGRAPH_PROJECT_ID`. Stdout is
+one JSON document; logs go to stderr. Runtime failures emit `{"error": {...}}` and
+exit 1; argument errors exit 2. `codegraph tool list` prints every parameter schema.
 
-Stdout is one JSON response with `answer`, `findings`, workflow metadata, and
-`structured_output` when available, matching MCP. Read source locations and risk
-notes from this evidence. `--format text` prints just the answer; use JSON when
-checking warnings and partial results. Logs go to stderr. Runtime failures emit
-`{"error": {...}}` and exit 1; argument errors exit 2. The default command deadline
-is 600 seconds; override with `--timeout-secs N`. Use `--query-file FILE` instead of
-a positional query for long questions, or `--query-file -` to read stdin.
+Follow returned file:line locations with targeted reads. The index can lag behind
+uncommitted work, so verify against current source before editing. If the project is
+not indexed or a result lacks evidence, use ordinary repository tools. Do not install,
+configure or reindex merely because this guidance was injected.
 
-When CodeGraph is available, start code discovery with a specific agentic question
-including relevant symbols, paths, or the intended change before broad grep/rg searches.
-Check impact before editing. Follow returned file:line locations with targeted reads.
-Verify the answer against current code: an index can lag behind uncommitted work,
-and a successful response can contain a timeout/partial-result warning. If the
-index or service is unavailable, results lack evidence, or a location is already
-known, use ordinary repository tools. Do not install, configure, download models or
-reindex merely because this guidance was injected. Internal graph analysis tools
-are for CodeGraph's built-in agents; use only the four agentic commands above.
-
-Reload this guidance with `codegraph agent instructions` after context loss.
+Reload this guidance with `codegraph tool instructions` after context loss.

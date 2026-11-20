@@ -1,12 +1,9 @@
-// ABOUTME: LLM tool executor for SurrealDB graph analysis functions
+// ABOUTME: Tool executor for SurrealDB graph analysis functions
 // ABOUTME: Executes graph analysis tools by calling Rust SDK wrappers with validated parameters
 
-use codegraph_core::config_manager::CodeGraphConfig;
 use codegraph_graph::GraphFunctions;
 use codegraph_mcp_core::debug_logger::DebugLogger;
 use codegraph_mcp_core::error::{McpError, Result};
-use codegraph_vector::EmbeddingGenerator;
-use codegraph_vector::reranking::{RerankDocument, Reranker, factory::create_reranker};
 use lru::LruCache;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -50,18 +47,12 @@ impl CacheStats {
 /// Receives tool calls from LLM and executes appropriate SurrealDB functions
 pub struct GraphToolExecutor {
     graph_functions: Arc<GraphFunctions>,
-    /// Configuration for embedding and reranking
-    config: Arc<CodeGraphConfig>,
-    /// Shared embedding generator (created once, reused for all queries)
-    embedding_generator: Arc<EmbeddingGenerator>,
     /// LRU cache for tool results (function_name + params → result)
     cache: Arc<Mutex<LruCache<String, JsonValue>>>,
     /// Cache statistics for observability
     cache_stats: Arc<Mutex<CacheStats>>,
     /// Whether caching is enabled
     cache_enabled: bool,
-    /// Reranker for semantic search result refinement
-    reranker: Option<Arc<dyn Reranker>>,
     /// Maximum result size in bytes (derived from LLM context window)
     /// Prevents sending oversized results that would exceed model limits
     max_result_bytes: usize,
@@ -128,17 +119,13 @@ fn shorten_content(value: &mut JsonValue, max_chars: usize) {
 }
 
 impl GraphToolExecutor {
-    /// Create a new tool executor with shared EmbeddingGenerator
+    /// Create a new tool executor
     /// Derives max result size from the agent's context window (environment, then
     /// `[llm] context_window` in the config file, then the default)
-    pub fn new(
-        graph_functions: Arc<GraphFunctions>,
-        config: Arc<CodeGraphConfig>,
-        embedding_generator: Arc<EmbeddingGenerator>,
-    ) -> Self {
+    pub fn new(graph_functions: Arc<GraphFunctions>) -> Self {
         let context_window = codegraph_core::config_manager::ConfigManager::agent_context_window();
 
-        Self::with_context_window(graph_functions, config, embedding_generator, context_window)
+        Self::with_context_window(graph_functions, context_window)
     }
 
     /// Create a new tool executor with explicit context window for result size limiting
@@ -146,8 +133,6 @@ impl GraphToolExecutor {
     /// `MAX_RESULT_BYTES_CEILING`
     pub fn with_context_window(
         graph_functions: Arc<GraphFunctions>,
-        config: Arc<CodeGraphConfig>,
-        embedding_generator: Arc<EmbeddingGenerator>,
         context_window: usize,
     ) -> Self {
         // Calculate max result bytes: use ~50% of context window, assuming ~4 chars per token
@@ -156,21 +141,12 @@ impl GraphToolExecutor {
             .saturating_mul(2)
             .min(MAX_RESULT_BYTES_CEILING);
 
-        Self::with_limits(
-            graph_functions,
-            config,
-            embedding_generator,
-            true,
-            100,
-            max_result_bytes,
-        )
+        Self::with_limits(graph_functions, true, 100, max_result_bytes)
     }
 
     /// Create a new tool executor with custom cache and result size configuration
     pub fn with_limits(
         graph_functions: Arc<GraphFunctions>,
-        config: Arc<CodeGraphConfig>,
-        embedding_generator: Arc<EmbeddingGenerator>,
         cache_enabled: bool,
         cache_size: usize,
         max_result_bytes: usize,
@@ -185,23 +161,6 @@ impl GraphToolExecutor {
             max_size: cache_size,
         }));
 
-        // Initialize reranker from config
-        let reranker = match create_reranker(&config.rerank) {
-            Ok(reranker) => reranker,
-            Err(error) => {
-                warn!("Configured reranker could not initialize; reranking disabled: {error:#}");
-                None
-            }
-        };
-
-        if let Some(ref reranker) = reranker {
-            info!(
-                "Reranker initialized: {} ({})",
-                reranker.model_name(),
-                reranker.provider_name()
-            );
-        }
-
         info!(
             "GraphToolExecutor initialized with max_result_bytes: {} ({:.1}MB)",
             max_result_bytes,
@@ -210,12 +169,9 @@ impl GraphToolExecutor {
 
         Self {
             graph_functions,
-            config,
-            embedding_generator,
             cache,
             cache_stats,
             cache_enabled,
-            reranker,
             max_result_bytes,
         }
     }
@@ -223,15 +179,11 @@ impl GraphToolExecutor {
     /// Create a new tool executor with custom cache configuration (legacy compatibility)
     pub fn with_cache(
         graph_functions: Arc<GraphFunctions>,
-        config: Arc<CodeGraphConfig>,
-        embedding_generator: Arc<EmbeddingGenerator>,
         cache_enabled: bool,
         cache_size: usize,
     ) -> Self {
         Self::with_limits(
             graph_functions,
-            config,
-            embedding_generator,
             cache_enabled,
             cache_size,
             DEFAULT_MAX_RESULT_BYTES,
@@ -386,6 +338,7 @@ impl GraphToolExecutor {
 
             // Execute based on tool name
             let result = match tool_name {
+                "find_nodes_by_name" => self.execute_find_nodes_by_name(parameters.clone()).await?,
                 "get_transitive_dependencies" => {
                     self.execute_get_transitive_dependencies(parameters.clone())
                         .await?
@@ -402,10 +355,6 @@ impl GraphToolExecutor {
                 "get_hub_nodes" => self.execute_get_hub_nodes(parameters.clone()).await?,
                 "get_reverse_dependencies" => {
                     self.execute_get_reverse_dependencies(parameters.clone())
-                        .await?
-                }
-                "semantic_code_search" => {
-                    self.execute_semantic_code_search(parameters.clone())
                         .await?
                 }
                 "find_complexity_hotspots" => {
@@ -463,6 +412,29 @@ impl GraphToolExecutor {
     }
 
     /// Execute get_transitive_dependencies
+    /// Execute find_nodes_by_name - resolve a symbol name to node IDs
+    async fn execute_find_nodes_by_name(&self, params: JsonValue) -> Result<JsonValue> {
+        let name = params["name"]
+            .as_str()
+            .ok_or_else(|| McpError::Protocol("Missing name".to_string()))?;
+        let limit = params["limit"].as_i64().unwrap_or(10).clamp(1, 50) as usize;
+
+        let result = self
+            .graph_functions
+            .find_nodes_by_name(name, limit)
+            .await
+            .map_err(|e| McpError::Protocol(format!("find_nodes_by_name failed: {}", e)))?;
+
+        Ok(json!({
+            "tool": "find_nodes_by_name",
+            "parameters": {
+                "name": name,
+                "limit": limit
+            },
+            "result": result
+        }))
+    }
+
     async fn execute_get_transitive_dependencies(&self, params: JsonValue) -> Result<JsonValue> {
         let node_id = params["node_id"]
             .as_str()
@@ -615,68 +587,6 @@ impl GraphToolExecutor {
         }))
     }
 
-    /// Execute semantic code search with HNSW, full-text, and graph enrichment
-    /// Accepts natural language queries for comprehensive semantic search
-    async fn execute_semantic_code_search(&self, params: JsonValue) -> Result<JsonValue> {
-        let query_text = params["query"]
-            .as_str()
-            .ok_or_else(|| McpError::Protocol("Missing query".to_string()))?;
-
-        let limit = params["limit"].as_i64().unwrap_or(10) as usize;
-        let threshold = params["threshold"]
-            .as_f64()
-            .or_else(|| {
-                std::env::var("CODEGRAPH_SEMSEARCH_THRESHOLD")
-                    .ok()?
-                    .parse::<f64>()
-                    .ok()
-            })
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(0.6);
-
-        // Step 1: Generate embedding using shared EmbeddingGenerator
-        let query_embedding = self
-            .embedding_generator
-            .generate_text_embedding(query_text)
-            .await
-            .map_err(|e| McpError::Protocol(format!("Embedding generation failed: {}", e)))?;
-
-        // Step 2: Get embedding dimension from shared generator (auto-detected)
-        let dimension = self.embedding_generator.dimension();
-
-        // Step 3: Call semantic search function with graph enrichment (always enabled)
-        let include_graph_context = true; // Always enabled per requirements
-
-        let candidates = self
-            .graph_functions
-            .semantic_search_with_context(
-                query_text,
-                &query_embedding,
-                dimension,
-                limit,
-                threshold as f32,
-                include_graph_context,
-            )
-            .await
-            .map_err(|e| {
-                McpError::Protocol(format!("semantic_search_with_context failed: {}", e))
-            })?;
-
-        // Step 4: Apply reranking if configured (Jina OR LM Studio)
-        let final_results = self.apply_reranking(query_text, candidates).await?;
-
-        Ok(json!({
-            "tool": "semantic_code_search",
-            "parameters": {
-                "query": query_text,
-                "limit": limit,
-                "dimension": dimension,
-                "threshold": threshold
-            },
-            "result": final_results
-        }))
-    }
-
     /// Execute find_complexity_hotspots - find functions with high complexity and coupling
     async fn execute_find_complexity_hotspots(&self, params: JsonValue) -> Result<JsonValue> {
         let min_complexity = params["min_complexity"].as_f64().unwrap_or(5.0) as f32;
@@ -696,60 +606,6 @@ impl GraphToolExecutor {
             },
             "result": result
         }))
-    }
-
-    /// Apply reranking if configured using text-based reranking system
-    async fn apply_reranking(
-        &self,
-        query: &str,
-        candidates: Vec<serde_json::Value>,
-    ) -> Result<Vec<serde_json::Value>> {
-        if let Some(ref reranker) = self.reranker {
-            let top_n = self.config.rerank.top_n;
-
-            // Convert candidates to RerankDocuments
-            let documents: Vec<RerankDocument> = candidates
-                .iter()
-                .enumerate()
-                .map(|(idx, candidate)| RerankDocument {
-                    id: idx.to_string(),
-                    text: Self::extract_text_from_candidate(candidate),
-                    metadata: Some(candidate.clone()),
-                })
-                .collect();
-
-            // Rerank using the configured provider
-            let results = reranker
-                .rerank(query, documents, top_n)
-                .await
-                .map_err(|e| McpError::Protocol(format!("Reranking failed: {}", e)))?;
-
-            // Convert back to original format
-            let reranked: Vec<serde_json::Value> =
-                results.into_iter().filter_map(|r| r.metadata).collect();
-
-            Ok(reranked)
-        } else {
-            // No reranking configured
-            Ok(candidates)
-        }
-    }
-
-    /// Extract text content from a candidate for reranking
-    fn extract_text_from_candidate(candidate: &serde_json::Value) -> String {
-        let mut text_parts = Vec::new();
-
-        if let Some(name) = candidate.get("name").and_then(|v| v.as_str()) {
-            text_parts.push(name.to_string());
-        }
-        if let Some(content) = candidate.get("content").and_then(|v| v.as_str()) {
-            text_parts.push(content.to_string());
-        }
-        if let Some(file_path) = candidate.get("file_path").and_then(|v| v.as_str()) {
-            text_parts.push(format!("File: {}", file_path));
-        }
-
-        text_parts.join(" ")
     }
 
     /// Get all available tool schemas for registration
@@ -809,7 +665,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let mut result = json!({
-            "tool": "semantic_code_search",
+            "tool": "trace_call_chain",
             "result": [
                 { "name": "doc", "file_path": "README.md", "start_line": 1, "content": long },
                 { "name": "small", "content": "fn small() {}" },

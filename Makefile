@@ -26,7 +26,7 @@ test-llvm: check-llvm
 # Build MCP HTTP server with experimental HTTP transport
 .PHONY: build-mcp-http
 build-mcp-http:
-	cargo build --release -p codegraph-mcp-server --bin codegraph --features "ai-enhanced,embeddings-ollama,embeddings-lmstudio,server-http"
+	cargo build --release -p codegraph-mcp-server --bin codegraph --features server-http
 
 # Run HTTP server (depends on build)
 .PHONY: run-http-server

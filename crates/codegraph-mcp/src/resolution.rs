@@ -14,7 +14,7 @@ struct Symbol {
 struct LexicalCandidate {
     alias: String,
     normalized: String,
-    #[cfg(any(test, feature = "ai-enhanced"))]
+    #[cfg(test)]
     gram_count: usize,
     characters: usize,
 }
@@ -104,7 +104,7 @@ impl SymbolCatalog {
                 alias: alias.clone(),
                 characters: normalized.chars().count(),
                 normalized,
-                #[cfg(any(test, feature = "ai-enhanced"))]
+                #[cfg(test)]
                 gram_count: grams.len(),
             });
         }
@@ -124,7 +124,7 @@ impl SymbolCatalog {
         self.aliases.get(alias).is_some_and(|ids| ids.len() > 1)
     }
 
-    #[cfg(any(test, feature = "ai-enhanced"))]
+    #[cfg(test)]
     pub(crate) fn semantic_candidates(&self, target: &str, limit: usize) -> Vec<String> {
         let target = target.to_lowercase();
         let grams = trigrams(&target);

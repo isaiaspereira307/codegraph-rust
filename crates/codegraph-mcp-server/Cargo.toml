@@ -11,50 +11,17 @@ path = "src/lib.rs"
 
 [features]
 default = ["daemon"]
-ai-enhanced = [
-    "codegraph-mcp-rig",
-    "codegraph-mcp/ai-enhanced",
-    "all-rig-providers"
-]
-# Enable legacy 8 agentic tools (deprecated, use consolidated tools instead)
-legacy-agentic-tools = []
 server-http = ["dep:axum", "dep:hyper", "dep:tower", "dep:http-body-util", "dep:tokio-util"]
-# Rig agent provider features
-rig-openai = ["codegraph-mcp-rig/openai"]
-rig-anthropic = ["codegraph-mcp-rig/anthropic"]
-rig-ollama = ["codegraph-mcp-rig/ollama"]
-rig-xai = ["codegraph-mcp-rig/xai"]
-all-rig-providers = ["rig-openai", "rig-anthropic", "rig-ollama", "rig-xai"]
-embeddings = ["codegraph-mcp-tools/embeddings", "codegraph-mcp/embeddings"]
-embeddings-ollama = ["embeddings", "codegraph-mcp/embeddings-ollama"]
-embeddings-openai = ["embeddings", "codegraph-mcp/embeddings-openai"]
-embeddings-jina = ["embeddings", "codegraph-mcp/embeddings-jina"]
-embeddings-lmstudio = ["embeddings", "codegraph-mcp/embeddings-lmstudio"]
-embeddings-local = ["embeddings", "codegraph-mcp/embeddings-local"]
-all-embeddings = [
-    "embeddings-ollama",
-    "embeddings-openai",
-    "embeddings-jina",
-    "embeddings-lmstudio",
-    "embeddings-local"
-]
 daemon = ["dep:codegraph-mcp-daemon"]
 # Full features for cargo install --features full
-full = [
-    "daemon",
-    "ai-enhanced",
-    "server-http",
-    "all-embeddings"
-]
+full = ["daemon", "server-http"]
 
 [dependencies]
 codegraph-mcp-core = { path = "../codegraph-mcp-core" }
 codegraph-mcp-tools = { path = "../codegraph-mcp-tools" }
-codegraph-mcp-rig = { path = "../codegraph-mcp-rig", optional = true }
 codegraph-mcp-daemon = { path = "../codegraph-mcp-daemon", optional = true }
 codegraph-core = { path = "../codegraph-core" }
 codegraph-graph = { path = "../codegraph-graph" }
-codegraph-vector = { path = "../codegraph-vector" }
 rmcp = { workspace = true }
 futures = { workspace = true }
 schemars = { workspace = true }
