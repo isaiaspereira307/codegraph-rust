@@ -191,6 +191,11 @@ tokio-test = "0.4.6"
 approx = "0.5.1"
 criterion = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
 
+# Graph store
+rusqlite = { version = "0.37", features = ["bundled"] }
+petgraph = "0.8"
+fs4 = { version = "0.13", features = ["sync"] }
+
 # LRU cache utility
 lru = "0.18.5"
 

@@ -18,13 +18,17 @@ dashmap = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
 
+# SQLite store (code-review-graph v15 schema)
+rusqlite = { workspace = true, optional = true }
+
 # SurrealDB support (optional, default on via feature flag)
 surrealdb = { version = "3.3.0", optional = true, features = ["kv-mem", "kv-surrealkv"] }
 dotenvy = { version = "0.15.7", optional = true }
 tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thread"] }
 
 [features]
-default = []
+default = ["sqlite"]
+sqlite = ["dep:rusqlite", "dep:tokio"]
 surrealdb = ["dep:surrealdb", "dep:dotenvy", "dep:tokio"]
 
 [[bin]]
@@ -34,3 +38,4 @@ required-features = ["surrealdb"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rusqlite = { workspace = true }
