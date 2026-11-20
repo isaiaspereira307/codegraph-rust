@@ -35,13 +35,8 @@ Pendente para fechar a fase:
 - [x] Commit e push direto na `main` do fork (`isaiaspereira307/codegraph-rust`).
       Fluxo do projeto: sem PR e sem interação com o upstream.
 
-Sobras conhecidas (sem efeito, a limpar junto com a Fase 1):
+Sobras conhecidas (config/embedding e `graph_vector.rs` removidos na Fase 1, Task 7):
 
-- Flags e config de embedding (`--batch-size`, `[embedding]`, `[llm]`, `[rerank]`,
-  `CODEGRAPH_EMBEDDING_*`), barras de progresso de embedding no indexer, comando `estimate`
-  com ETA de embeddings, tabelas e colunas de embedding no schema SurrealQL.
-- `codegraph-core/src/integration/graph_vector.rs` (`GraphVectorIntegrator`,
-  `HasherEmbeddingService`), ainda usado por `incremental/updater.rs`.
 - `README.md`, `docs/` e banners dos `install-codegraph*.sh` ainda descrevem o produto antigo.
 
 ### Notas de ambiente (máquina local, WSL)
@@ -73,9 +68,12 @@ Progresso:
 - [x] Task 7 — remover SurrealDB, `schema/*.surql`, `graph_vector.rs`, `reqwest` e
       `native-tls`; binário sem `libssl` (`ldd` sem ssl). O cliente WebSocket legado de
       `codegraph-mcp` aceita só `ws://`.
-- [ ] Sobras de embedding/LLM/rerank na config e na CLI (`[embedding]`, `[llm]`, `[rerank]`,
-      `--batch-size`, `estimate`, `CODEGRAPH_EMBEDDING_*`): commit separado, sem efeito
-      funcional.
+- [x] Sobras de embedding/LLM/rerank: `EmbeddingConfig`/`LLMConfig`/`RerankConfig`,
+      `advanced_config`/`cli_config`/`embedding_config`, `context_aware_limits`, flags de
+      embedding do `index`, ETA do `estimate` (fica contagem + tempo de parse), templates
+      `.env`/TOML. `--batch-size` agora é o lote de escrita no SQLite. Seções antigas no TOML
+      são ignoradas; de `[llm]` só `context_window` é lido. Ficam no indexer os estágios de
+      inferência sempre desligados (`policy.rs`, campos `embeddings`/`inference_*` das stats).
 
 Por quê: compatibilidade com o banco do CRG, concorrência (SurrealKV trava o diretório para
 um único processo, e o CRG roda watch + hooks + MCP ao mesmo tempo), licença (SurrealDB é
@@ -200,7 +198,7 @@ harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
 ## Ordem sugerida e marcos
 
 1. ~~Fechar a Fase 0~~ ✅.
-2. ~~Fase 1 (storage)~~ ✅; falta só a limpeza das sobras de embedding.
+2. ~~Fase 1 (storage)~~ ✅.
 3. Harness da Fase 2 antes de qualquer ferramenta nova, para medir regressões desde o início.
 4. Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code.
 5. Fases 4 e 5 conforme o uso real pedir.

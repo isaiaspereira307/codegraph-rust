@@ -1,4 +1,4 @@
-// ABOUTME: Provides repository counting and embedding time estimation utilities.
+// ABOUTME: Provides repository counting and parse-time estimation utilities.
 // ABOUTME: Shared helpers for CLI planners and indexer symbol handling logic.
 
 use std::collections::HashMap;
@@ -48,64 +48,11 @@ impl From<&ParsingStatistics> for ParsingSummary {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TimeEstimates {
-    pub jina_batches: usize,
-    pub jina_batch_size: usize,
-    pub jina_batch_minutes: f64,
-    pub jina_minutes: f64,
-    pub local_minutes: Option<f64>,
-    pub local_rate_per_minute: Option<f64>,
-}
-
-impl TimeEstimates {
-    pub fn from_node_count(node_count: usize, cfg: &EmbeddingThroughputConfig) -> Self {
-        let jina_batches = if node_count == 0 {
-            0
-        } else {
-            (node_count + cfg.jina_batch_size - 1) / cfg.jina_batch_size
-        };
-        let jina_minutes = jina_batches as f64 * cfg.jina_batch_minutes;
-
-        let local_minutes = cfg.local_embeddings_per_minute.and_then(|rate| {
-            if rate > 0.0 {
-                Some(node_count as f64 / rate)
-            } else {
-                None
-            }
-        });
-
-        Self {
-            jina_batches,
-            jina_batch_size: cfg.jina_batch_size,
-            jina_batch_minutes: cfg.jina_batch_minutes,
-            jina_minutes,
-            local_minutes,
-            local_rate_per_minute: cfg.local_embeddings_per_minute,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct RepositoryEstimate {
     pub counts: RepositoryCounts,
     pub parsing: ParsingSummary,
     pub parsing_duration: Duration,
-    pub timings: TimeEstimates,
-}
-
-#[derive(Debug, Clone)]
-pub struct EmbeddingThroughputConfig {
-    pub jina_batch_size: usize,
-    pub jina_batch_minutes: f64,
-    pub local_embeddings_per_minute: Option<f64>,
-}
-
-impl EmbeddingThroughputConfig {
-    pub fn with_local_rate(mut self, rate: Option<f64>) -> Self {
-        self.local_embeddings_per_minute = rate;
-        self
-    }
 }
 
 pub struct RepositoryEstimator {
@@ -123,11 +70,7 @@ impl RepositoryEstimator {
         }
     }
 
-    pub async fn analyze(
-        &self,
-        path: impl AsRef<Path>,
-        throughput: &EmbeddingThroughputConfig,
-    ) -> Result<RepositoryEstimate> {
+    pub async fn analyze(&self, path: impl AsRef<Path>) -> Result<RepositoryEstimate> {
         let path = path.as_ref();
         let file_config: FileCollectionConfig = (&self.config).into();
         let files = file_collect::collect_source_files_with_config(path, &file_config)?;
@@ -147,14 +90,12 @@ impl RepositoryEstimator {
             symbols: symbol_map.len(),
         };
 
-        let timings = TimeEstimates::from_node_count(nodes.len(), throughput);
         let parsing_duration = stats.parsing_duration;
 
         Ok(RepositoryEstimate {
             counts,
             parsing: ParsingSummary::from(&stats),
             parsing_duration,
-            timings,
         })
     }
 }

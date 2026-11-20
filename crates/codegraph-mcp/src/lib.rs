@@ -12,10 +12,8 @@ pub mod transport;
 pub mod utils;
 mod writer;
 
-pub use codegraph_mcp_core::context_aware_limits;
 pub use codegraph_mcp_core::{
     config_manager::*,
-    context_aware_limits::{ContextAwareLimits, ContextTier},
     debug_logger::*,
     error::{McpError, Result},
     message::*,
@@ -24,10 +22,7 @@ pub use codegraph_mcp_core::{
     version::*,
 };
 pub use connection::*;
-pub use estimation::{
-    EmbeddingThroughputConfig, RepositoryEstimate, RepositoryEstimator, TimeEstimates,
-    build_symbol_index,
-};
+pub use estimation::{RepositoryEstimate, RepositoryEstimator, build_symbol_index};
 pub use heartbeat::*;
 pub use indexer::{IndexStats, IndexerConfig, ProjectIndexer};
 pub use transport::*;

@@ -4,47 +4,8 @@
 # is used when present; otherwise the user file. A .env file and CODEGRAPH_* environment
 # variables override anything set here.
 #
-# Optional [rerank] settings refine semantic-search results at query time and work
-# independently of the embedding provider. Provider defaults are supplied automatically.
-# Unknown sections and keys are ignored without an error, so check spelling.
-
-[embedding]
-provider = "ollama"                    # ollama | lmstudio | jina | openai | onnx
-model = "qwen3-embedding:0.6b"
-dimension = 1024                       # 384, 768, 1024, 1536, 2048, 2560, 3072, 3584, 4096
-batch_size = 64                        # max texts per request; env and --batch-size override
-ollama_url = "http://localhost:11434"
-# lmstudio_url = "http://localhost:1234"
-# jina_api_base = "https://api.jina.ai/v1"
-# jina_task = "auto"                     # v4: code.passage; v3/v5: retrieval.passage; JINA_API_TASK overrides
-# jina_late_chunking = false
-
-# Optional query-time reranking. A provider alone is enough; Jina additionally
-# needs JINA_API_KEY in the environment when querying, and Ollama needs its model served.
-[rerank]
-provider = "none"                      # none | jina | ollama
-top_n = 10                             # results retained after reranking
-# [rerank.jina]                         # all fields optional
-# model = "jina-reranker-v3"
-# api_key_env = "JINA_API_KEY"           # name of the variable, never the key itself
-# api_base = "https://api.jina.ai/v1"
-# timeout_secs = 30
-# max_retries = 3
-# [rerank.ollama]                       # all fields optional
-# model = "dengcao/Qwen3-Reranker-8B:Q3_K_M"
-# api_base = "http://localhost:11434"
-
-# LLM for the agentic tools. Each key is used unless the matching environment variable
-# is set: CODEGRAPH_LLM_PROVIDER, CODEGRAPH_LLM_MODEL, CODEGRAPH_CONTEXT_WINDOW.
-# API keys are read from the environment only (ANTHROPIC_API_KEY, OPENAI_API_KEY, XAI_API_KEY).
-[llm]
-enabled = true                         # false makes the agent ignore this whole section
-provider = "ollama"                    # ollama | lmstudio | anthropic | openai | xai | openai-compatible
-model = "qwen2.5-coder:14b"
-context_window = 32768                 # your model's real token limit; selects the prompt tier
-# ollama_url = "http://localhost:11434"
-# lmstudio_url = "http://localhost:1234"
-# openai_compatible_url = "http://localhost:8000/v1"
+# Unknown sections and keys are ignored without an error, so check spelling. Sections from
+# older releases ([embedding], [rerank], most of [llm]) are accepted and have no effect.
 
 [indexing]
 tier = "fast"                          # fast | balanced | full
@@ -56,5 +17,10 @@ batch_timeout_ms = 200
 exclude_patterns = ["**/node_modules/**", "**/target/**", "**/.git/**", "**/dist/**"]
 # languages = ["rust", "typescript"]
 
-# Storage has no section here: each project uses an embedded store at <project>/.codegraph/db
-# unless CODEGRAPH_SURREALDB_URL points at a SurrealDB server.
+# Size limits of graph tool results follow the client's context window.
+# CODEGRAPH_CONTEXT_WINDOW overrides this key.
+# [llm]
+# context_window = 128000
+
+# Storage has no section here: each project uses <project>/.code-review-graph/graph.db
+# (the code-review-graph v15 schema).

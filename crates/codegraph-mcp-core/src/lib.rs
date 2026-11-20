@@ -4,7 +4,6 @@
 pub mod agent_architecture;
 pub mod analysis;
 pub mod config_manager;
-pub mod context_aware_limits;
 pub mod debug_logger;
 pub mod error;
 pub mod message;
@@ -17,7 +16,6 @@ pub use agent_architecture::*;
 pub use analysis::*;
 pub use codegraph_core::{CodeGraphError, NodeId};
 pub use config_manager::*;
-pub use context_aware_limits::*;
 pub use debug_logger::*;
 pub use error::{McpError, Result};
 pub use message::*;

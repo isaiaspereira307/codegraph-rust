@@ -41,7 +41,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings   # what CI
 - Makefile targets referring to `codegraph-api`, `high_perf_test/`, or `scripts/` point at things that no longer exist.
 - `docs/TESTING.md` uses feature names (`onnx`, `ollama`, `cloud-jina`, ...) and a `test_mcp_tools.py` that don't match the current tree.
 - The feature flags are on `codegraph-mcp-server`: `daemon` (default), `server-http`, `full`.
-- Embedding settings (`[embedding]`, `--batch-size`, `CODEGRAPH_EMBEDDING_*`), `[llm]` and `[rerank]` config, and the embedding progress output in the indexer are leftovers from the removed inference layer; they have no effect.
+- The indexer still carries the always-off inference stages (`policy.rs`, `embeddings`/`inference_*` stats fields, `CODEGRAPH_EMBEDDING_POLICY`). Old `[embedding]`/`[rerank]` TOML sections are ignored; from `[llm]` only `context_window` is read.
 - `docs/`, `README.md` and the `install-codegraph*.sh` banners still describe the removed agentic tools and embedding providers.
 - `docs/README.md` mentions a `codegraph-cache` crate that has been removed.
 
@@ -63,7 +63,7 @@ codegraph start stdio --watch           # MCP server over stdio, with re-index-o
 
 Storage is one SQLite file per repository at `<project>/.code-review-graph/graph.db` (`SqliteGraphStore` in `crates/codegraph-graph/src/sqlite_store/`), the same path and v15 schema code-review-graph (Python) uses, so either tool can read the other's index. WAL mode: many readers, one writer. Writers take an exclusive `flock` on `.code-review-graph/write.lock` (shared with code-review-graph), so `codegraph start` can keep serving while `codegraph index` runs. Rust-only state lives in `cg_*` tables; kind mappings and losses are in `docs/architecture/storage-sqlite.md`.
 
-Config resolution (`crates/codegraph-core/src/config_manager.rs`): `./.codegraph.toml`, then `~/.codegraph/config.toml`, overridden by `.env` (cwd, then `~/.codegraph.env`) and `CODEGRAPH_*` env vars. See `.env.example` and `config/example.toml`. The loader ignores unknown TOML keys silently, and `[rerank]`, `[performance]`, `[logging]` are parsed but only shown in status output.
+Config resolution (`crates/codegraph-core/src/config_manager.rs`): `./.codegraph.toml`, then `~/.codegraph/config.toml`, overridden by `.env` (cwd, then `~/.codegraph.env`) and `CODEGRAPH_*` env vars. See `.env.example` and `config/example.toml`. The loader ignores unknown TOML keys silently; `[performance]` and `[logging]` are parsed but have little effect. `ConfigManager::agent_context_window()` (`CODEGRAPH_CONTEXT_WINDOW`, then `[llm] context_window`) sizes graph tool results.
 
 Project init runs before application configuration or the async runtime. `project_init.rs` offers Claude/Codex/both/none, reuses existing CodeGraph hooks, validates both guide files and selected settings, then merges owned instruction blocks. `agent_hooks.rs` preserves unrelated project settings and reuses Codex inline TOML hooks without rewriting TOML. `--no-index` stops after setup; otherwise init loads the selected project's `.env` and configuration and uses the normal index command. Explicit `--config` paths stay relative to the invoking directory. This is separate from global `codegraph config init`; no user-level hooks are created. Test with `cargo test -p codegraph-mcp-server --lib` and `cargo test -p codegraph-mcp-server --test project_init_integration --test tool_cli_integration`.
 

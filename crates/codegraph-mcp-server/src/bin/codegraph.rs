@@ -3,8 +3,7 @@ use atty::Stream;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use codegraph_mcp::{
-    EmbeddingThroughputConfig, IndexerConfig, ProcessManager, ProjectIndexer, RepositoryEstimate,
-    RepositoryEstimator,
+    IndexerConfig, ProcessManager, ProjectIndexer, RepositoryEstimate, RepositoryEstimator,
 };
 use codegraph_mcp_core::debug_logger::DebugLogger;
 #[cfg(feature = "daemon")]
@@ -23,10 +22,6 @@ use tracing::info;
 use tracing_subscriber::{
     Registry, filter::EnvFilter, fmt::writer::BoxMakeWriter, layer::SubscriberExt,
 };
-
-const DEFAULT_JINA_BATCH_SIZE: usize = 2000;
-const DEFAULT_JINA_BATCH_MINUTES: f64 = 9.0;
-const DEFAULT_LOCAL_EMBEDDINGS_PER_WORKER_PER_MINUTE: f64 = 3600.0;
 
 #[derive(Parser)]
 #[command(
@@ -162,65 +157,24 @@ enum Commands {
         #[arg(long, help = "Watch for changes and auto-reindex")]
         watch: bool,
 
-        #[arg(
-            long,
-            help = "Number of parallel workers (applies to both local and cloud modes)",
-            default_value = "4"
-        )]
+        #[arg(long, help = "Number of parallel workers", default_value = "4")]
         workers: usize,
 
         #[arg(
             long,
-            help = "Maximum embedding texts per batch; overrides environment/config (token, byte and provider limits may split requests)",
+            help = "Rows per storage write batch (default 100)",
             value_parser = parse_positive_batch_size
         )]
         batch_size: Option<usize>,
 
-        #[arg(
-            long,
-            help = "[Cloud mode only] Maximum concurrent API requests for parallel embedding generation (ignored in local mode)",
-            default_value = "10"
-        )]
-        max_concurrent: usize,
-
-        #[arg(
-            long,
-            help = "[Local mode only] Embedding device: cpu | metal | cuda:<id> (ignored in cloud mode)"
-        )]
-        device: Option<String>,
-
-        #[arg(
-            long,
-            help = "[Local mode only] Max sequence length for embeddings (ignored in cloud mode)",
-            default_value = "512"
-        )]
-        max_seq_len: usize,
-        #[arg(
-            long,
-            help = "Symbol-resolution embedding batch size (overrides generic batch size)",
-            value_parser = clap::value_parser!(usize)
-        )]
-        symbol_batch_size: Option<usize>,
-        #[arg(
-            long,
-            help = "Symbol embedding max concurrency (overrides generic max-concurrent)",
-            value_parser = clap::value_parser!(usize)
-        )]
-        symbol_max_concurrent: Option<usize>,
-
         #[arg(long, value_enum, help = "Indexing tier: fast | balanced | full")]
         index_tier: Option<IndexTier>,
-        #[arg(
-            long,
-            help = "Complete the persisted deferred inference job with current sources"
-        )]
-        complete_deferred: bool,
         #[arg(long, help = "Write indexing metrics and completion status as JSON")]
         stats_json: Option<PathBuf>,
     },
 
     #[command(
-        about = "Estimate indexing cost (node/edge counts + embedding ETA) without writing the graph"
+        about = "Estimate graph size (node/edge counts, parse time) without writing the graph"
     )]
     Estimate {
         #[arg(help = "Path to project directory")]
@@ -247,37 +201,8 @@ enum Commands {
         #[arg(long, help = "Estimate only files directly in the project directory")]
         no_recursive: bool,
 
-        #[arg(
-            long,
-            help = "Worker concurrency to assume for parsing/local embeddings",
-            default_value = "4"
-        )]
+        #[arg(long, help = "Parallel parser workers", default_value = "4")]
         workers: usize,
-
-        #[arg(
-            long,
-            help = "Parser batch size baseline (affects local estimate heuristics)",
-            default_value = "100"
-        )]
-        batch_size: usize,
-
-        #[arg(
-            long,
-            help = "Override Jina batch size (defaults to 2000 based on current limits)"
-        )]
-        jina_batch_size: Option<usize>,
-
-        #[arg(
-            long,
-            help = "Override minutes per Jina batch (defaults to 9 based on observed throughput)"
-        )]
-        jina_batch_minutes: Option<f64>,
-
-        #[arg(
-            long,
-            help = "Override local embedding throughput (embeddings per minute)"
-        )]
-        local_throughput: Option<f64>,
 
         #[arg(long, value_enum, help = "Indexing tier: fast | balanced | full")]
         index_tier: Option<IndexTier>,
@@ -573,13 +498,7 @@ fn main() -> Result<()> {
             watch: false,
             workers,
             batch_size: None,
-            max_concurrent: 10,
-            device: None,
-            max_seq_len: 512,
-            symbol_batch_size: None,
-            symbol_max_concurrent: None,
             index_tier,
-            complete_deferred: false,
             stats_json: None,
         };
     }
@@ -641,13 +560,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             watch,
             workers,
             batch_size,
-            max_concurrent,
-            device,
-            max_seq_len,
-            symbol_batch_size,
-            symbol_max_concurrent,
             index_tier,
-            complete_deferred,
             stats_json,
         } => {
             handle_index(
@@ -661,13 +574,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 watch,
                 workers,
                 batch_size,
-                max_concurrent,
-                device,
-                max_seq_len,
-                symbol_batch_size,
-                symbol_max_concurrent,
                 index_tier,
-                complete_deferred,
                 stats_json,
                 cli.debug,
             )
@@ -681,10 +588,6 @@ async fn run_cli(cli: Cli) -> Result<()> {
             recursive,
             no_recursive,
             workers,
-            batch_size,
-            jina_batch_size,
-            jina_batch_minutes,
-            local_throughput,
             index_tier,
             format,
         } => {
@@ -696,10 +599,6 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 include,
                 recursive && !no_recursive,
                 workers,
-                batch_size,
-                jina_batch_size,
-                jina_batch_minutes,
-                local_throughput,
                 index_tier,
                 format,
             )
@@ -1184,13 +1083,7 @@ async fn handle_index(
     watch: bool,
     workers: usize,
     batch_size: Option<usize>,
-    max_concurrent: usize,
-    device: Option<String>,
-    max_seq_len: usize,
-    symbol_batch_size: Option<usize>,
-    symbol_max_concurrent: Option<usize>,
     index_tier: Option<IndexTier>,
-    complete_deferred: bool,
     stats_json: Option<PathBuf>,
     debug_log: bool,
 ) -> Result<()> {
@@ -1231,9 +1124,11 @@ async fn handle_index(
     header_pb.set_style(h_style);
     header_pb.set_message(format!("Indexing project: {}", path.to_string_lossy()));
 
-    // Explicit embedding batches override configuration; only workers are memory-tuned.
+    // Only workers are memory-tuned; an explicit storage batch is kept as given.
     let available_memory_gb = estimate_available_memory_gb();
-    let embedding_batch_size = batch_size.unwrap_or(config.embedding.batch_size).max(1);
+    let storage_batch_size = batch_size
+        .unwrap_or(IndexerConfig::default().batch_size)
+        .max(1);
     let optimized_workers = optimize_workers_for_memory(available_memory_gb, workers);
 
     if available_memory_gb >= 64 {
@@ -1263,7 +1158,6 @@ async fn handle_index(
     // Configure indexer
     let languages_list = languages.clone().unwrap_or_default();
     let indexer_config = IndexerConfig {
-        complete_deferred,
         languages: languages_list.clone(),
         exclude_patterns: exclude,
         include_patterns: include,
@@ -1271,12 +1165,7 @@ async fn handle_index(
         force_reindex: force,
         watch,
         workers: optimized_workers,
-        batch_size: embedding_batch_size,
-        max_concurrent,
-        device,
-        max_seq_len,
-        symbol_batch_size,
-        symbol_max_concurrent,
+        batch_size: storage_batch_size,
         indexing_tier: tier,
         project_root: project_root.clone(),
         ..Default::default()
@@ -1388,10 +1277,6 @@ async fn handle_index(
             stats.package_cycles_detected, stats.boundary_violations_added
         );
     }
-    println!(
-        "│ 💾 Embeddings: {:>6} chunks ({}-dim)                  │",
-        stats.embeddings, stats.embedding_dimension
-    );
     if stats.errors > 0 {
         println!(
             "│ ❌ Errors:     {:>6} encountered                      │",
@@ -1419,25 +1304,14 @@ async fn handle_index(
     println!();
     println!("{}", "⚙️  Configuration Summary".cyan().bold());
     println!(
-        "Workers: {} | Embedding batch row limit: {} | Languages: {}",
+        "Workers: {} | Storage batch rows: {} | Languages: {}",
         optimized_workers,
-        embedding_batch_size,
+        storage_batch_size,
         languages_list.join(", ")
     );
-    if !stats.embedding_provider.is_empty() {
-        println!(
-            "Embeddings: {} ({}-dim)",
-            stats.embedding_provider, stats.embedding_dimension
-        );
-    }
 
     println!();
-    println!(
-        "{}",
-        "🚀 Ready for CodeGraph Agentic MCP Intelligence!"
-            .green()
-            .bold()
-    );
+    println!("{}", "🚀 Graph ready for CodeGraph tools".green().bold());
     println!("Next: Start MCP server with 'codegraph start http' or 'codegraph start stdio'");
 
     if stats.errors > 0 {
@@ -1469,10 +1343,6 @@ async fn handle_estimate(
     include: Vec<String>,
     recursive: bool,
     workers: usize,
-    batch_size: usize,
-    jina_batch_size: Option<usize>,
-    jina_batch_minutes: Option<f64>,
-    local_throughput: Option<f64>,
     index_tier: Option<IndexTier>,
     format: StatsFormat,
 ) -> Result<()> {
@@ -1486,19 +1356,12 @@ async fn handle_estimate(
         include_patterns: include,
         recursive,
         workers,
-        batch_size,
         indexing_tier: tier,
         ..Default::default()
     };
     estimator_config.project_root = project_root.clone();
 
     let estimator = RepositoryEstimator::new(estimator_config);
-    let throughput = resolve_throughput_config(
-        jina_batch_size,
-        jina_batch_minutes,
-        local_throughput,
-        workers,
-    );
 
     println!(
         "{} {}",
@@ -1507,18 +1370,15 @@ async fn handle_estimate(
     );
 
     let start = std::time::Instant::now();
-    let report = estimator.analyze(&path, &throughput).await?;
+    let report = estimator.analyze(&path).await?;
     let elapsed = start.elapsed();
 
     present_estimate_output(
         format,
         &project_root,
         &languages_list,
-        &throughput,
         &report,
         workers,
-        batch_size,
-        config.embedding.provider.as_str(),
         elapsed,
     )
 }
@@ -1527,19 +1387,11 @@ fn present_estimate_output(
     format: StatsFormat,
     project_root: &Path,
     languages: &[String],
-    throughput: &EmbeddingThroughputConfig,
     report: &RepositoryEstimate,
     workers: usize,
-    batch_size: usize,
-    provider: &str,
     elapsed: Duration,
 ) -> Result<()> {
     let parsing_minutes = report.parsing_duration.as_secs_f64() / 60.0;
-    let total_jina_minutes = parsing_minutes + report.timings.jina_minutes;
-    let total_local_minutes = report
-        .timings
-        .local_minutes
-        .map(|local| parsing_minutes + local);
 
     let payload = serde_json::json!({
         "path": project_root.to_string_lossy(),
@@ -1559,28 +1411,7 @@ fn present_estimate_output(
             "files_per_second": report.parsing.files_per_second,
             "lines_per_second": report.parsing.lines_per_second,
         },
-        "timings": {
-            "jina": {
-                "batches": report.timings.jina_batches,
-                "batch_size": report.timings.jina_batch_size,
-                "batch_minutes": report.timings.jina_batch_minutes,
-                "minutes": report.timings.jina_minutes,
-                "total_minutes_with_parsing": total_jina_minutes,
-            },
-            "local": {
-                "rate_per_minute": report.timings.local_rate_per_minute,
-                "minutes": report.timings.local_minutes,
-                "total_minutes_with_parsing": total_local_minutes,
-            }
-        },
         "workers": workers,
-        "batch_size": batch_size,
-        "embedding_provider": provider,
-        "assumptions": {
-            "jina_batch_size": throughput.jina_batch_size,
-            "jina_batch_minutes": throughput.jina_batch_minutes,
-            "local_embeddings_per_minute": throughput.local_embeddings_per_minute,
-        },
         "estimate_runtime_seconds": elapsed.as_secs_f64(),
     });
 
@@ -1604,7 +1435,6 @@ fn present_estimate_output(
                     languages.join(", ")
                 }
             );
-            println!("Embedding provider (config): {}", provider);
             println!();
             println!(
                 "Files parsed: {} / {} (failed: {})",
@@ -1618,46 +1448,6 @@ fn present_estimate_output(
                 format_duration_minutes(parsing_minutes)
             );
             println!(
-                "Jina embeddings: {} ({} batches × {} nodes)",
-                format_duration_minutes(report.timings.jina_minutes),
-                report.timings.jina_batches,
-                report.timings.jina_batch_size
-            );
-            println!(
-                "Total time (parsing + Jina): {}",
-                format_duration_minutes(total_jina_minutes)
-            );
-            if let Some(local_minutes) = report.timings.local_minutes {
-                let rate = report
-                    .timings
-                    .local_rate_per_minute
-                    .unwrap_or(default_local_rate(workers));
-                println!(
-                    "Local embeddings: {} ({:.0} embeddings/min)",
-                    format_duration_minutes(local_minutes),
-                    rate
-                );
-                if let Some(total_local) = total_local_minutes {
-                    println!(
-                        "Total time (parsing + local): {}",
-                        format_duration_minutes(total_local)
-                    );
-                }
-            } else {
-                println!(
-                    "{}",
-                    "Local embeddings: set --local-throughput to compare speed.".dimmed()
-                );
-            }
-            println!(
-                "Assumptions: {} nodes/batch @ {:.1} min, local {:.0} embeddings/min baseline.",
-                throughput.jina_batch_size,
-                throughput.jina_batch_minutes,
-                throughput
-                    .local_embeddings_per_minute
-                    .unwrap_or(default_local_rate(workers))
-            );
-            println!(
                 "Estimation runtime: {} (parser only, no DB writes)",
                 format_duration_minutes(elapsed.as_secs_f64() / 60.0)
             );
@@ -1665,57 +1455,6 @@ fn present_estimate_output(
     }
 
     Ok(())
-}
-
-fn resolve_throughput_config(
-    jina_batch_size_cli: Option<usize>,
-    jina_batch_minutes_cli: Option<f64>,
-    local_throughput_cli: Option<f64>,
-    workers: usize,
-) -> EmbeddingThroughputConfig {
-    let jina_size = jina_batch_size_cli
-        .or_else(|| env_usize("CODEGRAPH_JINA_BATCH_SIZE"))
-        .unwrap_or(DEFAULT_JINA_BATCH_SIZE)
-        .max(1);
-
-    let jina_minutes = jina_batch_minutes_cli
-        .or_else(|| env_f64("CODEGRAPH_JINA_BATCH_MINUTES"))
-        .unwrap_or(DEFAULT_JINA_BATCH_MINUTES)
-        .max(0.1);
-
-    let local_rate = sanitize_positive(local_throughput_cli)
-        .or_else(|| sanitize_positive(env_f64("CODEGRAPH_LOCAL_EMBEDDINGS_PER_MINUTE")))
-        .or_else(|| Some(default_local_rate(workers)));
-
-    EmbeddingThroughputConfig {
-        jina_batch_size: jina_size,
-        jina_batch_minutes: jina_minutes,
-        local_embeddings_per_minute: local_rate,
-    }
-}
-
-fn default_local_rate(workers: usize) -> f64 {
-    DEFAULT_LOCAL_EMBEDDINGS_PER_WORKER_PER_MINUTE * workers.max(1) as f64
-}
-
-fn sanitize_positive(value: Option<f64>) -> Option<f64> {
-    value.and_then(|v| {
-        if v.is_finite() && v > 0.0 {
-            Some(v)
-        } else {
-            None
-        }
-    })
-}
-
-fn env_usize(key: &str) -> Option<usize> {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-}
-
-fn env_f64(key: &str) -> Option<f64> {
-    std::env::var(key).ok().and_then(|v| v.parse::<f64>().ok())
 }
 
 fn format_duration_minutes(minutes: f64) -> String {
@@ -1792,66 +1531,22 @@ async fn handle_config(action: ConfigAction) -> Result<()> {
 # Environment variables here override config.toml settings
 
 # ============================================================================
-# EMBEDDING PROVIDER
+# INDEXING
 # ============================================================================
-# Provider: "local", "ollama", "lmstudio", "openai", "jina", or "auto"
-# - local: ONNX local embeddings (fastest, no API needed)
-# - ollama: Ollama embeddings (good balance, requires Ollama running)
-# - openai: OpenAI embeddings (cloud, requires API key)
-# - jina: Jina embeddings (requires API key)
-# - auto: Auto-detect best available provider
-CODEGRAPH_EMBEDDING_PROVIDER=auto
+# Indexing tier: fast (default) | balanced | full
+# CODEGRAPH_INDEX_TIER=fast
 
-# ============================================================================
-# CLOUD PROVIDERS (OpenAI, Jina)
-# ============================================================================
-# OpenAI API Key (if using OpenAI embeddings)
-# OPENAI_API_KEY=sk-...
+# Disable analyzers (build context, LSP, docs, ...) with 0
+# CODEGRAPH_ANALYZERS=1
 
-# Jina API Key (if using Jina embeddings or Jina reranking)
-# JINA_API_KEY=jina_...
-
-# Optional query-time reranking (independent of the embedding provider)
-# CODEGRAPH_RERANK_PROVIDER=jina  # jina | ollama | none; default none
-# JINA_RERANKING_MODEL=jina-reranker-v3  # optional default
-# JINA_RERANKING_TOP_N=10
-# CODEGRAPH_OLLAMA_RERANK_MODEL=dengcao/Qwen3-Reranker-8B:Q3_K_M
-# CODEGRAPH_ENABLE_RERANKING=false  # master disable
-# JINA_ENABLE_RERANKING=true  # legacy Jina enable alias
+# Parser workers (default: --workers, capped by available cores)
+# CODEGRAPH_WORKERS=4
 
 # ============================================================================
-# LOCAL PROVIDERS (Ollama, Local)
+# GRAPH TOOLS
 # ============================================================================
-# Ollama URL (if using Ollama)
-# CODEGRAPH_OLLAMA_URL=http://localhost:11434
-
-# Local embedding model (if using local/ONNX provider)
-# CODEGRAPH_LOCAL_MODEL=/path/to/model
-
-# ============================================================================
-# PERFORMANCE
-# ============================================================================
-# Embedding batch size (default: 100)
-# Higher values = faster indexing but more memory
-# CODEGRAPH_BATCH_SIZE=100
-
-# Embedding dimension (default: auto-detected)
-# - 384: all-MiniLM (local)
-# - 2048: jina-embeddings-v4 (supports Matryoshka 1024/512/256)
-# - 1536: OpenAI text-embedding-3-small, jina-code-embeddings
-# CODEGRAPH_EMBEDDING_DIMENSION=2048
-
-# ============================================================================
-# LLM PROVIDER (for the agentic tools)
-# ============================================================================
-# LLM Provider: "ollama", "lmstudio", "anthropic", "openai"
-# CODEGRAPH_LLM_PROVIDER=lmstudio
-
-# LLM Model
-# CODEGRAPH_LLM_MODEL=qwen2.5-coder:14b
-
-# Enable LLM insights (context-only mode if disabled)
-# CODEGRAPH_LLM_ENABLED=false
+# Context window the tool-result size limits are sized for (default: 128000)
+# CODEGRAPH_CONTEXT_WINDOW=128000
 
 # ============================================================================
 # LOGGING
@@ -1872,7 +1567,7 @@ CODEGRAPH_EMBEDDING_PROVIDER=auto
             println!();
             println!("Next steps:");
             println!(
-                "1. Edit {} to configure your API keys and preferences",
+                "1. Edit {} to adjust indexing and tool settings",
                 env_path.display()
             );
             println!("2. Run 'codegraph config show' to verify your configuration");
@@ -1893,71 +1588,31 @@ CODEGRAPH_EMBEDDING_PROVIDER=auto
             let config_mgr = ConfigManager::load().context("Failed to load configuration")?;
             let config = config_mgr.config();
 
+            let context_window = ConfigManager::agent_context_window();
             if json {
                 let json_output = serde_json::json!({
-                    "embedding": {
-                        "provider": config.embedding.provider,
-                        "model": config.embedding.model,
-                        "dimension": config.embedding.dimension,
-                        "jina_task": config.embedding.jina_task,
+                    "config_file": config_mgr.config_path().map(|p| p.display().to_string()),
+                    "indexing": { "tier": config.indexing.tier },
+                    "tools": { "context_window": context_window },
+                    "daemon": {
+                        "auto_start_with_mcp": config.daemon.auto_start_with_mcp,
+                        "debounce_ms": config.daemon.debounce_ms,
                     },
-                    "rerank": {
-                        "provider": config.rerank.provider,
-                        "top_n": config.rerank.top_n,
-                        "jina_model": config.rerank.jina.as_ref().map(|j| &j.model),
-                        "ollama_model": config.rerank.ollama.as_ref().map(|o| &o.model),
-                    },
-                    "llm": {
-                        "enabled": config.llm.enabled,
-                        "provider": config.llm.provider,
-                        "model": config.llm.model,
-                        "context_window": config.llm.context_window,
-                    }
+                    "logging": { "level": config.logging.level },
                 });
                 println!("{}", serde_json::to_string_pretty(&json_output)?);
             } else {
                 println!("{}", "Current Configuration:".blue().bold());
+                if let Some(path) = config_mgr.config_path() {
+                    println!("  Config file: {}", path.display());
+                }
+                println!("  Indexing tier: {:?}", config.indexing.tier);
+                println!("  Tool context window: {}", context_window);
                 println!(
-                    "  Embedding Provider: {}",
-                    config.embedding.provider.yellow()
+                    "  Daemon auto-start with MCP: {}",
+                    config.daemon.auto_start_with_mcp
                 );
-                if let Some(model) = config.embedding.model.as_deref() {
-                    println!("  Embedding Model: {}", model.yellow());
-                }
-                println!("  Vector Dimension: {}", config.embedding.dimension);
-
-                if config.embedding.provider == "jina" {
-                    println!("\n  {}", "Jina Embedding Settings:".green().bold());
-                    println!("    API Base: {}", config.embedding.jina_api_base);
-                    println!("    Late Chunking: {}", config.embedding.jina_late_chunking);
-                    println!("    Task: {}", config.embedding.jina_task);
-                }
-
-                // Reranking configuration (separate from embedding)
-                println!("\n  {}", "Reranking Settings:".green().bold());
-                println!("    Provider: {:?}", config.rerank.provider);
-                println!("    Top-N: {}", config.rerank.top_n);
-                if let Some(ref jina) = config.rerank.jina {
-                    println!("    Jina Model: {}", jina.model);
-                }
-                if let Some(ref ollama) = config.rerank.ollama {
-                    println!("    Ollama Model: {}", ollama.model);
-                }
-
-                println!("\n  {}", "LLM Settings:".green().bold());
-                println!("    Provider: {}", config.llm.provider.yellow());
-                println!(
-                    "    Enabled: {}",
-                    if config.llm.enabled {
-                        "yes".green()
-                    } else {
-                        "no (context-only)".yellow()
-                    }
-                );
-                if let Some(model) = config.llm.model.as_deref() {
-                    println!("    Model: {}", model.yellow());
-                }
-                println!("    Context Window: {}", config.llm.context_window);
+                println!("  Log level: {}", config.logging.level);
             }
         }
         ConfigAction::Set { key, value } => {

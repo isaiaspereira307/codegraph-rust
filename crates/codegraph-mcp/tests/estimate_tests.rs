@@ -1,8 +1,8 @@
 // ABOUTME: Ensures repository estimation helpers expose correct calculations.
-// ABOUTME: Validates symbol indexing and embedding ETA heuristics for the CLI.
+// ABOUTME: Validates symbol indexing used by the CLI estimate and the indexer.
 
 use codegraph_core::{CodeNode, Language, Location, NodeType};
-use codegraph_mcp::estimation::{EmbeddingThroughputConfig, TimeEstimates, build_symbol_index};
+use codegraph_mcp::estimation::build_symbol_index;
 
 fn sample_location() -> Location {
     Location {
@@ -21,21 +21,6 @@ fn make_node(name: &str, node_type: NodeType) -> CodeNode {
         Some(Language::Rust),
         sample_location(),
     )
-}
-
-#[test]
-fn embedding_time_estimator_respects_jina_batches() {
-    let cfg = EmbeddingThroughputConfig {
-        jina_batch_size: 2000,
-        jina_batch_minutes: 9.0,
-        local_embeddings_per_minute: Some(12000.0),
-    };
-
-    let estimates = TimeEstimates::from_node_count(4500, &cfg);
-
-    assert_eq!(estimates.jina_batches, 3);
-    assert!((estimates.jina_minutes - 27.0).abs() < f64::EPSILON);
-    assert!((estimates.local_minutes.unwrap() - 0.375).abs() < f64::EPSILON);
 }
 
 #[test]

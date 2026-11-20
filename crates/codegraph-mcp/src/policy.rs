@@ -93,16 +93,6 @@ pub struct DeferredJob {
 pub fn pending_cache(root: &Path) -> ArtifactCache {
     ArtifactCache::new(root.join(".codegraph/index-cache"), "pending-inference-v1")
 }
-pub fn completion_policies(root: &Path, project: &str) -> Result<InferencePolicies> {
-    let job: DeferredJob = pending_cache(root)
-        .get(project)
-        .ok_or_else(|| anyhow::anyhow!("No pending indexing job for this project"))?;
-    let policies = job.policies.finish();
-    if policies.embeddings == StagePolicy::Sync || policies.semantic == StagePolicy::Sync {
-        bail!("Completing this job requires inference, which this build does not include");
-    }
-    Ok(policies)
-}
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,5 @@
-// ABOUTME: Verifies directory traversal, analyzer failures and embedding batch overrides.
-// ABOUTME: Exercises the shipped CLI in isolated embedded stores with offline mock providers.
+// ABOUTME: Verifies directory traversal, analyzer failures and ignored legacy inference settings.
+// ABOUTME: Exercises the shipped CLI against isolated temporary projects, fully offline.
 
 use serde_json::Value;
 use std::{
@@ -16,8 +16,6 @@ fn offline_index_command(root: &Path, config: &Path) -> Command {
         .env("CODEGRAPH_SEMANTIC_RESOLUTION", "off")
         .env("CODEGRAPH_VECTOR_INDEX_MODE", "off")
         .env("CODEGRAPH_PROJECT_ID", "cli-traversal")
-        .env("CODEGRAPH_USE_GRAPH_SCHEMA", "false")
-        .env("CODEGRAPH_SCHEMA", "v2")
         .env("CODEGRAPH_DEBUG", "0")
         .env("CODEGRAPH_NO_PROGRESS", "1")
         .stdin(Stdio::null());
@@ -91,114 +89,68 @@ fn root_only_index_requires_explicit_no_recursive_flag() {
 }
 
 #[test]
-fn rerank_dotenv_and_toml_settings_resolve_without_breaking_offline_indexing() {
-    for (toml, dotenv, provider, model) in [
-        (
-            "",
-            "JINA_ENABLE_RERANKING=true\n",
-            "jina",
-            "jina-reranker-v3",
-        ),
-        (
-            "[rerank]\nprovider = 'jina'\n",
-            "",
-            "jina",
-            "jina-reranker-v3",
-        ),
-        (
-            "[rerank]\nprovider = 'jina'\n[rerank.jina]\nmodel = 'custom-reranker'\n",
-            "",
-            "jina",
-            "custom-reranker",
-        ),
-        (
-            "[rerank]\nprovider = 'ollama'\n",
-            "CODEGRAPH_OLLAMA_RERANK_MODEL=env-reranker\n",
-            "ollama",
-            "env-reranker",
-        ),
-        (
-            "",
-            "JINA_ENABLE_RERANKING=true\nCODEGRAPH_RERANK_PROVIDER=ollama\nCODEGRAPH_OLLAMA_RERANK_MODEL=env-reranker\n",
-            "ollama",
-            "env-reranker",
-        ),
-        (
-            "[rerank]\nprovider = 'jina'\n",
-            "CODEGRAPH_ENABLE_RERANKING=false\n",
-            "none",
-            "",
-        ),
-    ] {
-        let project = tempfile::tempdir().unwrap();
-        let root = project.path();
-        let config = root.join("codegraph.toml");
-        std::fs::write(&config, toml).unwrap();
-        std::fs::write(root.join(".env"), dotenv).unwrap();
-        std::fs::write(root.join("lib.rs"), "pub fn fixture() {}\n").unwrap();
-        let command = || {
-            let mut command = offline_index_command(root, &config);
-            for variable in [
-                "CODEGRAPH_RERANK_PROVIDER",
-                "CODEGRAPH_ENABLE_RERANKING",
-                "JINA_ENABLE_RERANKING",
-                "JINA_RERANKING_MODEL",
-                "JINA_API_KEY",
-                "JINA_API_BASE",
-                "JINA_RERANKING_TOP_N",
-                "CODEGRAPH_RERANKING_CANDIDATES",
-                "CODEGRAPH_OLLAMA_RERANK_MODEL",
-                "OLLAMA_RERANK_MODEL",
-                "CODEGRAPH_OLLAMA_URL",
-                "OLLAMA_URL",
-            ] {
-                command.env_remove(variable);
-            }
-            command
-        };
-        let output = command()
-            .args(["config", "show", "--json"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let resolved: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(resolved["rerank"]["provider"], provider);
-        if provider != "none" {
-            assert_eq!(resolved["rerank"][format!("{provider}_model")], model);
-        }
-        // Indexing needs no reranker API call or key: reranking runs at query time.
-        let output = command()
-            .args([
-                "index",
-                "--languages",
-                "Rust",
-                "--index-tier",
-                "fast",
-                "--stats-json",
-                "stats.json",
-                ".",
-            ])
-            .env("CODEGRAPH_ANALYZERS", "0")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stats: Value =
-            serde_json::from_slice(&std::fs::read(root.join("stats.json")).unwrap()).unwrap();
-        assert_eq!(stats["complete"], true);
-        assert_eq!(stats["files"], 1);
-        assert_eq!(stats["inference_texts"], 0);
-    }
+fn legacy_inference_settings_are_ignored_by_config_and_indexing() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let config = root.join("codegraph.toml");
+    std::fs::write(
+        &config,
+        "[embedding]\nprovider = 'jina'\n[llm]\nenabled = true\ncontext_window = 200000\n\
+         [rerank]\nprovider = 'ollama'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".env"),
+        "CODEGRAPH_EMBEDDING_PROVIDER=jina\nCODEGRAPH_RERANK_PROVIDER=ollama\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("lib.rs"), "pub fn fixture() {}\n").unwrap();
+    let command = || {
+        let mut command = offline_index_command(root, &config);
+        command
+            .env_remove("CODEGRAPH_CONTEXT_WINDOW")
+            .env_remove("CODEGRAPH_LLM_CONTEXT_WINDOW");
+        command
+    };
+    let output = command()
+        .args(["config", "show", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let resolved: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(resolved["tools"]["context_window"], 200_000);
+    assert!(resolved.get("embedding").is_none());
+
+    let output = command()
+        .args([
+            "index",
+            "--languages",
+            "Rust",
+            "--index-tier",
+            "fast",
+            "--stats-json",
+            "stats.json",
+            ".",
+        ])
+        .env("CODEGRAPH_ANALYZERS", "0")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stats: Value =
+        serde_json::from_slice(&std::fs::read(root.join("stats.json")).unwrap()).unwrap();
+    assert_eq!(stats["complete"], true);
+    assert_eq!(stats["files"], 1);
+    assert_eq!(stats["inference_texts"], 0);
 }
 
-#[cfg(unix)]
 #[test]
 fn broken_rustup_shim_is_reported_before_parsing_even_for_another_project() {
     use std::os::unix::fs::PermissionsExt;

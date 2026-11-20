@@ -67,8 +67,6 @@ pub fn set_watch_test_notifier(sender: tokio::sync::mpsc::UnboundedSender<PathBu
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IndexerConfig {
-    #[serde(default)]
-    pub complete_deferred: bool,
     pub languages: Vec<String>,
     pub exclude_patterns: Vec<String>,
     pub include_patterns: Vec<String>,
@@ -76,13 +74,8 @@ pub struct IndexerConfig {
     pub force_reindex: bool,
     pub watch: bool,
     pub workers: usize,
+    /// Rows per durable storage write batch.
     pub batch_size: usize,
-    pub max_concurrent: usize,
-    pub vector_dimension: usize,
-    pub device: Option<String>,
-    pub max_seq_len: usize,
-    pub symbol_batch_size: Option<usize>,
-    pub symbol_max_concurrent: Option<usize>,
     pub indexing_tier: codegraph_core::config_manager::IndexingTier,
     /// Root directory of the project being indexed (where .codegraph/ will be created)
     /// Defaults to current directory if not specified
@@ -92,7 +85,6 @@ pub struct IndexerConfig {
 impl Default for IndexerConfig {
     fn default() -> Self {
         Self {
-            complete_deferred: false,
             languages: vec![],
             exclude_patterns: vec![],
             include_patterns: vec![],
@@ -101,12 +93,6 @@ impl Default for IndexerConfig {
             watch: false,
             workers: 4,
             batch_size: 100,
-            max_concurrent: 10,
-            vector_dimension: 384, // Match EmbeddingGenerator default (all-MiniLM-L6-v2)
-            device: None,
-            max_seq_len: 512,
-            symbol_batch_size: None,
-            symbol_max_concurrent: None,
             indexing_tier: codegraph_core::config_manager::IndexingTier::default(),
             project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
@@ -162,8 +148,6 @@ pub struct ProjectIndexer {
     organization_id: Option<String>,
     repository_url: Option<String>,
     domain: Option<String>,
-    embedding_model: String,
-    vector_dim: usize,
     project_root: PathBuf,
     reconcile_lock: TokioMutex<()>,
     lsp_pool: crate::analyzers::lsp::LspPool,
@@ -228,11 +212,7 @@ impl ProjectIndexer {
             let startup = std::time::Instant::now();
             let project_id = std::env::var("CODEGRAPH_PROJECT_ID")
                 .unwrap_or_else(|_| config.project_root.display().to_string());
-            let policies = if config.complete_deferred {
-                crate::policy::completion_policies(&config.project_root, &project_id)?
-            } else {
-                crate::policy::InferencePolicies::from_env()?
-            };
+            let policies = crate::policy::InferencePolicies::from_env()?;
             // Cap Rayon threads to a sensible default: leave one core free and obey user overrides
             let available = std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -247,11 +227,7 @@ impl ProjectIndexer {
                 .or(env_workers)
                 .unwrap_or(config.workers);
 
-            // Environment defaults are resolved by ConfigManager. Keep the caller's
-            // batch authoritative and pass the same value into every provider.
             config.batch_size = config.batch_size.max(1);
-            let mut global_config = global_config.clone();
-            global_config.embedding.batch_size = config.batch_size;
 
             config.workers = requested.max(1).min(available.max(1));
             let parser = TreeSitterParser::new()
@@ -266,14 +242,6 @@ impl ProjectIndexer {
             let organization_id = std::env::var("CODEGRAPH_ORGANIZATION_ID").ok();
             let repository_url = std::env::var("CODEGRAPH_REPOSITORY_URL").ok();
             let domain = std::env::var("CODEGRAPH_DOMAIN").ok();
-            let embedding_model_name = global_config
-                .embedding
-                .model
-                .clone()
-                .unwrap_or_else(|| "jina-embeddings-v4".to_string());
-
-            // Inference is always off; the dimension is only reported in stats.
-            let vector_dim = config.vector_dimension;
             Ok(Self {
                 config,
                 global_config: global_config.clone(),
@@ -285,8 +253,6 @@ impl ProjectIndexer {
                 organization_id,
                 repository_url,
                 domain,
-                embedding_model: embedding_model_name,
-                vector_dim,
                 project_root,
                 reconcile_lock: TokioMutex::new(()),
                 lsp_pool: Default::default(),
@@ -380,15 +346,6 @@ impl ProjectIndexer {
                 crate::reconciliation::support_fingerprints(&root)
             })
             .await??;
-            let mut embedding_config = serde_json::to_value(&self.global_config.embedding)?;
-            embedding_config
-                .as_object_mut()
-                .unwrap()
-                .remove("openai_api_key");
-            embedding_config
-                .as_object_mut()
-                .unwrap()
-                .remove("jina_api_key");
             let policy: std::collections::BTreeMap<String, String> = [
                 "CODEGRAPH_SEMANTIC_CANDIDATES",
                 "CODEGRAPH_LOCAL_DTYPE",
@@ -470,10 +427,8 @@ impl ProjectIndexer {
                         mutable_model_epoch,
                         &scip_fingerprint,
                         self.config.indexing_tier,
-                        &embedding_config,
                         &policy,
                         self.policies.enabled_identity(),
-                        self.config.max_seq_len,
                         false,
                         false,
                     ))
@@ -1191,7 +1146,6 @@ impl ProjectIndexer {
                 persist_start.elapsed().as_millis() as u64,
             );
             // Inference is always off (policy.rs): no embeddings are generated or stored.
-            let provider = &self.global_config.embedding.provider;
             stats.embeddings = 0;
 
             // Resolve exact/contextual targets once before any semantic inference.
@@ -1344,11 +1298,6 @@ impl ProjectIndexer {
             } else {
                 0.0
             };
-            let avg_embeddings_per_node = if total_nodes_extracted > 0 {
-                stats.embeddings as f64 / total_nodes_extracted as f64
-            } else {
-                0.0
-            };
 
             let total_elapsed = start.elapsed().as_secs_f64();
 
@@ -1366,10 +1315,6 @@ impl ProjectIndexer {
                 resolution_rate
             );
             info!(
-                "🧠 Embeddings: chunks {} | dim {} | provider {} | per-node {:.1}",
-                stats.embeddings, self.vector_dim, provider, avg_embeddings_per_node
-            );
-            info!(
                 "⚡ Throughput: {:.1} files/s | {:.1} nodes/s | {:.1} edges/s",
                 pstats.parsed_files as f64 / total_elapsed.max(1e-3),
                 total_nodes_extracted as f64 / total_elapsed.max(1e-3),
@@ -1379,9 +1324,6 @@ impl ProjectIndexer {
             // Populate extended stats for CLI reporting
             stats.nodes = total_nodes_extracted;
             stats.edges = stored_edges;
-            stats.chunks = stats.embeddings; // chunks == embeddings in current impl
-            stats.embedding_dimension = self.vector_dim;
-            stats.embedding_provider = provider.clone();
             stats.resolved_edges = resolved_count;
             stats.unresolved_edges = total_edges_extracted.saturating_sub(resolved_count);
             stats.resolution_rate = resolution_rate;
@@ -1982,10 +1924,6 @@ impl ProjectIndexer {
                 .attributes
                 .insert("domain".to_string(), domain.clone());
         }
-        // Add embedding model name for tracking which embedding provider was used
-        node.metadata
-            .attributes
-            .insert("embedding_model".to_string(), self.embedding_model.clone());
     }
 
     async fn persist_nodes_batch(&self, chunk: &[CodeNode]) -> Result<()> {
