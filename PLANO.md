@@ -10,7 +10,7 @@ ferramentas MCP, schema SQLite versão 15).
 
 ---
 
-## Fase 0 — Limpeza da camada de IA ✅ (branch `phase0-strip`, não commitada)
+## Fase 0 — Limpeza da camada de IA ✅ (commit `533a821` na `main`)
 
 Feito:
 
@@ -32,10 +32,8 @@ Pendente para fechar a fase:
       `cargo test --workspace --all-features --no-fail-fast` verde, pulando os 5 testes de
       watcher do WSL (ver notas de ambiente); `cargo check --workspace --all-targets
       --all-features` limpo.
-- [x] Commit em `phase0-strip`.
-- [ ] Abrir PR para `main` no fork.
-- [ ] Abrir issue no upstream (Jakedismo/codegraph-rust) pedindo um arquivo `LICENSE`
-      (o `Cargo.toml` declara "MIT OR Apache-2.0", mas não há arquivo de licença).
+- [x] Commit e push direto na `main` do fork (`isaiaspereira307/codegraph-rust`).
+      Fluxo do projeto: sem PR e sem interação com o upstream.
 
 Sobras conhecidas (sem efeito, a limpar junto com a Fase 1):
 
@@ -181,11 +179,12 @@ harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
 2. **Nome do binário**: manter `codegraph` ou usar `code-review-graph`/`crg`?
 3. **Tiers com LSP**: manter os tiers `balanced`/`full` (mais precisos, exigem language
    servers instalados) ou só o `fast` na v1? Recomendação: manter, com `fast` como padrão.
-4. **Licença do fork**: depende da resposta do upstream sobre o arquivo `LICENSE`.
+4. **Licença do fork**: o `Cargo.toml` declara "MIT OR Apache-2.0", mas não há arquivo
+   `LICENSE`; adicionar um no fork.
 
 ## Ordem sugerida e marcos
 
-1. Fechar a Fase 0 (commit + PR).
+1. ~~Fechar a Fase 0~~ ✅.
 2. Fase 1 inteira (storage); sem ela, as fases seguintes construiriam sobre o SurrealDB.
 3. Harness da Fase 2 antes de qualquer ferramenta nova, para medir regressões desde o início.
 4. Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code.
