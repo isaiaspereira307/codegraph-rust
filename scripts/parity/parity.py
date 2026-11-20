@@ -172,7 +172,8 @@ def render_markdown(report):
 
 
 IGNORED = (".git", "target", "node_modules", ".code-review-graph")
-GIT = ["git", "-c", "user.name=parity", "-c", "user.email=parity@localhost"]
+GIT = ["git", "-c", "user.name=parity", "-c", "user.email=parity@localhost",
+       "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
 TIMEOUT = 600
 
 
@@ -240,8 +241,23 @@ def _emit(rep, md, js):
         sys.stdout.write(text)
 
 
+def check_crg_commit(crg_repo, expected):
+    """Abort unless the CRG checkout's HEAD matches `expected` (either is a prefix of the other)."""
+    r = subprocess.run(["git", "-C", str(crg_repo), "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    head = r.stdout.strip()
+    if r.returncode != 0 or not head:
+        raise SystemExit(f"cannot read the CRG checkout HEAD in {crg_repo}:\n{r.stderr}")
+    if not (head.startswith(expected) or expected.startswith(head)):
+        raise SystemExit(
+            f"CRG checkout {crg_repo} is at {head[:7]}, but corpus.json pins crg_commit "
+            f"{expected}: check out {expected} or update corpus.json."
+        )
+
+
 def run_corpus(corpus_file, crg_repo, work, crg_repo_fixtures, codegraph):
     corpus = json.loads(Path(corpus_file).read_text())
+    check_crg_commit(crg_repo, corpus["crg_commit"])
     fixtures = Path(crg_repo_fixtures)
     parts = [f"# Parity baseline\n\nCRG commit `{corpus['crg_commit']}`; corpus: fixtures from "
              "`tests/fixtures`, one repository per language.\n"]

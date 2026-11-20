@@ -7,7 +7,12 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 
-from parity import Graph, compare, load_graph, main, prepare_copies, render_markdown
+import subprocess
+
+from parity import (
+    GIT, Graph, check_crg_commit, compare, load_graph, main, prepare_copies, render_markdown,
+    run_corpus,
+)
 
 
 def make_db(path, root, nodes, edges=()):
@@ -148,6 +153,36 @@ class ParityTest(unittest.TestCase):
         main(["compare", str(self.d / "c.db"), "/a/r1", str(self.d / "r.db"), "/b/r2",
               "--json", str(out), "--md", str(self.d / "o.md")])
         self.assertEqual(json.loads(out.read_text())["nodes_by_language"]["python"]["both"], 1)
+
+    def test_git_prefix_never_signs_or_runs_hooks(self):
+        self.assertIn("commit.gpgsign=false", GIT)
+        self.assertIn("core.hooksPath=/dev/null", GIT)
+
+    def _repo(self):
+        repo = self.d / "crg"
+        repo.mkdir()
+        for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
+            subprocess.run(GIT + args, cwd=repo, check=True, capture_output=True)
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+        return repo, head
+
+    def test_crg_commit_matches_checkout_by_prefix(self):
+        repo, head = self._repo()
+        check_crg_commit(repo, head[:7])
+        check_crg_commit(repo, head)
+        with self.assertRaises(SystemExit) as e:
+            check_crg_commit(repo, "0000000")
+        self.assertIn("0000000", str(e.exception))
+        self.assertIn(head[:7], str(e.exception))
+
+    def test_corpus_aborts_when_checkout_differs(self):
+        repo, _ = self._repo()
+        corpus = self.d / "corpus.json"
+        corpus.write_text(json.dumps({"crg_commit": "0000000", "languages": {"python": ["x.py"]}}))
+        with self.assertRaises(SystemExit):
+            run_corpus(corpus, repo, self.d / "work", repo / "fixtures", "codegraph")
+        self.assertFalse((self.d / "work").exists())
 
 
 if __name__ == "__main__":
