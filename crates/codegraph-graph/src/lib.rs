@@ -44,6 +44,7 @@ fn serde_compatible_value(value: surrealdb::types::Value) -> surrealdb::types::V
 }
 
 pub mod edge;
+pub mod records;
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite_store;
@@ -58,6 +59,7 @@ pub mod surrealdb_storage;
 pub mod vector_indexes;
 
 pub use edge::*;
+pub use records::*;
 
 #[cfg(feature = "surrealdb")]
 pub use graph_functions::*;

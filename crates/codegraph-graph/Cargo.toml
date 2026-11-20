@@ -39,3 +39,5 @@ required-features = ["surrealdb"]
 [dev-dependencies]
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }

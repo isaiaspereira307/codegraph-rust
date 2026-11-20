@@ -1,7 +1,9 @@
 // ABOUTME: SQLite graph store using the code-review-graph v15 schema.
 // ABOUTME: One database per repository at .code-review-graph/graph.db.
 
+pub mod mapping;
 mod schema;
+mod write;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
