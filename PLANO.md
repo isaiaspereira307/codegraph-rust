@@ -60,7 +60,21 @@ Sobras conhecidas (sem efeito, a limpar junto com a Fase 1):
 
 ---
 
-## Fase 1 — Storage: SurrealDB → SQLite + petgraph
+## Fase 1 — Storage: SurrealDB → SQLite + petgraph 🟡
+
+Plano detalhado: `docs/superpowers/plans/2026-11-19-fase1-storage-sqlite.md`.
+
+Progresso:
+
+- [x] Task 1 — schema CRG v15 e abertura do banco (`21b3f30`).
+- [x] Task 2 — escrita de nós, arestas e metadados (`21aa11f`).
+- [x] Task 3 — reconciliação, FTS e lock de escrita (`ea9de2f`).
+- [x] Task 4 — camada de consulta petgraph para as 8 ferramentas (`b9e56b9`).
+- [x] Task 5 — executor, servidor MCP, `tool run` e `db-check` lendo do SQLite.
+- [ ] Task 6 — writer e indexer gravando no SQLite (hoje `codegraph index` ainda grava no
+      SurrealDB, então as ferramentas só enxergam bancos criados pelo CRG ou pelos testes).
+- [ ] Task 7 — remover SurrealDB, `schema/*.surql`, `graph_vector.rs` e as sobras de
+      embedding; binário sem `libssl`.
 
 Por quê: compatibilidade com o banco do CRG, concorrência (SurrealKV trava o diretório para
 um único processo, e o CRG roda watch + hooks + MCP ao mesmo tempo), licença (SurrealDB é
@@ -174,8 +188,8 @@ harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
 
 ## Decisões em aberto
 
-1. **Compatibilidade de banco**: ler e escrever o mesmo `.code-review-graph/graph.db` do CRG
-   (permite migrar usuários e comparar direto), ou só importar? Recomendação: mesmo schema.
+1. ~~**Compatibilidade de banco**~~: decidido na Fase 1 — mesmo schema v15, mesmo
+   `.code-review-graph/graph.db` do CRG.
 2. **Nome do binário**: manter `codegraph` ou usar `code-review-graph`/`crg`?
 3. **Tiers com LSP**: manter os tiers `balanced`/`full` (mais precisos, exigem language
    servers instalados) ou só o `fast` na v1? Recomendação: manter, com `fast` como padrão.
@@ -185,7 +199,7 @@ harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
 ## Ordem sugerida e marcos
 
 1. ~~Fechar a Fase 0~~ ✅.
-2. Fase 1 inteira (storage); sem ela, as fases seguintes construiriam sobre o SurrealDB.
+2. Fase 1 inteira (storage; Tasks 1–5 ✅, faltam 6 e 7); sem ela, as fases seguintes construiriam sobre o SurrealDB.
 3. Harness da Fase 2 antes de qualquer ferramenta nova, para medir regressões desde o início.
 4. Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code.
 5. Fases 4 e 5 conforme o uso real pedir.

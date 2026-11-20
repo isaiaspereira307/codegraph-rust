@@ -1,7 +1,7 @@
-// ABOUTME: Tool executor for SurrealDB graph analysis functions
-// ABOUTME: Executes graph analysis tools by calling Rust SDK wrappers with validated parameters
+// ABOUTME: Tool executor for the graph analysis tools over the SQLite graph
+// ABOUTME: Validates tool parameters, runs GraphQuery calls and caches their results
 
-use codegraph_graph::GraphFunctions;
+use codegraph_graph::graph_query::GraphQuery;
 use codegraph_mcp_core::debug_logger::DebugLogger;
 use codegraph_mcp_core::error::{McpError, Result};
 use lru::LruCache;
@@ -21,7 +21,7 @@ use crate::graph_tool_schemas::GraphToolSchemas;
 pub struct CacheStats {
     /// Number of cache hits (successful lookups)
     pub hits: u64,
-    /// Number of cache misses (lookups that required SurrealDB call)
+    /// Number of cache misses (lookups that required a graph query)
     pub misses: u64,
     /// Number of entries evicted due to LRU policy
     pub evictions: u64,
@@ -44,9 +44,9 @@ impl CacheStats {
 }
 
 /// Executor for graph analysis tools
-/// Receives tool calls from LLM and executes appropriate SurrealDB functions
+/// Receives tool calls and runs the matching GraphQuery method
 pub struct GraphToolExecutor {
-    graph_functions: Arc<GraphFunctions>,
+    graph_query: Arc<GraphQuery>,
     /// LRU cache for tool results (function_name + params → result)
     cache: Arc<Mutex<LruCache<String, JsonValue>>>,
     /// Cache statistics for observability
@@ -122,17 +122,17 @@ impl GraphToolExecutor {
     /// Create a new tool executor
     /// Derives max result size from the agent's context window (environment, then
     /// `[llm] context_window` in the config file, then the default)
-    pub fn new(graph_functions: Arc<GraphFunctions>) -> Self {
+    pub fn new(graph_query: Arc<GraphQuery>) -> Self {
         let context_window = codegraph_core::config_manager::ConfigManager::agent_context_window();
 
-        Self::with_context_window(graph_functions, context_window)
+        Self::with_context_window(graph_query, context_window)
     }
 
     /// Create a new tool executor with explicit context window for result size limiting
     /// max_result_bytes = context_window * 2 (about half the window at 4 bytes/token), capped at
     /// `MAX_RESULT_BYTES_CEILING`
     pub fn with_context_window(
-        graph_functions: Arc<GraphFunctions>,
+        graph_query: Arc<GraphQuery>,
         context_window: usize,
     ) -> Self {
         // Calculate max result bytes: use ~50% of context window, assuming ~4 chars per token
@@ -141,12 +141,12 @@ impl GraphToolExecutor {
             .saturating_mul(2)
             .min(MAX_RESULT_BYTES_CEILING);
 
-        Self::with_limits(graph_functions, true, 100, max_result_bytes)
+        Self::with_limits(graph_query, true, 100, max_result_bytes)
     }
 
     /// Create a new tool executor with custom cache and result size configuration
     pub fn with_limits(
-        graph_functions: Arc<GraphFunctions>,
+        graph_query: Arc<GraphQuery>,
         cache_enabled: bool,
         cache_size: usize,
         max_result_bytes: usize,
@@ -168,7 +168,7 @@ impl GraphToolExecutor {
         );
 
         Self {
-            graph_functions,
+            graph_query,
             cache,
             cache_stats,
             cache_enabled,
@@ -178,12 +178,12 @@ impl GraphToolExecutor {
 
     /// Create a new tool executor with custom cache configuration (legacy compatibility)
     pub fn with_cache(
-        graph_functions: Arc<GraphFunctions>,
+        graph_query: Arc<GraphQuery>,
         cache_enabled: bool,
         cache_size: usize,
     ) -> Self {
         Self::with_limits(
-            graph_functions,
+            graph_query,
             cache_enabled,
             cache_size,
             DEFAULT_MAX_RESULT_BYTES,
@@ -195,9 +195,9 @@ impl GraphToolExecutor {
         self.cache_stats.lock().clone()
     }
 
-    /// Expose underlying graph functions for read-only summaries
-    pub fn graph_functions(&self) -> Arc<GraphFunctions> {
-        self.graph_functions.clone()
+    /// Expose the underlying graph queries for read-only summaries
+    pub fn graph_query(&self) -> Arc<GraphQuery> {
+        self.graph_query.clone()
     }
 
     /// Clear the cache and reset statistics
@@ -308,11 +308,11 @@ impl GraphToolExecutor {
             let _schema = GraphToolSchemas::get_by_name(tool_name)
                 .ok_or_else(|| McpError::Protocol(format!("Unknown tool: {}", tool_name)))?;
 
-            let project_id = self.graph_functions.project_id();
+            let project_id = self.graph_query.project_id();
 
             // Check cache if enabled
             if self.cache_enabled {
-                let cache_key = Self::cache_key(project_id, tool_name, &parameters);
+                let cache_key = Self::cache_key(&project_id, tool_name, &parameters);
 
                 // Try cache lookup
                 {
@@ -375,7 +375,7 @@ impl GraphToolExecutor {
 
             // Cache the result if enabled
             if self.cache_enabled {
-                let cache_key = Self::cache_key(project_id, tool_name, &parameters);
+                let cache_key = Self::cache_key(&project_id, tool_name, &parameters);
                 let mut cache = self.cache.lock();
                 let was_evicted = cache.len() >= cache.cap().get();
                 cache.put(cache_key, result.clone());
@@ -420,7 +420,7 @@ impl GraphToolExecutor {
         let limit = params["limit"].as_i64().unwrap_or(10).clamp(1, 50) as usize;
 
         let result = self
-            .graph_functions
+            .graph_query
             .find_nodes_by_name(name, limit)
             .await
             .map_err(|e| McpError::Protocol(format!("find_nodes_by_name failed: {}", e)))?;
@@ -446,7 +446,7 @@ impl GraphToolExecutor {
         let depth = params["depth"].as_i64().unwrap_or(3) as i32;
 
         let result = self
-            .graph_functions
+            .graph_query
             .get_transitive_dependencies(node_id, edge_type, depth)
             .await
             .map_err(|e| {
@@ -471,7 +471,7 @@ impl GraphToolExecutor {
             .ok_or_else(|| McpError::Protocol("Missing edge_type".to_string()))?;
 
         let result = self
-            .graph_functions
+            .graph_query
             .detect_circular_dependencies(edge_type)
             .await
             .map_err(|e| {
@@ -498,7 +498,7 @@ impl GraphToolExecutor {
         let max_depth = params["max_depth"].as_i64().unwrap_or(5) as i32;
 
         let result = self
-            .graph_functions
+            .graph_query
             .trace_call_chain(from_node, max_depth)
             .await
             .map_err(|e| McpError::Protocol(format!("trace_call_chain failed: {}", e)))?;
@@ -521,9 +521,9 @@ impl GraphToolExecutor {
 
         // Optional project_id override to reduce mismatches between indexing and runtime
         let gf = if let Some(project_id) = params["project_id"].as_str() {
-            self.graph_functions.with_project_id(project_id)
+            self.graph_query.with_project_id(project_id)
         } else {
-            (*self.graph_functions).clone()
+            (*self.graph_query).clone()
         };
 
         let result = gf
@@ -545,7 +545,7 @@ impl GraphToolExecutor {
         let min_degree = params["min_degree"].as_i64().unwrap_or(5) as i32;
 
         let result = self
-            .graph_functions
+            .graph_query
             .get_hub_nodes(min_degree)
             .await
             .map_err(|e| McpError::Protocol(format!("get_hub_nodes failed: {}", e)))?;
@@ -571,7 +571,7 @@ impl GraphToolExecutor {
         let depth = params["depth"].as_i64().unwrap_or(3) as i32;
 
         let result = self
-            .graph_functions
+            .graph_query
             .get_reverse_dependencies(node_id, edge_type, depth)
             .await
             .map_err(|e| McpError::Protocol(format!("get_reverse_dependencies failed: {}", e)))?;
@@ -593,7 +593,7 @@ impl GraphToolExecutor {
         let limit = params["limit"].as_i64().unwrap_or(20) as i32;
 
         let result = self
-            .graph_functions
+            .graph_query
             .get_complexity_hotspots(min_complexity, limit)
             .await
             .map_err(|e| McpError::Protocol(format!("find_complexity_hotspots failed: {}", e)))?;

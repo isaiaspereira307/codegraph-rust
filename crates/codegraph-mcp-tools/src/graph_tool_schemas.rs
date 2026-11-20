@@ -1,4 +1,4 @@
-// ABOUTME: LLM tool schemas for SurrealDB graph analysis functions
+// ABOUTME: LLM tool schemas for graph analysis tools
 // ABOUTME: JSON schemas for agentic tool calling - defines parameters and descriptions for LLM consumption
 
 use serde::{Deserialize, Serialize};

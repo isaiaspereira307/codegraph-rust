@@ -56,6 +56,11 @@ impl GraphQuery {
         &self.store
     }
 
+    /// Cache and log key: the project root this database belongs to.
+    pub fn project_id(&self) -> String {
+        self.store.root().display().to_string()
+    }
+
     /// One database holds one project, so the id does not change what is queried.
     pub fn with_project_id(&self, _project_id: &str) -> Self {
         self.clone()

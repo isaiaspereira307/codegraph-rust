@@ -16,12 +16,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use crate::prompts::{INITIAL_INSTRUCTIONS, INITIAL_INSTRUCTIONS_PROMPT_NAME};
-use codegraph_graph::{GraphFunctions, SurrealDbConfig, SurrealDbStorage};
+use codegraph_graph::graph_query::GraphQuery;
+use codegraph_graph::sqlite_store::{SqliteGraphStore, db_path};
 use codegraph_mcp_tools::GraphToolExecutor;
 
 /// Dependency relationship followed by the graph traversal tools.
@@ -223,44 +224,24 @@ impl CodeGraphMCPServer {
     }
 }
 
-/// Open the project store and build the tool executor.
+/// Open the project's graph database and build the tool executor.
 ///
-/// Uses the embedded store under the working directory unless `CODEGRAPH_SURREALDB_URL`
-/// points at a server. The project ID comes from `CODEGRAPH_PROJECT_ID`, falling back to
-/// the canonical working directory, matching what `codegraph index` writes.
+/// Reads `<cwd>/.code-review-graph/graph.db` (created empty if absent), the database
+/// `codegraph index` and code-review-graph write.
 async fn open_executor() -> Result<Arc<GraphToolExecutor>, String> {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let storage = SurrealDbStorage::new(SurrealDbConfig::for_project(&project_root))
-        .await
-        .map_err(|e| format!("Failed to open SurrealDB storage: {e}"))?;
-
-    let raw_project = std::env::var("CODEGRAPH_PROJECT_ID")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| project_root.display().to_string());
-    let project_id = Path::new(&raw_project)
-        .canonicalize()
-        .map(|p| p.display().to_string())
-        .unwrap_or(raw_project);
-
-    let graph_functions = Arc::new(GraphFunctions::new_with_project_id(
-        storage.db(),
-        project_id,
-    ));
-    match graph_functions.count_nodes_for_project().await {
+    let store = SqliteGraphStore::open(&project_root)
+        .map_err(|e| format!("Failed to open graph database: {e:#}"))?;
+    let query = Arc::new(GraphQuery::new(store));
+    match query.count_nodes_for_project().await {
         Ok(0) => tracing::warn!(
-            "Project '{}' has zero nodes indexed. Ensure CODEGRAPH_PROJECT_ID matches the indexed project and rerun `codegraph index`.",
-            graph_functions.project_id()
+            "{} has zero nodes indexed; run `codegraph index` in this project.",
+            db_path(&project_root).display()
         ),
-        Ok(count) => tracing::info!(
-            "Project '{}' has {} indexed nodes",
-            graph_functions.project_id(),
-            count
-        ),
+        Ok(count) => tracing::info!("{} has {} indexed nodes", project_root.display(), count),
         Err(e) => tracing::warn!("Could not verify project data presence: {e}"),
     }
-
-    Ok(Arc::new(GraphToolExecutor::new(graph_functions)))
+    Ok(Arc::new(GraphToolExecutor::new(query)))
 }
 
 #[tool_handler]

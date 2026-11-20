@@ -105,13 +105,8 @@ enum Commands {
         pid_file: Option<PathBuf>,
     },
 
-    #[command(about = "Run SurrealDB connectivity/schema canary (debug)")]
-    DbCheck {
-        #[arg(long, help = "Namespace to use (overrides env)")]
-        namespace: Option<String>,
-        #[arg(long, help = "Database to use (overrides env)")]
-        database: Option<String>,
-    },
+    #[command(about = "Open the project graph database and print its counts")]
+    DbCheck,
 
     #[command(about = "Stop running MCP server")]
     Stop {
@@ -507,13 +502,8 @@ enum ConfigAction {
     #[command(about = "Validate configuration")]
     Validate,
 
-    #[command(about = "Run SurrealDB connectivity/schema canary (debug)")]
-    DbCheck {
-        #[arg(long, help = "Namespace to use (overrides env)")]
-        namespace: Option<String>,
-        #[arg(long, help = "Database to use (overrides env)")]
-        database: Option<String>,
-    },
+    #[command(about = "Open the project graph database and print its counts")]
+    DbCheck,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -550,6 +540,12 @@ fn main() -> Result<()> {
     }
     if let Commands::Hooks { ref action } = cli.command {
         return agent_hooks::run(action);
+    }
+    if let Commands::DbCheck = cli.command {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(handle_db_check());
     }
     if let Commands::Init {
         ref path,
@@ -715,11 +711,8 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Config { action } => {
             handle_config(action).await?;
         }
-        Commands::DbCheck {
-            namespace,
-            database,
-        } => {
-            handle_db_check(namespace, database).await?;
+        Commands::DbCheck => {
+            unreachable!("handled before configuration")
         }
 
         #[cfg(feature = "daemon")]
@@ -1986,31 +1979,28 @@ CODEGRAPH_EMBEDDING_PROVIDER=auto
         ConfigAction::Validate => {
             println!("✓ Configuration is valid");
         }
-        ConfigAction::DbCheck {
-            namespace,
-            database,
-        } => {
-            handle_db_check(namespace, database).await?;
+        ConfigAction::DbCheck => {
+            handle_db_check().await?;
         }
     }
 
     Ok(())
 }
 
-async fn handle_db_check(namespace: Option<String>, database: Option<String>) -> Result<()> {
-    use codegraph_graph::{SurrealDbConfig, SurrealDbStorage};
+/// Opens `.code-review-graph/graph.db` in the working directory (creating it if absent).
+async fn handle_db_check() -> Result<()> {
+    use codegraph_graph::sqlite_store::{SCHEMA_VERSION, SqliteGraphStore, db_path};
 
-    let mut config = SurrealDbConfig::default();
-    if let Some(ns) = namespace {
-        config.namespace = ns;
-    }
-    if let Some(db) = database {
-        config.database = db;
-    }
-
-    let target = config.connection.clone();
-    let _storage = SurrealDbStorage::new(config).await?;
-    println!("✓ SurrealDB connectivity verified ({})", target);
+    let root = std::env::current_dir()?;
+    let store = SqliteGraphStore::open(&root)?;
+    let counts = store.counts().await?;
+    println!(
+        "✓ {} (schema {SCHEMA_VERSION}): {} nodes, {} edges, {} files",
+        db_path(&root).display(),
+        counts.nodes,
+        counts.edges,
+        counts.files
+    );
     Ok(())
 }
 

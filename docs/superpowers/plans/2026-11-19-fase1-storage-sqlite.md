@@ -264,10 +264,10 @@ Snapshot: `StableDiGraph` carregado de `nodes ⟕ cg_nodes` + `edges`, guardado 
 - Test: os existentes (`every_graph_tool_is_exposed_over_mcp`, `tool_cli_integration`,
   `e2e_mcp_tools`) ajustados ao novo store.
 
-- [ ] Ajustar testes para criar o fixture via `SqliteGraphStore` → FAIL.
-- [ ] Trocar a dependência → `cargo test -p codegraph-mcp-tools -p codegraph-mcp-server
+- [x] Ajustar testes para criar o fixture via `SqliteGraphStore` → FAIL.
+- [x] Trocar a dependência → `cargo test -p codegraph-mcp-tools -p codegraph-mcp-server
       --all-features` e `cargo test -p codegraph-mcp --test e2e_mcp_tools` PASS.
-- [ ] Commit `feat(server): serve graph tools from SQLite` + push.
+- [x] Commit `feat(server): serve graph tools from SQLite` + push.
 
 ### Task 6: Writer e indexer sobre SQLite
 

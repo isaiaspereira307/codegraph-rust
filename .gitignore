@@ -102,6 +102,7 @@ logs/
 
 # Development databases and test files
 *.db
+!crates/codegraph-graph/tests/fixtures/*.db
 *.sqlite
 *.sqlite3
 dev.db

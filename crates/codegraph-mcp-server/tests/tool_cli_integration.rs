@@ -168,3 +168,78 @@ fn runtime_failure_has_json_stdout_and_nonzero_exit_status() {
         assert!(!output.stderr.is_empty());
     }
 }
+
+/// Seeds `.code-review-graph/graph.db` with main → helper.
+fn seed_graph(project: &std::path::Path) -> (String, String) {
+    use codegraph_core::{CodeNode, EdgeType, Language, Location, NodeType};
+    use codegraph_graph::{CodeEdge, sqlite_store::SqliteGraphStore};
+    let node = |name: &str, line: u32| {
+        CodeNode::new(
+            name,
+            Some(NodeType::Function),
+            Some(Language::Python),
+            Location {
+                file_path: "app.py".into(),
+                line,
+                column: 0,
+                end_line: Some(line + 1),
+                end_column: None,
+            },
+        )
+    };
+    let (main, helper) = (node("main", 1), node("helper", 5));
+    let ids = (main.id.to_string(), helper.id.to_string());
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let store = SqliteGraphStore::open(project).unwrap();
+        store
+            .upsert_nodes_batch(&[main.clone(), helper.clone()])
+            .await
+            .unwrap();
+        store
+            .upsert_edges_batch(&[CodeEdge::new(main.id, helper.id, EdgeType::Calls)])
+            .await
+            .unwrap();
+        store.finalize("full").await.unwrap();
+    });
+    ids
+}
+
+#[test]
+fn tool_run_reads_the_sqlite_graph() {
+    let project = tempfile::tempdir().unwrap();
+    let (main_id, helper_id) = seed_graph(project.path());
+
+    let output = run(
+        &["tool", "run", "find_nodes_by_name", "--params", r#"{"name":"helper"}"#],
+        None,
+        project.path(),
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let found = &response["result"][0];
+    assert_eq!(found["name"], "helper");
+    assert_eq!(found["id"], helper_id);
+
+    let params = json!({ "node_id": helper_id, "edge_type": "calls" }).to_string();
+    let output = run(
+        &["tool", "run", "get_reverse_dependencies", "--params", &params],
+        None,
+        project.path(),
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"][0]["id"], main_id);
+    assert_eq!(response["result"][0]["dependent_depth"], 1);
+}
+
+#[test]
+fn db_check_reports_the_sqlite_graph() {
+    let project = tempfile::tempdir().unwrap();
+    seed_graph(project.path());
+    let output = run(&["db-check"], None, project.path());
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(".code-review-graph/graph.db"), "{stdout}");
+    assert!(stdout.contains("schema 15"), "{stdout}");
+    assert!(stdout.contains("2 nodes, 1 edges, 1 files"), "{stdout}");
+}
