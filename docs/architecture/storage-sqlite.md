@@ -40,7 +40,12 @@ Tools report a node by its `cg_nodes.uuid`; nodes CRG wrote (no uuid) are report
 | Function | Function |
 | Class, Struct, Trait, Interface | Class |
 | Enum, Type | Type |
-| Module, Directory, Variable, Import, Other(s) | kept as the Rust name (no CRG equivalent) |
+| File | File (one per source file, `qualified_name` = path) |
+| Test | Test (`is_test = 1`; test functions/methods) |
+| Module, Directory, Variable, Other(s) | kept as the Rust name (no CRG equivalent) |
+
+`Import` nodes are no longer emitted: an import is an `IMPORTS_FROM` edge from the file to the
+imported module, resolved per language to a file path like CRG and otherwise kept as text.
 
 | Rust `EdgeType` | `edges.kind` |
 |---|---|
@@ -48,10 +53,13 @@ Tools report a node by its `cg_nodes.uuid`; nodes CRG wrote (no uuid) are report
 | Imports | IMPORTS_FROM |
 | Extends | INHERITS |
 | Implements | IMPLEMENTS |
-| Contains | CONTAINS |
+| Contains | CONTAINS (File → top-level symbol, class → method) |
 | References | REFERENCES |
 | Defines, Uses, Other(s) | upper-cased name (`DEFINES`, `USES`, …) |
 
-The original Rust kind is kept in `cg_nodes.rust_kind`. Losses in the CRG → Rust direction:
-CRG `Test` nodes are reported as functions with `kind = "Test"`; CRG-only edge kinds
-(`TESTED_BY`, `HANDLES`, …) are visible to the tools under their CRG names.
+The original Rust kind is kept in `cg_nodes.rust_kind`. Produced like CRG: `File` and `Test`
+nodes, `CONTAINS`, `IMPORTS_FROM` to a file path, and `TESTED_BY` (derived when indexing
+finishes from `Calls` edges whose source is a `Test` node). Call and import targets that do
+not resolve are stored as text (the unresolved name) instead of being dropped. Remaining
+losses: `Test` detection needs decorators for Rust/Java (not recorded yet), and CRG-only edge
+kinds such as `HANDLES` are visible to the tools under their CRG names.

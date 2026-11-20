@@ -95,8 +95,8 @@ Tarefas:
    `metadata.last_updated`: dependências transitivas e reversas, ciclos (Tarjan), hubs,
    coupling, call chain. Reimplementar as 8 ferramentas atuais sobre ela, no lugar das
    funções `fn::*` em SurrealQL.
-5. Remover `surrealdb`, `schema/*.surql`, `SurrealDbStorage`, `CODEGRAPH_SURREALDB_*`,
-   `db-check` e as sobras de embedding listadas na Fase 0.
+5. Remover `surrealdb`, `schema/*.surql`, `SurrealDbStorage`, `CODEGRAPH_SURREALDB_*`
+   e as sobras de embedding listadas na Fase 0 (`db-check` ficou, agora sobre o SQLite).
 6. Migrar o lock de processo único para o modelo do CRG (vários leitores, um escritor; WAL).
 
 Critério de aceite: `codegraph index` + `codegraph tool run …` + `codegraph start stdio`
@@ -110,6 +110,20 @@ sobre um repositório fixture.
 Risco principal do projeto: o `parser.py` do CRG tem ~25k linhas de regras por linguagem,
 mais resolvers específicos (C#, AOP, eventos, HCL, aliases npm, workspaces, jedi), contra
 ~12k linhas no `codegraph-parser`.
+
+Plano detalhado (harness + camada comum): `docs/superpowers/plans/2026-11-20-fase2-paridade-parser.md`.
+
+Piloto (2026-11-20, 7 fixtures de `../code-review-graph/tests/fixtures`): CRG 90 nós / 203
+arestas, Rust 96 / 29. A maior diferença não é por linguagem, é de forma do grafo: o Rust não
+gera nó `File`, `CONTAINS`, `Test`/`TESTED_BY`, `INHERITS`; grava métodos sem a classe no
+nome (`__init__@L10`), imports como nós `Import` com `IMPORTS_FROM` em laço e descarta
+chamadas não resolvidas (o CRG guarda o texto do alvo). Por isso a camada comum
+(`crg_shape`) vem antes das regras por linguagem.
+
+Atenção: o `code-review-graph` instalado no PATH é 2.3.7 e cria schema **9**; o hook de
+SessionStart dele já gravou `.code-review-graph/graph.db` v9 neste repo, que o Rust recusa
+abrir. O harness usa o CRG da fonte (`uv run --frozen --project ../code-review-graph`, v2.4.0,
+schema 15). Atualizar o CRG instalado ou desligar o hook dele neste repo.
 
 1. Harness de paridade (`scripts/parity/`): indexar o mesmo repositório com o CRG (Python) e
    com o binário Rust; comparar os dois `graph.db` por `(kind, qualified_name, file, linhas)`
@@ -125,6 +139,58 @@ mais resolvers específicos (C#, AOP, eventos, HCL, aliases npm, workspaces, jed
 
 Critério de aceite: ≥95% de concordância de nós e ≥90% de arestas CALLS/IMPORTS nas
 linguagens prioritárias, com as divergências restantes documentadas.
+
+### Progresso da Fase 2
+
+Plano 1 (harness + camada comum) concluído, commits `d5f4e09..HEAD`: `scripts/parity/`
+(corpus de 5 linguagens, `parity.py run|corpus`), nós `File`/`CONTAINS`, nomes qualificados
+por classe/dono (`crg_shape`), imports como `IMPORTS_FROM File → módulo` resolvidos por
+linguagem como o CRG (senão ficam como texto; nós `Import` removidos), nós `Test`
+(`is_test`), alvos não resolvidos guardados como texto, `TESTED_BY` derivado no finalize e
+nomes soltos ligados só no mesmo arquivo ou via arquivo importado. Linha de base:
+`docs/parity/baseline.md` (antes e depois).
+
+Jaccard depois do plano 1 (antes → depois, nós / CALLS / IMPORTS_FROM):
+
+| linguagem | nós | CALLS | IMPORTS_FROM |
+|---|---|---|---|
+| python | 0.51 → 1.00 | 0.12 → 0.55 | 0 → 1.00 |
+| typescript | 0.20 → 0.44 | 0 → 0.13 | 0 → 1.00 |
+| go | 0.30 → 1.00 | 0.16 → 0.13 | 0 → 1.00 |
+| rust | 0.38 → 0.74 | 0.17 → 0.50 | 0 → 0.50 |
+| java | 0.17 → 0.95 | 0 → 0.35 | 0 → 1.00 |
+
+### Próximos planos por linguagem
+
+Ordem pela pior concordância de CALLS/IMPORTS_FROM (TESTED_BY junto):
+
+1. **TypeScript/JS** (CALLS 0.13, nós 0.44, TESTED_BY 0): o extrator descarta métodos de
+   classe (CONTAINS 0.31); `INHERITS`; `TESTED_BY`; especificadores `.`/`..`; stems com
+   ponto (`./outlet.entity`) já tratados, revisar aliases npm e workspaces.
+2. **Go** (CALLS 0.13): o extrator grava texto de chamada multi-linha / literais de closure
+   como alvo; `IMPORTS_FROM` no CRG aponta para o diretório do pacote; ligação no mesmo
+   pacote (vários arquivos).
+3. **Java** (CALLS 0.35): `@Test` por anotações (decorators não são gravados pelos
+   extratores); construtor/estático do mesmo pacote; `INHERITS`/`IMPLEMENTS`.
+4. **Rust** (CALLS 0.50, IMPORTS_FROM 0.50, TESTED_BY 0): nós `impl` duplicados (CONTAINS
+   pode ligar ao `impl` e não à struct); `#[test]` precisa de decorators; `use m::f` com
+   primeiro segmento solto (CRG percorre a raiz do crate); raiz do crate por `lib.rs`/
+   `main.rs`, não por `Cargo.toml`; grupos `use` aninhados; busca não limitada à raiz do
+   repositório.
+5. **Python** (CALLS 0.55, TESTED_BY 0.50): `_python_folder_hides_module`; `pkg/m.py` vs
+   `pkg/m/__init__.py` (CRG escolhe o pacote); `INHERITS`, `REFERENCES`.
+6. Demais linguagens (C#, C/C++, Ruby, PHP, Kotlin, Swift, Dart): nenhuma resolve imports
+   ainda; corpus e fixtures a criar.
+
+Dívida menor registrada: `stats.functions` e hotspots de complexidade ignoram nós `Test`;
+atributos `crg_shaped`/`pre_shape_qualified_name` em todo nó (tamanho); sem teste de uuid
+de nó `Test` no indexador.
+
+Polimento do harness (parqueado): `_check_crg_schema` sem tabela `metadata` gera traceback;
+`FileNotFoundError` quando faltam `uv`/`git`; `git` com `-c commit.gpgsign=false -c
+core.hooksPath=/dev/null`; incluir stdout quando a ferramenta falha; `crg_commit` não é
+verificado contra o checkout; `_emit` duplicado em `compare`; URI `file:` sem escape;
+divergência de linguagem não reportada.
 
 ---
 
