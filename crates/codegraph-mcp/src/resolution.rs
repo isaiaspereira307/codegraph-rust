@@ -32,6 +32,14 @@ pub(crate) fn aliases(node: &CodeNode) -> BTreeSet<String> {
     if let Some(qualified) = node.metadata.attributes.get("qualified_name") {
         names.insert(qualified.clone());
     }
+    // The extractor's own qualified name, from before the CRG reshape.
+    if let Some(original) = node
+        .metadata
+        .attributes
+        .get(codegraph_parser::languages::crg_shape::PRE_SHAPE_QN_ATTR)
+    {
+        names.insert(original.clone());
+    }
     if let Some(kind) = &node.node_type {
         names.insert(format!("{kind:?}::{name}"));
     }
@@ -281,6 +289,21 @@ mod tests {
             metadata: Default::default(),
             span: None,
         }
+    }
+
+    #[test]
+    fn pre_shape_qualified_name_stays_an_alias() {
+        let mut method = node("m.rs", "new");
+        method
+            .metadata
+            .attributes
+            .insert("qualified_name".into(), "m.rs::A.new".into());
+        method.metadata.attributes.insert(
+            codegraph_parser::languages::crg_shape::PRE_SHAPE_QN_ATTR.into(),
+            "m.rs::impl<A>::new".into(),
+        );
+        let names = aliases(&method);
+        assert!(names.contains("m.rs::A.new") && names.contains("m.rs::impl<A>::new"));
     }
 
     #[test]

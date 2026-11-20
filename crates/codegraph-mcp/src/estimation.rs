@@ -161,7 +161,7 @@ pub(crate) async fn parse_snapshots_with_cache(
                 .ok_or_else(|| anyhow::anyhow!("Unsupported source: {}", file_path.display()))?;
             let policy = parser_ref.extraction_policy();
             let cache_key = codegraph_core::artifact_cache::fingerprint(&(
-                "unified-ast-v5",
+                "unified-ast-v6",
                 parser_ref.project_root(),
                 &file_path,
                 &snapshot.content_hash,

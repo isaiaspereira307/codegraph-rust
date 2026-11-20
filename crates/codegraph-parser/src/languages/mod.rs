@@ -91,8 +91,7 @@ pub fn extract_for_language_with_policy(
     policy: ExtractionPolicy,
 ) -> Option<ExtractionResult> {
     let mut result = extract_unshaped(language, tree, content, file_path, policy)?;
-    // code-review-graph's File node ends at `source.count("\n") + 1`.
-    let line_count = content.matches('\n').count() as u32 + 1;
+    let line_count = crg_shape::line_count(content);
     crg_shape::shape_for_crg(&mut result, file_path, language.clone(), line_count);
     Some(result)
 }

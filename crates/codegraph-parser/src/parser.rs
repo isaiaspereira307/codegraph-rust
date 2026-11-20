@@ -696,10 +696,17 @@ impl TreeSitterParser {
                             used_content.to_string(),
                         );
                         visitor.visit(tree_used.root_node());
-                        ExtractionResult {
+                        let mut result = ExtractionResult {
                             nodes: visitor.nodes,
                             edges: Vec::new(),
-                        }
+                        };
+                        crate::languages::crg_shape::shape_for_crg(
+                            &mut result,
+                            &file_path,
+                            language.clone(),
+                            crate::languages::crg_shape::line_count(&used_content),
+                        );
+                        result
                     });
 
                     // Apply Fast ML enhancement for maximum graph completeness
