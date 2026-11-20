@@ -2,6 +2,9 @@ use codegraph_core::{EdgeId, EdgeType, NodeId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Metadata key carrying the verbatim target of an unresolved edge.
+pub const UNRESOLVED_TARGET_KEY: &str = "unresolved_target";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeEdge {
     pub id: EdgeId,
@@ -24,6 +27,25 @@ impl CodeEdge {
             metadata: HashMap::new(),
             project_id: None,
         }
+    }
+
+    /// An edge whose target names no indexed node. It is stored, as code-review-graph does,
+    /// with `target_qualified` set to `target` verbatim. `to` is a placeholder id derived from
+    /// the text, so occurrences of one target share it; it never names a node.
+    pub fn unresolved(from: NodeId, target: &str, edge_type: EdgeType) -> Self {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(
+            serde_json::to_vec(&("unresolved-target-v1", target)).expect("serializable target"),
+        );
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        Self::new(from, NodeId::from_bytes(bytes), edge_type)
+            .with_metadata(UNRESOLVED_TARGET_KEY.into(), target.into())
+    }
+
+    /// The target text of an edge built by [`CodeEdge::unresolved`].
+    pub fn unresolved_target(&self) -> Option<&str> {
+        self.metadata.get(UNRESOLVED_TARGET_KEY).map(String::as_str)
     }
 
     pub fn with_weight(mut self, weight: f64) -> Self {

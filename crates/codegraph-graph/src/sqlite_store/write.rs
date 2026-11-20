@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 /// Prefix of an edge endpoint whose node has not been written yet.
 pub(crate) const PENDING_PREFIX: &str = "cg:";
+/// Prefix of `cg_edges.to_uuid` for an edge whose target is stored as text, not a node.
+pub(crate) const TEXT_TARGET_PREFIX: &str = "text:";
 const DOCSTRING_CHARS: usize = 400;
 
 pub(crate) fn now_epoch() -> f64 {
@@ -249,18 +251,30 @@ fn endpoint(tx: &Transaction, uuid: &str) -> Result<Option<(String, String)>> {
 
 fn write_edge(tx: &Transaction, edge: &CodeEdge, now: f64) -> Result<()> {
     let uuid = edge.id.to_string();
-    let (from, to) = (edge.from.to_string(), edge.to.to_string());
+    let from = edge.from.to_string();
     let source = endpoint(tx, &from)?;
-    let target = endpoint(tx, &to)?;
     let kind = mapping::crg_edge_kind(&edge.edge_type);
     let file_path = source.as_ref().map(|s| s.1.clone()).unwrap_or_default();
     let source_q = source
         .map(|s| s.0)
         .unwrap_or_else(|| format!("{PENDING_PREFIX}{from}"));
-    let resolution = target_resolution(&kind, target.is_some());
-    let target_q = target
-        .map(|t| t.0)
-        .unwrap_or_else(|| format!("{PENDING_PREFIX}{to}"));
+    let (to, target_q, resolution) = match edge.unresolved_target() {
+        // CRG keeps the call/import text and marks call-like targets 'unresolved'.
+        Some(text) => (
+            format!("{TEXT_TARGET_PREFIX}{}", edge.to),
+            text.to_string(),
+            matches!(kind.as_str(), "CALLS" | "REFERENCES").then_some("unresolved"),
+        ),
+        None => {
+            let to = edge.to.to_string();
+            let target = endpoint(tx, &to)?;
+            let resolution = target_resolution(&kind, target.is_some());
+            let target_q = target
+                .map(|t| t.0)
+                .unwrap_or_else(|| format!("{PENDING_PREFIX}{to}"));
+            (to, target_q, resolution)
+        }
+    };
     let line: i64 = edge
         .metadata
         .get("line")

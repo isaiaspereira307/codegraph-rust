@@ -2,7 +2,7 @@
 // ABOUTME: finalize() leaves the database in the state code-review-graph expects after a build.
 
 use super::SqliteGraphStore;
-use super::write::resolve_pending;
+use super::write::{now_epoch, resolve_pending};
 use crate::records::{FileMetadataRecord, ProjectMetadataRecord};
 use anyhow::Result;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -37,13 +37,15 @@ impl SqliteGraphStore {
             fill(&tx, "cg_keep_nodes", &nodes)?;
             fill(&tx, "cg_keep_edges", &edges)?;
             fill(&tx, "cg_keep_files", &files)?;
+            // 'text:' is write::TEXT_TARGET_PREFIX: a text target has no node to lose.
             tx.execute_batch(
                 "DELETE FROM cg_nodes WHERE uuid NOT IN (SELECT uuid FROM cg_keep_nodes); \
                  DELETE FROM nodes WHERE qualified_name NOT IN \
                    (SELECT qualified_name FROM cg_nodes); \
                  DELETE FROM cg_edges WHERE uuid NOT IN (SELECT uuid FROM cg_keep_edges) \
                    OR from_uuid NOT IN (SELECT uuid FROM cg_nodes) \
-                   OR to_uuid NOT IN (SELECT uuid FROM cg_nodes); \
+                   OR (to_uuid NOT IN (SELECT uuid FROM cg_nodes) \
+                       AND to_uuid NOT LIKE 'text:%'); \
                  DELETE FROM edges WHERE id NOT IN (SELECT edge_id FROM cg_edges); \
                  DELETE FROM cg_keep_nodes; DELETE FROM cg_keep_edges;",
             )?;
@@ -143,6 +145,7 @@ impl SqliteGraphStore {
         self.with_conn(move |conn| {
             let tx = conn.transaction()?;
             resolve_pending(&tx)?;
+            derive_tested_by(&tx)?;
             tx.execute_batch(
                 "INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild'); \
                  DELETE FROM nodes_fts_state; \
@@ -167,6 +170,22 @@ impl SqliteGraphStore {
         })
         .await
     }
+}
+
+/// Rebuilds TESTED_BY as code-review-graph does: one edge per CALLS edge whose caller is a
+/// Test node, reversed (callee -> test), keeping the call's file and line. Deleting first
+/// keeps repeated finalisation (full or incremental) idempotent.
+fn derive_tested_by(tx: &Transaction) -> Result<()> {
+    tx.execute("DELETE FROM edges WHERE kind = 'TESTED_BY'", [])?;
+    tx.execute(
+        "INSERT INTO edges (kind, source_qualified, target_qualified, file_path, line, \
+         updated_at) \
+         SELECT 'TESTED_BY', e.target_qualified, e.source_qualified, e.file_path, e.line, ?1 \
+         FROM edges e JOIN nodes n ON n.qualified_name = e.source_qualified \
+         WHERE e.kind = 'CALLS' AND n.kind = 'Test'",
+        [now_epoch()],
+    )?;
+    Ok(())
 }
 
 fn fill(tx: &Transaction, table: &str, values: &[String]) -> Result<()> {

@@ -301,3 +301,39 @@ async fn snapshot_reloads_after_write() {
         .unwrap();
     assert_eq!(q.get_hub_nodes(5).await.unwrap()[0].afferent_degree, 5);
 }
+
+#[tokio::test]
+async fn graph_tools_skip_dangling_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = fixture(dir.path()).await;
+    // c4 calls an unresolved `print` many times; text targets are not graph nodes.
+    let mut edges = Vec::new();
+    for line in 0..6 {
+        let mut e = CodeEdge::unresolved(uuid::Uuid::from_u128(14), "print", EdgeType::Calls)
+            .with_metadata("line".into(), line.to_string());
+        e.set_deterministic_id("p");
+        edges.push(e);
+    }
+    store.upsert_edges_batch(&edges).await.unwrap();
+    store.finalize("full").await.unwrap();
+    let q = GraphQuery::new(store.clone());
+
+    let deps = q
+        .get_reverse_dependencies(&id(14), "CALLS", 3)
+        .await
+        .unwrap();
+    assert_eq!(deps.len(), 3);
+    let out = q
+        .get_transitive_dependencies(&id(14), "CALLS", 3)
+        .await
+        .unwrap();
+    assert!(out.is_empty());
+    assert!(q.find_nodes_by_name("print", 10).await.unwrap().is_empty());
+    let hubs = q.get_hub_nodes(5).await.unwrap();
+    assert_eq!(hubs.len(), 1);
+    assert_eq!(hubs[0].node_id, id(20));
+    assert_eq!(
+        q.detect_circular_dependencies("CALLS").await.unwrap().len(),
+        1
+    );
+}

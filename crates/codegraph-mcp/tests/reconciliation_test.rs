@@ -75,7 +75,11 @@ async fn incremental_catalog_matches_full_graph_and_removes_stale_definitions() 
     let dir = tempfile::tempdir()?;
     let caller = dir.path().join("caller.rs");
     let target = dir.path().join("target.rs");
-    std::fs::write(&caller, "fn caller() { target(); }\n")?;
+    // `target()` crosses files without a `use`: kept as text, as code-review-graph does.
+    std::fs::write(
+        &caller,
+        "fn caller() { target(); helper(); }\nfn helper() {}\n",
+    )?;
     std::fs::write(&target, "fn target() {}\n")?;
     let config = IndexerConfig {
         project_root: dir.path().into(),
@@ -94,16 +98,16 @@ async fn incremental_catalog_matches_full_graph_and_removes_stale_definitions() 
     let storage = indexer.graph_store();
     assert!(storage.root().join(".code-review-graph/graph.db").is_file());
     let before_metadata = file_metadata(&storage)?;
-    let cold_edges: Vec<Value> = rows(&storage, "SELECT extra FROM edges WHERE kind = 'CALLS'")?
-        .iter()
-        .map(|row| serde_json::from_str(row))
-        .collect::<Result<_, _>>()?;
-    assert!(!cold_edges.is_empty());
-    assert!(
-        cold_edges
-            .iter()
-            .all(|edge| edge["resolution_method"] == "exact")
-    );
+    let cold_edges: Vec<Value> = rows(
+        &storage,
+        "SELECT extra FROM edges WHERE kind = 'CALLS' ORDER BY target_qualified",
+    )?
+    .iter()
+    .map(|row| serde_json::from_str(row))
+    .collect::<Result<_, _>>()?;
+    assert_eq!(cold_edges.len(), 2);
+    assert_eq!(cold_edges[0]["resolution_method"], "exact");
+    assert_eq!(cold_edges[1]["unresolved_target"], "target");
     let warm = indexer.index_project(dir.path()).await?;
     assert_eq!(warm.nodes, cold.nodes);
     assert_eq!(warm.edges, cold.edges);
@@ -194,6 +198,131 @@ async fn test_detection_reads_paths_relative_to_the_project_root() -> Result<()>
         .index_single_file(&root.join("tests/spec.ts"))
         .await?;
     check(&indexer.graph_store())?;
+    Ok(())
+}
+
+/// Indexes `files` (fast tier, analyzers off) and returns the indexer, or None when the
+/// environment guard skips the test.
+async fn index_python(
+    name: &str,
+    files: &[(&str, &str)],
+) -> Result<Option<(tempfile::TempDir, ProjectIndexer)>> {
+    if !test_env::run(
+        name,
+        &[
+            ("CODEGRAPH_NO_PROGRESS", Some("1")),
+            ("CODEGRAPH_ANALYZERS", Some("0")),
+            ("CODEGRAPH_ANALYZERS_REQUIRE_TOOLS", Some("0")),
+        ],
+    ) {
+        return Ok(None);
+    }
+    let dir = tempfile::tempdir()?;
+    for (path, source) in files {
+        std::fs::write(dir.path().join(path), source)?;
+    }
+    let config = IndexerConfig {
+        project_root: dir.path().to_path_buf(),
+        indexing_tier: IndexingTier::Fast,
+        ..Default::default()
+    };
+    let indexer = ProjectIndexer::new(
+        config,
+        &CodeGraphConfig::default(),
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden()),
+    )
+    .await?;
+    indexer.index_project(dir.path()).await?;
+    Ok(Some((dir, indexer)))
+}
+
+/// Sorted `kind|source|target` rows of the given kinds, with the project root prefix removed.
+fn edges_of(store: &SqliteGraphStore, root: &std::path::Path, kinds: &str) -> Result<Vec<String>> {
+    let prefix = format!("{}/", root.to_string_lossy());
+    let mut edges: Vec<_> = rows(
+        store,
+        &format!(
+            "SELECT kind, source_qualified, target_qualified FROM edges WHERE kind IN ({kinds})"
+        ),
+    )?
+    .into_iter()
+    .map(|row| row.replace(&prefix, ""))
+    .collect();
+    edges.sort();
+    Ok(edges)
+}
+
+#[tokio::test]
+async fn unresolved_call_is_kept_as_text() -> Result<()> {
+    let Some((dir, indexer)) = index_python(
+        concat!(module_path!(), "::unresolved_call_is_kept_as_text"),
+        &[("a.py", "import os\n\ndef f():\n    print(\"x\")\n")],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(
+        edges_of(
+            &indexer.graph_store(),
+            dir.path(),
+            "'CALLS', 'IMPORTS_FROM'"
+        )?,
+        ["CALLS|a.py::f|print", "IMPORTS_FROM|a.py|os"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unresolved_target_never_binds_to_other_file() -> Result<()> {
+    let Some((dir, indexer)) = index_python(
+        concat!(
+            module_path!(),
+            "::unresolved_target_never_binds_to_other_file"
+        ),
+        &[
+            (
+                "a.py",
+                "def f():\n    helper()\n    local()\n\ndef local():\n    pass\n",
+            ),
+            ("b.py", "def helper():\n    return 1\n"),
+        ],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(
+        edges_of(&indexer.graph_store(), dir.path(), "'CALLS'")?,
+        ["CALLS|a.py::f|a.py::local", "CALLS|a.py::f|helper"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn tested_by_mirrors_calls_from_tests() -> Result<()> {
+    let Some((dir, indexer)) = index_python(
+        concat!(module_path!(), "::tested_by_mirrors_calls_from_tests"),
+        &[(
+            "test_a.py",
+            "def f():\n    pass\n\ndef test_x():\n    f()\n    print(1)\n",
+        )],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let expected = [
+        "TESTED_BY|print|test_a.py::test_x",
+        "TESTED_BY|test_a.py::f|test_a.py::test_x",
+    ];
+    let store = indexer.graph_store();
+    assert_eq!(edges_of(&store, dir.path(), "'TESTED_BY'")?, expected);
+    // A watch-style single-file run rebuilds rather than duplicates them.
+    indexer
+        .index_single_file(&dir.path().join("test_a.py"))
+        .await?;
+    assert_eq!(edges_of(&store, dir.path(), "'TESTED_BY'")?, expected);
     Ok(())
 }
 

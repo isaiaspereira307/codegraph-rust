@@ -334,3 +334,121 @@ fn edge_kind_mapping_round_trips() {
     assert_eq!(crg_node_kind(&NodeType::Enum), "Type");
     assert_eq!(crg_node_kind(&NodeType::Module), "Module");
 }
+
+#[tokio::test]
+async fn unresolved_call_is_kept_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, conn) = open(dir.path());
+    let f = node(1, "f", NodeType::Function, "a.py", 1);
+    store
+        .upsert_nodes_batch(std::slice::from_ref(&f))
+        .await
+        .unwrap();
+    let mut e = CodeEdge::unresolved(f.id, "print", EdgeType::Calls)
+        .with_metadata("line".into(), "2".into());
+    e.set_deterministic_id("p");
+    assert_eq!(e.unresolved_target(), Some("print"));
+    store.upsert_edges_batch(&[e.clone()]).await.unwrap();
+    store.upsert_edges_batch(&[e.clone()]).await.unwrap();
+    store
+        .reconcile_catalog(
+            "p",
+            vec![f.id.to_string()],
+            vec![e.id.to_string()],
+            vec!["a.py".into()],
+        )
+        .await
+        .unwrap();
+    store.finalize("full").await.unwrap();
+
+    let row: (String, String, String, i64, Option<String>) = conn
+        .query_row(
+            "SELECT source_qualified, target_qualified, file_path, line, target_resolution \
+             FROM edges WHERE kind = 'CALLS'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            format!("{}::f", abs(dir.path(), "a.py")),
+            "print".to_string(),
+            abs(dir.path(), "a.py"),
+            2,
+            Some("unresolved".to_string())
+        )
+    );
+    assert_eq!(count(&conn, "SELECT count(*) FROM edges"), 1);
+    assert_eq!(count(&conn, "SELECT count(*) FROM cg_edges"), 1);
+
+    // An unresolved import keeps the module text and no call resolution.
+    let file = node(2, "a.py", NodeType::Other("File".into()), "a.py", 1);
+    store
+        .upsert_nodes_batch(std::slice::from_ref(&file))
+        .await
+        .unwrap();
+    let mut imp = CodeEdge::unresolved(file.id, "os", EdgeType::Imports);
+    imp.set_deterministic_id("p");
+    store.upsert_edges_batch(&[imp]).await.unwrap();
+    let (target, resolution): (String, Option<String>) = conn
+        .query_row(
+            "SELECT target_qualified, target_resolution FROM edges WHERE kind = 'IMPORTS_FROM'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((target.as_str(), resolution), ("os", None));
+}
+
+#[tokio::test]
+async fn tested_by_mirrors_calls_from_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, conn) = open(dir.path());
+    let f = node(1, "f", NodeType::Function, "a.py", 1);
+    let t = node(2, "test_x", NodeType::Other("Test".into()), "test_a.py", 1);
+    let g = node(3, "g", NodeType::Function, "a.py", 5);
+    store
+        .upsert_nodes_batch(&[f.clone(), t.clone(), g.clone()])
+        .await
+        .unwrap();
+    let call_f = edge(10, &t, &f, EdgeType::Calls).with_metadata("line".into(), "2".into());
+    let mut call_assert = CodeEdge::unresolved(t.id, "assert", EdgeType::Calls)
+        .with_metadata("line".into(), "3".into());
+    call_assert.id = uuid::Uuid::from_u128(11);
+    // A non-test caller produces no TESTED_BY.
+    let call_g = edge(12, &f, &g, EdgeType::Calls).with_metadata("line".into(), "2".into());
+    store
+        .upsert_edges_batch(&[call_f, call_assert, call_g])
+        .await
+        .unwrap();
+    let tested_by = |conn: &Connection| -> Vec<(String, String, String, i64)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_qualified, target_qualified, file_path, line FROM edges \
+                 WHERE kind = 'TESTED_BY' ORDER BY line",
+            )
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    store.finalize("full").await.unwrap();
+    // Finalising again (incremental runs) replaces rather than duplicates.
+    store.finalize("incremental").await.unwrap();
+    let test_qn = format!("{}::test_x", abs(dir.path(), "test_a.py"));
+    let test_file = abs(dir.path(), "test_a.py");
+    assert_eq!(
+        tested_by(&conn),
+        vec![
+            (
+                format!("{}::f", abs(dir.path(), "a.py")),
+                test_qn.clone(),
+                test_file.clone(),
+                2
+            ),
+            ("assert".to_string(), test_qn, test_file, 3),
+        ]
+    );
+}

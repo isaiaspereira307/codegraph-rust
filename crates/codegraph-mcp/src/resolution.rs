@@ -188,12 +188,28 @@ impl SymbolCatalog {
         }
         for alias in std::iter::once(edge.to.as_str()).chain(variants.iter().map(String::as_str)) {
             if let Some(ids) = self.aliases.get(alias)
-                && let Some(id) = self.choose(ids, edge.from)
+                && let Some(id) = self.choose(&self.reachable(alias, ids, edge.from), edge.from)
             {
                 return Some(id);
             }
         }
         None
+    }
+
+    /// Candidates an alias may bind from `from`. Like code-review-graph without an import
+    /// that names the target's module, a bare name (no `::`, `.` or `/`) binds only within
+    /// the caller's file; qualified aliases bind across files.
+    fn reachable(&self, alias: &str, ids: &[NodeId], from: NodeId) -> Vec<NodeId> {
+        if alias.contains("::") || alias.contains('.') || alias.contains('/') {
+            return ids.to_vec();
+        }
+        let Some(source) = self.symbols.get(&from) else {
+            return Vec::new();
+        };
+        ids.iter()
+            .copied()
+            .filter(|id| self.symbols.get(id).is_some_and(|s| s.file == source.file))
+            .collect()
     }
 
     /// A deterministic shortlist; a zero limit retains every overlapping candidate.
@@ -247,7 +263,9 @@ impl SymbolCatalog {
             if score < best {
                 continue;
             }
-            let Some(id) = self.choose(&self.aliases[&candidate.alias], edge.from) else {
+            let reachable =
+                self.reachable(&candidate.alias, &self.aliases[&candidate.alias], edge.from);
+            let Some(id) = self.choose(&reachable, edge.from) else {
                 continue;
             };
             if score > best {
@@ -331,6 +349,24 @@ mod tests {
                 .insert("target_node_id".into(), a.id.to_string());
             assert_eq!(catalog.exact(&direct, &[]), Some(a.id));
         }
+    }
+
+    #[test]
+    fn bare_names_bind_only_within_the_callers_file() {
+        let helper = node("b.rs", "helper");
+        let local = node("a.rs", "local");
+        let caller = node("a.rs", "caller");
+        let catalog = SymbolCatalog::new(&[helper.clone(), local.clone(), caller.clone()]);
+        assert_eq!(catalog.exact(&edge(caller.id, "helper"), &[]), None);
+        assert_eq!(catalog.fuzzy(&edge(caller.id, "helper")), None);
+        assert_eq!(
+            catalog.exact(&edge(caller.id, "local"), &[]),
+            Some(local.id)
+        );
+        assert_eq!(
+            catalog.exact(&edge(caller.id, "b.rs::helper"), &[]),
+            Some(helper.id)
+        );
     }
 
     #[test]

@@ -1206,41 +1206,52 @@ impl ProjectIndexer {
             );
             let edge_persistence_start = std::time::Instant::now();
             let resolved_count = targets.iter().filter(|target| target.is_some()).count();
-            let mut resolved_edges = Vec::with_capacity(resolved_count);
+            let mut edge_records = Vec::with_capacity(edges.len());
             for ((edge, target), (method, score)) in
                 edges.iter().zip(targets).zip(resolution_provenance)
             {
-                if let Some(target) = target {
-                    let mut record = CodeEdge::new(edge.from, target, edge.edge_type.clone());
-                    record.metadata = edge.metadata.clone();
-                    record
-                        .metadata
-                        .insert("resolution_method".into(), method.into());
-                    record
-                        .metadata
-                        .insert("resolution_score".into(), format!("{score:.6}"));
-                    if let Some(span) = &edge.span {
-                        record.metadata.insert(
-                            "source_span".into(),
-                            format!("{}:{}", span.start_byte, span.end_byte),
-                        );
+                let mut record = match target {
+                    Some(target) => {
+                        let mut record = CodeEdge::new(edge.from, target, edge.edge_type.clone());
+                        record.metadata = edge.metadata.clone();
+                        record
+                            .metadata
+                            .insert("resolution_method".into(), method.into());
+                        record
+                            .metadata
+                            .insert("resolution_score".into(), format!("{score:.6}"));
+                        record
                     }
-                    record.set_deterministic_id(&self.project_id);
-                    resolved_edges.push(record);
+                    // Like code-review-graph, keep an unresolved CRG-kind target as its text.
+                    None if Self::keeps_unresolved_target(&edge.edge_type) => {
+                        let mut record =
+                            CodeEdge::unresolved(edge.from, &edge.to, edge.edge_type.clone());
+                        record.metadata.extend(edge.metadata.clone());
+                        record
+                    }
+                    None => continue,
+                };
+                if let Some(span) = &edge.span {
+                    record.metadata.insert(
+                        "source_span".into(),
+                        format!("{}:{}", span.start_byte, span.end_byte),
+                    );
                 }
+                record.set_deterministic_id(&self.project_id);
+                edge_records.push(record);
             }
-            resolved_edges.sort_by_key(|edge| edge.id);
-            resolved_edges.dedup_by_key(|edge| edge.id);
-            let stored_edges = resolved_edges.len();
+            edge_records.sort_by_key(|edge| edge.id);
+            edge_records.dedup_by_key(|edge| edge.id);
+            let stored_edges = edge_records.len();
             next_catalog
                 .edges
-                .extend(resolved_edges.iter().map(|edge| edge.id.to_string()));
-            resolved_edges.retain(|edge| {
+                .extend(edge_records.iter().map(|edge| edge.id.to_string()));
+            edge_records.retain(|edge| {
                 previous
                     .as_ref()
                     .is_none_or(|state| !state.edges.contains(&edge.id.to_string()))
             });
-            self.enqueue_edges(resolved_edges).await?;
+            self.enqueue_edges(edge_records).await?;
             self.flush_writer().await?;
             phase_ms.insert(
                 "resolution_edge_preparation_and_writes".into(),
@@ -2055,6 +2066,19 @@ impl ProjectIndexer {
 
     fn normalize_symbol(symbol: &str) -> String {
         symbol.trim().to_lowercase()
+    }
+
+    /// Edge kinds code-review-graph stores with a bare-text target when it does not resolve.
+    /// Rust-only analyzer kinds (uses, defines, ...) still drop unresolved targets.
+    fn keeps_unresolved_target(kind: &EdgeType) -> bool {
+        matches!(
+            kind,
+            EdgeType::Calls
+                | EdgeType::Imports
+                | EdgeType::Extends
+                | EdgeType::Implements
+                | EdgeType::References
+        )
     }
 
     fn normalize_symbol_target(target: &str) -> Vec<String> {
