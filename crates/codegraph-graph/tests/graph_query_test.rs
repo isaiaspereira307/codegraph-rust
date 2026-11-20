@@ -337,3 +337,84 @@ async fn graph_tools_skip_dangling_targets() {
         1
     );
 }
+
+/// A CRG-style File node (named by its absolute path) for `file` under `root`.
+fn file_node(n: u128, root: &Path, file: &str) -> CodeNode {
+    let path = root.join(file).to_string_lossy().to_string();
+    let mut node = CodeNode::new(
+        path.as_str(),
+        Some(NodeType::Other("File".into())),
+        Some(Language::Python),
+        Location {
+            file_path: file.to_string(),
+            line: 1,
+            column: 0,
+            end_line: Some(3),
+            end_column: None,
+        },
+    );
+    node.id = uuid::Uuid::from_u128(n);
+    node
+}
+
+#[tokio::test]
+async fn hub_nodes_exclude_file_nodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = fixture(dir.path()).await;
+    // lib.py is imported by d1..d6: a File hub, which code-review-graph never reports.
+    store
+        .upsert_nodes_batch(&[file_node(40, dir.path(), "lib.py")])
+        .await
+        .unwrap();
+    let edges: Vec<_> = (21..=26u128)
+        .map(|d| {
+            let mut e = CodeEdge::new(
+                uuid::Uuid::from_u128(d),
+                uuid::Uuid::from_u128(40),
+                EdgeType::Imports,
+            );
+            e.id = uuid::Uuid::from_u128(300 + d);
+            e
+        })
+        .collect();
+    store.upsert_edges_batch(&edges).await.unwrap();
+    store.finalize("full").await.unwrap();
+    let q = GraphQuery::new(store.clone());
+    let hubs: Vec<_> = q
+        .get_hub_nodes(5)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.node_id)
+        .collect();
+    assert_eq!(hubs, vec![id(20)]);
+}
+
+#[tokio::test]
+async fn find_nodes_by_name_ranks_name_matches_and_symbols_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = fixture(dir.path()).await;
+    // big.py's File node is named by its absolute path, which sorts before any symbol name.
+    let mut extra = vec![file_node(41, dir.path(), "big.py")];
+    extra.push(node(50, "zchain", "other.py", 1.0));
+    store.upsert_nodes_batch(&extra).await.unwrap();
+    store.finalize("full").await.unwrap();
+    let q = GraphQuery::new(store.clone());
+    let big: Vec<_> = q
+        .find_nodes_by_name("big", 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(big, vec![id(30), id(41)]);
+    // A name match outranks the c1..c4 whose path alone contains "chain".
+    let chain: Vec<_> = q
+        .find_nodes_by_name("chain", 2)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|n| n.name)
+        .collect();
+    assert_eq!(chain, vec!["zchain", "c1"]);
+}

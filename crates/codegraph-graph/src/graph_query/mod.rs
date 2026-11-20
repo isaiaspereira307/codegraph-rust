@@ -104,7 +104,20 @@ impl GraphQuery {
                 n.name.to_lowercase().contains(&lowered) || n.file_path.contains(needle)
             })
             .collect();
-        hits.sort_by(|a, b| snap.order_key(*a).cmp(&snap.order_key(*b)));
+        // Name matches before path-only matches, and symbols before File nodes (whose
+        // absolute-path names would otherwise sort first); then by name and id.
+        let rank = |ix: NodeIndex| {
+            let n = snap.node(ix);
+            (
+                !n.name.to_lowercase().contains(&lowered),
+                n.kind.as_deref() == Some("File"),
+            )
+        };
+        hits.sort_by(|a, b| {
+            rank(*a)
+                .cmp(&rank(*b))
+                .then_with(|| snap.order_key(*a).cmp(&snap.order_key(*b)))
+        });
         Ok(hits
             .into_iter()
             .take(max)
@@ -293,12 +306,14 @@ impl GraphQuery {
     }
 
     /// Nodes with at least `min_degree` dependency edges (default 5), top 50 by total degree.
+    /// Like code-review-graph's `find_hub_nodes`, File nodes are never hubs.
     pub async fn get_hub_nodes(&self, min_degree: i32) -> Result<Vec<HubNode>> {
         let snap = self.snapshot().await?;
         let threshold = if min_degree > 0 { min_degree } else { 5 };
         let mut hubs: Vec<HubNode> = snap
             .graph
             .node_indices()
+            .filter(|&ix| snap.node(ix).kind.as_deref() != Some("File"))
             .filter_map(|ix| {
                 let incoming = snap.degree_by_kind(ix, Incoming, is_dependency);
                 let outgoing = snap.degree_by_kind(ix, Outgoing, is_dependency);
