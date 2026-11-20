@@ -17,7 +17,8 @@ pub struct GraphCounts {
 impl SqliteGraphStore {
     /// Makes the graph equal to the complete prepared catalog: nodes, edges and file metadata
     /// outside it are removed, as are edges whose endpoints were removed. Rows written by
-    /// another tool (no `cg_*` identity) are outside every catalog and are removed too.
+    /// another tool (no `cg_*` identity) are outside every catalog and are removed too, except
+    /// TESTED_BY: it is derived, has no identity, and `finalize` rebuilds it.
     pub async fn reconcile_catalog(
         &self,
         project: &str,
@@ -46,7 +47,8 @@ impl SqliteGraphStore {
                    OR from_uuid NOT IN (SELECT uuid FROM cg_nodes) \
                    OR (to_uuid NOT IN (SELECT uuid FROM cg_nodes) \
                        AND to_uuid NOT LIKE 'text:%'); \
-                 DELETE FROM edges WHERE id NOT IN (SELECT edge_id FROM cg_edges); \
+                 DELETE FROM edges WHERE id NOT IN (SELECT edge_id FROM cg_edges) \
+                   AND kind != 'TESTED_BY'; \
                  DELETE FROM cg_keep_nodes; DELETE FROM cg_keep_edges;",
             )?;
             tx.execute(

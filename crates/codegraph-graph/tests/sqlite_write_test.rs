@@ -435,6 +435,23 @@ async fn tested_by_mirrors_calls_from_tests() {
             .unwrap()
     };
     store.finalize("full").await.unwrap();
+    // Reconciliation keeps them until finalize rebuilds them.
+    store
+        .reconcile_catalog(
+            "p",
+            [&f, &t, &g].iter().map(|n| n.id.to_string()).collect(),
+            [10u128, 11, 12]
+                .iter()
+                .map(|i| uuid::Uuid::from_u128(*i).to_string())
+                .collect(),
+            vec!["a.py".into(), "test_a.py".into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        count(&conn, "SELECT count(*) FROM edges WHERE kind = 'TESTED_BY'"),
+        2
+    );
     // Finalising again (incremental runs) replaces rather than duplicates.
     store.finalize("incremental").await.unwrap();
     let test_qn = format!("{}::test_x", abs(dir.path(), "test_a.py"));

@@ -1,7 +1,8 @@
 // ABOUTME: Deterministic, context-aware symbol catalog used before semantic inference.
 // ABOUTME: Preserves ambiguous aliases and indexes lexical candidates by character trigrams.
 
-use codegraph_core::{CodeNode, EdgeRelationship, NodeId};
+use crate::module_index::ModuleIndex;
+use codegraph_core::{CodeNode, EdgeRelationship, EdgeType, NodeId, NodeType};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Clone)]
@@ -24,6 +25,16 @@ pub(crate) struct SymbolCatalog {
     symbols: HashMap<NodeId, Symbol>,
     lexical: Vec<LexicalCandidate>,
     trigrams: HashMap<String, Vec<usize>>,
+    /// File node of each file path.
+    file_nodes: HashMap<String, NodeId>,
+    /// Module names of the indexed files.
+    modules: ModuleIndex,
+    /// Files each file imports, as mapped by `link_imports`.
+    imported_files: HashMap<String, HashSet<String>>,
+}
+
+fn is_bare(name: &str) -> bool {
+    !(name.contains("::") || name.contains('.') || name.contains('/'))
 }
 
 pub(crate) fn aliases(node: &CodeNode) -> BTreeSet<String> {
@@ -72,8 +83,16 @@ impl SymbolCatalog {
             symbols: HashMap::new(),
             lexical: Vec::new(),
             trigrams: HashMap::new(),
+            file_nodes: HashMap::new(),
+            modules: ModuleIndex::new([]),
+            imported_files: HashMap::new(),
         };
         for node in nodes {
+            if node.node_type == Some(NodeType::Other("File".into())) {
+                catalog
+                    .file_nodes
+                    .insert(node.location.file_path.clone(), node.id);
+            }
             catalog.symbols.insert(
                 node.id,
                 Symbol {
@@ -94,6 +113,7 @@ impl SymbolCatalog {
                 }
             }
         }
+        catalog.modules = ModuleIndex::new(catalog.file_nodes.keys().map(String::as_str));
         for ids in catalog.aliases.values_mut() {
             ids.sort();
         }
@@ -188,7 +208,8 @@ impl SymbolCatalog {
         }
         for alias in std::iter::once(edge.to.as_str()).chain(variants.iter().map(String::as_str)) {
             if let Some(ids) = self.aliases.get(alias)
-                && let Some(id) = self.choose(&self.reachable(alias, ids, edge.from), edge.from)
+                && let Some(id) =
+                    self.choose(&self.reachable(&edge.to, alias, ids, edge.from), edge.from)
             {
                 return Some(id);
             }
@@ -196,19 +217,51 @@ impl SymbolCatalog {
         None
     }
 
-    /// Candidates an alias may bind from `from`. Like code-review-graph without an import
-    /// that names the target's module, a bare name (no `::`, `.` or `/`) binds only within
-    /// the caller's file; qualified aliases bind across files.
-    fn reachable(&self, alias: &str, ids: &[NodeId], from: NodeId) -> Vec<NodeId> {
-        if alias.contains("::") || alias.contains('.') || alias.contains('/') {
+    /// Records which indexed files each file's `Imports` edges name, so that a bare name can
+    /// bind into an imported file (`ModuleIndex` maps the import text to the file).
+    pub(crate) fn link_imports(&mut self, edges: &[EdgeRelationship]) {
+        for edge in edges.iter().filter(|e| e.edge_type == EdgeType::Imports) {
+            let Some(importer) = self.symbols.get(&edge.from) else {
+                continue;
+            };
+            if let Some(file) = self.modules.resolve(&importer.file, &edge.to) {
+                self.imported_files
+                    .entry(importer.file.clone())
+                    .or_default()
+                    .insert(file.to_string());
+            }
+        }
+    }
+
+    /// The File node an `Imports` edge names, when its text maps to one indexed file.
+    pub(crate) fn import_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        if edge.edge_type != EdgeType::Imports {
+            return None;
+        }
+        let importer = &self.symbols.get(&edge.from)?.file;
+        let file = self.modules.resolve(importer, &edge.to)?;
+        self.file_nodes.get(file).copied()
+    }
+
+    /// Candidates `alias` may bind from `from` for the edge target `target`. Like
+    /// code-review-graph, a bare name (no `::`, `.` or `/` in the target or the alias that
+    /// matched it) binds only within the caller's file or a file it imports; qualified
+    /// targets matched by qualified aliases bind anywhere.
+    fn reachable(&self, target: &str, alias: &str, ids: &[NodeId], from: NodeId) -> Vec<NodeId> {
+        if !is_bare(target) && !is_bare(alias) {
             return ids.to_vec();
         }
         let Some(source) = self.symbols.get(&from) else {
             return Vec::new();
         };
+        let imported = self.imported_files.get(&source.file);
         ids.iter()
             .copied()
-            .filter(|id| self.symbols.get(id).is_some_and(|s| s.file == source.file))
+            .filter(|id| {
+                self.symbols.get(id).is_some_and(|s| {
+                    s.file == source.file || imported.is_some_and(|files| files.contains(&s.file))
+                })
+            })
             .collect()
     }
 
@@ -263,8 +316,12 @@ impl SymbolCatalog {
             if score < best {
                 continue;
             }
-            let reachable =
-                self.reachable(&candidate.alias, &self.aliases[&candidate.alias], edge.from);
+            let reachable = self.reachable(
+                &edge.to,
+                &candidate.alias,
+                &self.aliases[&candidate.alias],
+                edge.from,
+            );
             let Some(id) = self.choose(&reachable, edge.from) else {
                 continue;
             };
@@ -366,6 +423,53 @@ mod tests {
         assert_eq!(
             catalog.exact(&edge(caller.id, "b.rs::helper"), &[]),
             Some(helper.id)
+        );
+    }
+
+    #[test]
+    fn imports_let_bare_names_bind_into_the_imported_file() {
+        let mut file_a = node("a.py", "a.py");
+        file_a.node_type = Some(NodeType::Other("File".into()));
+        let mut file_b = node("b.py", "b.py");
+        file_b.node_type = Some(NodeType::Other("File".into()));
+        let helper = node("b.py", "helper");
+        let other = node("c.py", "other");
+        let caller = node("a.py", "caller");
+        let mut catalog = SymbolCatalog::new(&[
+            file_a.clone(),
+            file_b.clone(),
+            helper.clone(),
+            other.clone(),
+            caller.clone(),
+        ]);
+        let mut import = edge(file_a.id, "b");
+        import.edge_type = EdgeType::Imports;
+        assert_eq!(catalog.import_target(&import), Some(file_b.id));
+        assert_eq!(catalog.exact(&edge(caller.id, "helper"), &[]), None);
+        catalog.link_imports(&[import]);
+        assert_eq!(
+            catalog.exact(&edge(caller.id, "helper"), &[]),
+            Some(helper.id)
+        );
+        assert_eq!(catalog.exact(&edge(caller.id, "other"), &[]), None);
+    }
+
+    #[test]
+    fn a_bare_target_never_reaches_another_file_through_a_qualified_alias() {
+        let mut target = node("b.rs", "longhelpername");
+        target
+            .metadata
+            .attributes
+            .insert("method_of".into(), "Owner".into());
+        let caller = node("a.rs", "caller");
+        let catalog = SymbolCatalog::new(&[target.clone(), caller.clone()]);
+        // Close to the qualified alias `Owner::longhelpername`, but the call text is bare.
+        assert_eq!(catalog.fuzzy(&edge(caller.id, "Ownerlonghelpername")), None);
+        assert_eq!(
+            catalog
+                .fuzzy(&edge(caller.id, "Owner::longhelpernam"))
+                .map(|(id, _)| id),
+            Some(target.id)
         );
     }
 

@@ -1148,7 +1148,8 @@ impl ProjectIndexer {
 
             // Resolve exact/contextual targets once before any semantic inference.
             let resolution_start = std::time::Instant::now();
-            let catalog = crate::resolution::SymbolCatalog::new(&nodes);
+            let mut catalog = crate::resolution::SymbolCatalog::new(&nodes);
+            catalog.link_imports(&edges);
             let symbol_map = catalog.unique_aliases();
             let mut normalized = HashMap::new();
             let mut targets = Vec::with_capacity(edges.len());
@@ -1168,6 +1169,12 @@ impl ProjectIndexer {
                     },
                     1.0f64,
                 );
+                if target.is_none()
+                    && let Some(file) = catalog.import_target(edge)
+                {
+                    target = Some(file);
+                    provenance.0 = "import";
+                }
                 if target.is_none() {
                     let variants = normalized.entry(edge.to.clone()).or_insert_with(|| {
                         let mut variants = Self::normalize_symbol_target(&edge.to);
@@ -1223,7 +1230,7 @@ impl ProjectIndexer {
                         record
                     }
                     // Like code-review-graph, keep an unresolved CRG-kind target as its text.
-                    None if Self::keeps_unresolved_target(&edge.edge_type) => {
+                    None if Self::keeps_unresolved_target(edge) => {
                         let mut record =
                             CodeEdge::unresolved(edge.from, &edge.to, edge.edge_type.clone());
                         record.metadata.extend(edge.metadata.clone());
@@ -2068,17 +2075,20 @@ impl ProjectIndexer {
         symbol.trim().to_lowercase()
     }
 
-    /// Edge kinds code-review-graph stores with a bare-text target when it does not resolve.
-    /// Rust-only analyzer kinds (uses, defines, ...) still drop unresolved targets.
-    fn keeps_unresolved_target(kind: &EdgeType) -> bool {
-        matches!(
-            kind,
-            EdgeType::Calls
-                | EdgeType::Imports
-                | EdgeType::Extends
-                | EdgeType::Implements
-                | EdgeType::References
-        )
+    /// Whether an unresolved edge is stored with its target text, as code-review-graph does.
+    /// Only CRG edge kinds from source extraction qualify: Rust-only analyzer kinds (uses,
+    /// defines, ...) and FastML edges, whose targets are pattern labels such as
+    /// `java:implements `, still drop unresolved targets.
+    fn keeps_unresolved_target(edge: &EdgeRelationship) -> bool {
+        !edge.metadata.contains_key("fast_ml_enhancement")
+            && matches!(
+                edge.edge_type,
+                EdgeType::Calls
+                    | EdgeType::Imports
+                    | EdgeType::Extends
+                    | EdgeType::Implements
+                    | EdgeType::References
+            )
     }
 
     fn normalize_symbol_target(target: &str) -> Vec<String> {

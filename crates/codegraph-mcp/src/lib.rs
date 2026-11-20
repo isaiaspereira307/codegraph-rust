@@ -3,6 +3,7 @@ pub mod connection;
 pub mod estimation;
 pub mod heartbeat;
 pub mod indexer;
+mod module_index;
 pub mod policy;
 mod reconciliation;
 mod resolution;
