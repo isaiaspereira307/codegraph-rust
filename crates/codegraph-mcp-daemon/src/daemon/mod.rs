@@ -1,5 +1,5 @@
 // ABOUTME: Watch daemon module for automatic re-indexing of file changes
-// ABOUTME: Provides lifecycle management with SurrealDB health monitoring and circuit breaker
+// ABOUTME: Provides lifecycle management with graph-store health monitoring and circuit breaker
 
 pub mod config;
 pub mod health;
@@ -31,7 +31,7 @@ pub struct WatchDaemon {
     /// Active watch session
     session: Option<WatchSession>,
 
-    /// Health monitor for SurrealDB
+    /// Health monitor for the graph store
     health_monitor: Arc<HealthMonitor>,
 
     /// Current daemon state

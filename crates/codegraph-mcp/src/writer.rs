@@ -1,27 +1,22 @@
-// ABOUTME: Bounded asynchronous graph writer with durable ordering barriers.
-// ABOUTME: Separates database batching and queue memory from inference settings.
+// ABOUTME: Bounded asynchronous graph writer over the SQLite store with durable ordering barriers.
+// ABOUTME: One write connection applies batches in order; byte and row limits bound queue memory.
 
 use anyhow::{Result, anyhow};
 use codegraph_core::CodeNode;
 use codegraph_graph::{
-    ChunkEmbeddingRecord, FileMetadataRecord, NodeEmbeddingRecord, ProjectMetadataRecord,
-    SurrealDbStorage, SymbolEmbeddingRecord, edge::CodeEdge,
+    FileMetadataRecord, ProjectMetadataRecord, edge::CodeEdge, sqlite_store::SqliteGraphStore,
 };
-use futures::{StreamExt, stream::FuturesUnordered};
 use serde::Serialize;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 enum Job {
     Nodes(Vec<CodeNode>),
     Edges(Vec<CodeEdge>),
-    NodeEmbeddings(Vec<NodeEmbeddingRecord>),
-    SymbolEmbeddings(Vec<SymbolEmbeddingRecord>),
-    ChunkEmbeddings(Vec<ChunkEmbeddingRecord>),
     FileMetadata(Vec<FileMetadataRecord>),
     DeleteFiles { paths: Vec<String>, project: String },
     ProjectMetadata(ProjectMetadataRecord),
@@ -89,9 +84,6 @@ impl Job {
         match self {
             Self::Nodes(rows) => rows.len(),
             Self::Edges(rows) => rows.len(),
-            Self::NodeEmbeddings(rows) => rows.len(),
-            Self::SymbolEmbeddings(rows) => rows.len(),
-            Self::ChunkEmbeddings(rows) => rows.len(),
             Self::FileMetadata(rows) => rows.len(),
             Self::ProjectMetadata(_) => 1,
             Self::DeleteFiles { paths, .. } => paths.len(),
@@ -101,23 +93,19 @@ impl Job {
 }
 async fn execute(
     job: Job,
-    storage: Arc<Mutex<SurrealDbStorage>>,
+    store: &SqliteGraphStore,
     metrics: &WriteMetrics,
     bytes: u64,
 ) -> Result<()> {
     let rows = job.rows();
-    let mut storage = storage.lock().await;
     match job {
-        Job::Nodes(rows) => storage.upsert_nodes_batch(&rows).await?,
-        Job::Edges(rows) => storage.upsert_edges_batch(&rows).await?,
-        Job::NodeEmbeddings(rows) => storage.update_node_embeddings_batch(&rows).await?,
-        Job::SymbolEmbeddings(rows) => storage.upsert_symbol_embeddings_batch(&rows).await?,
-        Job::ChunkEmbeddings(rows) => storage.upsert_chunk_embeddings_resilient(&rows).await?,
-        Job::FileMetadata(rows) => storage.upsert_file_metadata_batch(&rows).await?,
+        Job::Nodes(rows) => store.upsert_nodes_batch(&rows).await?,
+        Job::Edges(rows) => store.upsert_edges_batch(&rows).await?,
+        Job::FileMetadata(rows) => store.upsert_file_metadata_batch(&rows).await?,
         Job::DeleteFiles { paths, project } => {
-            storage.delete_data_for_files(&project, &paths).await?
+            store.delete_data_for_files(&project, &paths).await?
         }
-        Job::ProjectMetadata(row) => storage.upsert_project_metadata(row).await?,
+        Job::ProjectMetadata(row) => store.upsert_project_metadata(row).await?,
         Job::Flush(_) | Job::Shutdown(_) => unreachable!("barriers handled by writer"),
     }
     metrics.jobs.fetch_add(1, Ordering::Relaxed);
@@ -126,20 +114,14 @@ async fn execute(
     Ok(())
 }
 
-fn record_result(
-    result: std::result::Result<Result<()>, tokio::task::JoinError>,
-    error: &mut Option<String>,
-) {
-    if let Err(err) = result
-        .map_err(anyhow::Error::from)
-        .and_then(|result| result)
-    {
+fn record_error(result: Result<()>, error: &mut Option<String>) {
+    if let Err(err) = result {
         tracing::error!("Graph write failed: {err}");
         error.get_or_insert_with(|| err.to_string());
     }
 }
 
-pub(crate) struct SurrealWriterHandle {
+pub(crate) struct GraphWriterHandle {
     tx: mpsc::Sender<Envelope>,
     memory: Arc<Semaphore>,
     limits: Limits,
@@ -147,72 +129,51 @@ pub(crate) struct SurrealWriterHandle {
     metrics: Arc<WriteMetrics>,
 }
 
-impl SurrealWriterHandle {
-    pub(crate) fn new(pool: Vec<Arc<Mutex<SurrealDbStorage>>>) -> Self {
-        assert!(!pool.is_empty(), "writer requires a storage handle");
+impl GraphWriterHandle {
+    /// SQLite has one writer per database, so jobs run one at a time in arrival order.
+    pub(crate) fn new(store: SqliteGraphStore) -> Self {
         let limits = Limits::from_env();
         let memory = Arc::new(Semaphore::new(limits.queue_bytes));
         let (tx, mut rx) = mpsc::channel::<Envelope>(8);
         let metrics = Arc::new(WriteMetrics::default());
         let worker_metrics = metrics.clone();
         let join = tokio::spawn(async move {
-            let mut running = FuturesUnordered::<JoinHandle<Result<()>>>::new();
             let mut error = None;
-            let mut next = 0;
             while let Some(envelope) = rx.recv().await {
-                let barrier = matches!(
-                    envelope.job,
-                    Job::DeleteFiles { .. }
-                        | Job::FileMetadata(_)
-                        | Job::ProjectMetadata(_)
-                        | Job::Flush(_)
-                        | Job::Shutdown(_)
-                );
-                if barrier {
-                    while let Some(result) = running.next().await {
-                        record_result(result, &mut error);
+                let Envelope {
+                    job,
+                    _memory,
+                    bytes,
+                } = envelope;
+                match job {
+                    Job::Flush(response) => {
+                        let _ =
+                            response.send(error.take().map_or(Ok(()), |e: String| Err(anyhow!(e))));
                     }
-                    match envelope.job {
-                        Job::Flush(response) => {
-                            let _ = response.send(error.take().map_or(Ok(()), |e| Err(anyhow!(e))));
-                        }
-                        Job::Shutdown(response) => {
-                            let _ = response.send(error.take().map_or(Ok(()), |e| Err(anyhow!(e))));
-                            break;
-                        }
-                        job => {
-                            // Completion metadata must never mark a failed write set current.
-                            if error.is_none()
-                                && let Err(err) =
-                                    execute(job, pool[0].clone(), &worker_metrics, envelope.bytes)
-                                        .await
-                            {
-                                error = Some(err.to_string());
-                            }
+                    Job::Shutdown(response) => {
+                        let _ =
+                            response.send(error.take().map_or(Ok(()), |e: String| Err(anyhow!(e))));
+                        break;
+                    }
+                    job @ (Job::DeleteFiles { .. }
+                    | Job::FileMetadata(_)
+                    | Job::ProjectMetadata(_)) => {
+                        // Completion metadata must never mark a failed write set current.
+                        if error.is_none() {
+                            record_error(
+                                execute(job, &store, &worker_metrics, bytes).await,
+                                &mut error,
+                            );
                         }
                     }
-                } else {
-                    while running.len() >= pool.len() {
-                        record_result(running.next().await.expect("in-flight write"), &mut error);
+                    job => {
+                        record_error(
+                            execute(job, &store, &worker_metrics, bytes).await,
+                            &mut error,
+                        );
                     }
-                    let storage = pool[next % pool.len()].clone();
-                    next += 1;
-                    let metrics = worker_metrics.clone();
-                    running.push(tokio::spawn(async move {
-                        let Envelope {
-                            job,
-                            _memory,
-                            bytes,
-                        } = envelope;
-                        let result = execute(job, storage, &metrics, bytes).await;
-                        drop(_memory);
-                        result
-                    }));
                 }
-            }
-            // A dropped indexer closes the channel; finish accepted work before exiting.
-            while let Some(result) = running.next().await {
-                record_result(result, &mut error);
+                drop(_memory);
             }
         });
         Self {
@@ -285,24 +246,6 @@ impl SurrealWriterHandle {
     pub(crate) async fn enqueue_edges(&self, rows: Vec<CodeEdge>) -> Result<()> {
         self.batch(rows, Job::Edges).await
     }
-    pub(crate) async fn enqueue_node_embeddings(
-        &self,
-        rows: Vec<NodeEmbeddingRecord>,
-    ) -> Result<()> {
-        self.batch(rows, Job::NodeEmbeddings).await
-    }
-    pub(crate) async fn enqueue_symbol_embeddings(
-        &self,
-        rows: Vec<SymbolEmbeddingRecord>,
-    ) -> Result<()> {
-        self.batch(rows, Job::SymbolEmbeddings).await
-    }
-    pub(crate) async fn enqueue_chunk_embeddings(
-        &self,
-        rows: Vec<ChunkEmbeddingRecord>,
-    ) -> Result<()> {
-        self.batch(rows, Job::ChunkEmbeddings).await
-    }
     pub(crate) async fn enqueue_file_metadata(&self, rows: Vec<FileMetadataRecord>) -> Result<()> {
         self.batch(rows, Job::FileMetadata).await
     }
@@ -342,29 +285,23 @@ impl SurrealWriterHandle {
 mod tests {
     use super::*;
     use codegraph_core::{Language, Location, NodeType};
-    use codegraph_graph::SurrealDbConfig;
 
-    async fn fixture() -> (SurrealWriterHandle, Arc<Mutex<SurrealDbStorage>>) {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = SurrealDbConfig::embedded(dir.path());
-        config.connection = "mem://".into();
-        config.database = format!(
-            "writer_{}",
-            dir.path()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .replace('.', "_")
-        );
-        config.auto_migrate = false;
-        let storage = SurrealDbStorage::new(config.clone()).await.unwrap();
-        storage.db().query("DEFINE TABLE nodes SCHEMALESS; DEFINE FIELD name ON nodes TYPE string ASSERT $value != 'bad'; DEFINE TABLE project_metadata SCHEMALESS;").await.unwrap().check().unwrap();
-        let first = Arc::new(Mutex::new(storage));
-        let second = first.clone();
-        let mut writer = SurrealWriterHandle::new(vec![first.clone(), second]);
+    fn fixture() -> (GraphWriterHandle, SqliteGraphStore) {
+        let store = SqliteGraphStore::open_in_memory(std::path::Path::new("/test")).unwrap();
+        // A real constraint failure: SQLite aborts the batch transaction that inserts `bad`.
+        store
+            .with_conn_blocking(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_bad BEFORE INSERT ON nodes WHEN NEW.name = 'bad' \
+                     BEGIN SELECT RAISE(ABORT, 'rejected node bad'); END;",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mut writer = GraphWriterHandle::new(store.clone());
         writer.limits.rows = 1;
         writer.limits.bytes = 2048;
-        (writer, first)
+        (writer, store)
     }
 
     fn node(name: &str) -> CodeNode {
@@ -402,44 +339,24 @@ mod tests {
 
     #[tokio::test]
     async fn failed_writes_do_not_advance_metadata_and_flush_allows_retry() {
-        let (writer, storage) = fixture().await;
+        let (writer, store) = fixture();
         writer
             .enqueue_nodes(vec![node("good"), node("bad")])
             .await
             .unwrap();
         writer.enqueue_project_metadata(metadata()).await.unwrap();
         assert!(writer.flush().await.is_err());
-        let mut response = storage
-            .lock()
-            .await
-            .db()
-            .query("SELECT * FROM project_metadata")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        let rows: Vec<serde_json::Value> = response.take(0).unwrap();
-        assert!(rows.is_empty());
+        assert!(store.project_marker("test").await.unwrap().is_none());
         writer.enqueue_nodes(vec![node("retry")]).await.unwrap();
         writer.enqueue_project_metadata(metadata()).await.unwrap();
         writer.flush().await.unwrap();
-        let mut response = storage
-            .lock()
-            .await
-            .db()
-            .query("SELECT * FROM project_metadata")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        let rows: Vec<serde_json::Value> = response.take(0).unwrap();
-        assert_eq!(rows.len(), 1);
+        assert!(store.project_marker("test").await.unwrap().is_some());
         writer.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn oversized_records_fail_before_entering_queue() {
-        let (writer, _) = fixture().await;
+        let (writer, _) = fixture();
         let large = node("large").with_content("x".repeat(4096));
         assert!(
             writer

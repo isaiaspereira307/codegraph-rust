@@ -71,8 +71,8 @@ Progresso:
 - [x] Task 3 — reconciliação, FTS e lock de escrita (`ea9de2f`).
 - [x] Task 4 — camada de consulta petgraph para as 8 ferramentas (`b9e56b9`).
 - [x] Task 5 — executor, servidor MCP, `tool run` e `db-check` lendo do SQLite.
-- [ ] Task 6 — writer e indexer gravando no SQLite (hoje `codegraph index` ainda grava no
-      SurrealDB, então as ferramentas só enxergam bancos criados pelo CRG ou pelos testes).
+- [x] Task 6 — writer e indexer gravando no SQLite (`codegraph index` cria
+      `.code-review-graph/graph.db`; lock de escrita e `finalize` por execução).
 - [ ] Task 7 — remover SurrealDB, `schema/*.surql`, `graph_vector.rs` e as sobras de
       embedding; binário sem `libssl`.
 
@@ -199,7 +199,7 @@ harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
 ## Ordem sugerida e marcos
 
 1. ~~Fechar a Fase 0~~ ✅.
-2. Fase 1 inteira (storage; Tasks 1–5 ✅, faltam 6 e 7); sem ela, as fases seguintes construiriam sobre o SurrealDB.
+2. Fase 1 inteira (storage; Tasks 1–6 ✅, falta a 7); sem ela, as fases seguintes construiriam sobre o SurrealDB.
 3. Harness da Fase 2 antes de qualquer ferramenta nova, para medir regressões desde o início.
 4. Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code.
 5. Fases 4 e 5 conforme o uso real pedir.

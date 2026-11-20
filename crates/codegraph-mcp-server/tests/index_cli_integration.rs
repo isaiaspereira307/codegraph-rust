@@ -12,12 +12,6 @@ fn offline_index_command(root: &Path, config: &Path) -> Command {
     command
         .current_dir(root)
         .env("CODEGRAPH_CONFIG_PATH", config)
-        .env(
-            "CODEGRAPH_SURREALDB_URL",
-            format!("surrealkv://{}", root.join(".codegraph/db").display()),
-        )
-        .env("CODEGRAPH_SURREALDB_USERNAME", "")
-        .env("CODEGRAPH_SURREALDB_PASSWORD", "")
         .env("CODEGRAPH_EMBEDDING_POLICY", "off")
         .env("CODEGRAPH_SEMANTIC_RESOLUTION", "off")
         .env("CODEGRAPH_VECTOR_INDEX_MODE", "off")

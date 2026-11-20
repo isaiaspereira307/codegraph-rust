@@ -1,19 +1,13 @@
 // ABOUTME: Drives the indexing pipeline for the Codegraph MCP CLI.
-// ABOUTME: Coordinates parsing, embeddings, and persistence into SurrealDB.
+// ABOUTME: Coordinates parsing, analyzers and persistence into the SQLite graph store.
 #![allow(dead_code, unused_variables, unused_imports)]
 
 use crate::analyzers::{AnalyzerSettings, find_tool_on_path, required_tools_for_languages};
 use crate::estimation::parse_files_with_unified_extraction as shared_unified_parse;
 use anyhow::{Context, Result, anyhow};
 use codegraph_core::{CodeNode, EdgeRelationship, EdgeType, NodeId, NodeType};
-use codegraph_graph::ChunkEmbeddingRecord;
-use codegraph_graph::{
-    FileMetadataRecord, NodeEmbeddingRecord, ProjectMetadataRecord, SURR_EMBEDDING_COLUMN_384,
-    SURR_EMBEDDING_COLUMN_768, SURR_EMBEDDING_COLUMN_1024, SURR_EMBEDDING_COLUMN_1536,
-    SURR_EMBEDDING_COLUMN_2048, SURR_EMBEDDING_COLUMN_2560, SURR_EMBEDDING_COLUMN_3072,
-    SURR_EMBEDDING_COLUMN_4096, SurrealDbConfig, SurrealDbStorage, SymbolEmbeddingRecord,
-    edge::CodeEdge,
-};
+use codegraph_graph::sqlite_store::{SqliteGraphStore, WriteLock};
+use codegraph_graph::{FileMetadataRecord, ProjectMetadataRecord, edge::CodeEdge};
 use codegraph_parser::TreeSitterParser;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use num_cpus;
@@ -44,8 +38,6 @@ use std::sync::{Arc, Mutex};
 
 use std::collections::HashMap;
 
-const SYMBOL_EMBEDDING_DB_BATCH_LIMIT: usize = 256;
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {
     Added,
@@ -71,63 +63,6 @@ pub fn set_watch_test_notifier(sender: tokio::sync::mpsc::UnboundedSender<PathBu
         .lock()
         .unwrap();
     *guard = Some(sender);
-}
-
-#[derive(Clone, Copy, Debug)]
-enum SurrealEmbeddingColumn {
-    Embedding384,
-    Embedding768,
-    Embedding1024,
-    Embedding1536,
-    Embedding2048,
-    Embedding2560,
-    Embedding3072,
-    Embedding4096,
-}
-
-impl SurrealEmbeddingColumn {
-    fn column_name(&self) -> &'static str {
-        match self {
-            SurrealEmbeddingColumn::Embedding384 => SURR_EMBEDDING_COLUMN_384,
-            SurrealEmbeddingColumn::Embedding768 => SURR_EMBEDDING_COLUMN_768,
-            SurrealEmbeddingColumn::Embedding1024 => SURR_EMBEDDING_COLUMN_1024,
-            SurrealEmbeddingColumn::Embedding1536 => SURR_EMBEDDING_COLUMN_1536,
-            SurrealEmbeddingColumn::Embedding2048 => SURR_EMBEDDING_COLUMN_2048,
-            SurrealEmbeddingColumn::Embedding2560 => SURR_EMBEDDING_COLUMN_2560,
-            SurrealEmbeddingColumn::Embedding3072 => SURR_EMBEDDING_COLUMN_3072,
-            SurrealEmbeddingColumn::Embedding4096 => SURR_EMBEDDING_COLUMN_4096,
-        }
-    }
-
-    fn dimension(&self) -> usize {
-        match self {
-            SurrealEmbeddingColumn::Embedding384 => 384,
-            SurrealEmbeddingColumn::Embedding768 => 768,
-            SurrealEmbeddingColumn::Embedding1024 => 1024,
-            SurrealEmbeddingColumn::Embedding1536 => 1536,
-            SurrealEmbeddingColumn::Embedding2048 => 2048,
-            SurrealEmbeddingColumn::Embedding2560 => 2560,
-            SurrealEmbeddingColumn::Embedding3072 => 3072,
-            SurrealEmbeddingColumn::Embedding4096 => 4096,
-        }
-    }
-}
-
-fn extract_count(values: Vec<JsonValue>) -> Result<i64> {
-    let Some(first) = values.into_iter().next() else {
-        return Ok(0);
-    };
-
-    match first {
-        JsonValue::Number(n) => n
-            .as_i64()
-            .ok_or_else(|| anyhow!("Count value is not an integer: {}", n)),
-        JsonValue::Object(map) => map
-            .get("count")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| anyhow!("Count object missing integer 'count' field")),
-        other => Err(anyhow!("Unexpected count shape: {}", other)),
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -221,15 +156,14 @@ pub struct ProjectIndexer {
     global_config: codegraph_core::config_manager::CodeGraphConfig,
     progress: MultiProgress,
     parser: TreeSitterParser,
-    surreal: Arc<TokioMutex<SurrealDbStorage>>,
-    surreal_writer: Option<SurrealWriterHandle>,
+    store: SqliteGraphStore,
+    writer: Option<GraphWriterHandle>,
     project_id: String,
     organization_id: Option<String>,
     repository_url: Option<String>,
     domain: Option<String>,
     embedding_model: String,
     vector_dim: usize,
-    embedding_column: SurrealEmbeddingColumn,
     project_root: PathBuf,
     reconcile_lock: TokioMutex<()>,
     lsp_pool: crate::analyzers::lsp::LspPool,
@@ -238,7 +172,7 @@ pub struct ProjectIndexer {
     lsp_support: TokioMutex<Option<String>>,
 }
 
-use crate::writer::SurrealWriterHandle;
+use crate::writer::GraphWriterHandle;
 
 impl ProjectIndexer {
     async fn validate_analyzer_tools(
@@ -325,8 +259,8 @@ impl ProjectIndexer {
                 .with_project_root(&config.project_root)
                 .with_extraction_policy(extraction_policy_for_tier(config.indexing_tier));
             let project_root = config.project_root.clone();
-            let (surreal, surreal_pool) = Self::connect_surreal(&project_root).await?;
-            let surreal_writer = SurrealWriterHandle::new(surreal_pool);
+            let store = Self::open_store(&project_root).await?;
+            let writer = GraphWriterHandle::new(store.clone());
             let project_id = std::env::var("CODEGRAPH_PROJECT_ID")
                 .unwrap_or_else(|_| project_root.display().to_string());
             let organization_id = std::env::var("CODEGRAPH_ORGANIZATION_ID").ok();
@@ -338,58 +272,21 @@ impl ProjectIndexer {
                 .clone()
                 .unwrap_or_else(|| "jina-embeddings-v4".to_string());
 
-            let embedder_dimension = config.vector_dimension;
-
-            let env_vector_dim = std::env::var("CODEGRAPH_EMBEDDING_DIMENSION")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok());
-            let vector_dim = env_vector_dim.unwrap_or(embedder_dimension);
-            let embedding_column = resolve_surreal_embedding_column(vector_dim).with_context(|| {
-            format!(
-                "Unsupported embedding dimension {}. Supported dimensions: 384, 768, 1024, 2048, 2560, 4096.",
-                vector_dim
-            )
-        })?;
-
-            if let Some(v) = env_vector_dim {
-                info!(
-                    "🧭 Embedding dimension override: CODEGRAPH_EMBEDDING_DIMENSION={} → Surreal column {}",
-                    v,
-                    embedding_column.column_name()
-                );
-            } else {
-                info!(
-                    "🧭 Embedding dimension resolved from provider ({}): {} → Surreal column {}",
-                    global_config.embedding.provider,
-                    vector_dim,
-                    embedding_column.column_name()
-                );
-            }
-
-            let vector_mode = codegraph_graph::vector_indexes::VectorIndexMode::from_env()?;
-            let vector_tables = Self::vector_tables(policies);
-            if vector_mode == codegraph_graph::vector_indexes::VectorIndexMode::Selected {
-                codegraph_graph::vector_indexes::ensure_ready(
-                    &surreal.lock().await.db(),
-                    vector_dim,
-                    &vector_tables,
-                )
-                .await?;
-            }
+            // Inference is always off; the dimension is only reported in stats.
+            let vector_dim = config.vector_dimension;
             Ok(Self {
                 config,
                 global_config: global_config.clone(),
                 progress: multi_progress,
                 parser,
-                surreal,
-                surreal_writer: Some(surreal_writer),
+                store,
+                writer: Some(writer),
                 project_id,
                 organization_id,
                 repository_url,
                 domain,
                 embedding_model: embedding_model_name,
                 vector_dim,
-                embedding_column,
                 project_root,
                 reconcile_lock: TokioMutex::new(()),
                 lsp_pool: Default::default(),
@@ -407,16 +304,6 @@ impl ProjectIndexer {
             .with_project_root(&self.project_root)
             .with_extraction_policy(extraction_policy_for_tier(tier));
     }
-    fn vector_tables(policies: crate::policy::InferencePolicies) -> Vec<&'static str> {
-        let mut tables = Vec::new();
-        if policies.embeddings == crate::policy::StagePolicy::Sync {
-            tables.push("chunks");
-        }
-        if policies.semantic == crate::policy::StagePolicy::Sync {
-            tables.push("symbol_embeddings");
-        }
-        tables
-    }
     pub async fn index_project(&self, path: impl AsRef<Path>) -> Result<IndexStats> {
         self.reconcile_project(path.as_ref(), self.config.force_reindex)
             .await
@@ -429,6 +316,8 @@ impl ProjectIndexer {
     ) -> futures::future::BoxFuture<'a, Result<IndexStats>> {
         Box::pin(async move {
             let _run = self.reconcile_lock.lock().await;
+            // Shared with code-review-graph: one writer per database for the whole run.
+            let _write_lock = self.acquire_write_lock().await?;
             let start = std::time::Instant::now();
             let cache_root = self.project_root.join(".codegraph/index-cache");
             let cache_budget = std::env::var("CODEGRAPH_INDEX_CACHE_BYTES")
@@ -452,12 +341,15 @@ impl ProjectIndexer {
                 start.elapsed().as_millis() as u64,
             );
             let writer_before = self
-                .surreal_writer
+                .writer
                 .as_ref()
                 .map(|writer| writer.metrics())
                 .unwrap_or_default();
             info!("Starting project indexing: {:?}", path);
-            self.log_surrealdb_status("pre-parse");
+            info!(
+                "🗄️ Graph store: {}",
+                codegraph_graph::sqlite_store::db_path(&self.project_root).display()
+            );
 
             let capture_start = std::time::Instant::now();
             let file_config: codegraph_parser::file_collect::FileCollectionConfig =
@@ -587,13 +479,10 @@ impl ProjectIndexer {
                     ))
                 };
             let mut input_fingerprint = make_fingerprint(&external_support)?;
-            let mut response = self.surreal.lock().await.db().query(
-            "SELECT metadata.input_fingerprint AS fingerprint FROM project_metadata WHERE project_id = $project"
-        ).bind(("project", self.project_id.clone())).await?.check()?;
-            let markers: Vec<serde_json::Value> = response.take(0)?;
-            let marker = markers
-                .first()
-                .and_then(|v| v.get("fingerprint"))
+            let marker_record = self.store.project_marker(&self.project_id).await?;
+            let marker = marker_record
+                .as_ref()
+                .and_then(|record| record.metadata.get("input_fingerprint"))
                 .and_then(|v| v.as_str());
             let previous = state_cache
                 .get::<crate::reconciliation::Catalog>(&self.project_id)
@@ -1213,7 +1102,6 @@ impl ProjectIndexer {
                 "   🎯 Sample nodes: {:?}",
                 nodes.iter().take(3).map(|n| &n.name).collect::<Vec<_>>()
             );
-            self.log_surrealdb_status("post-parse");
 
             if nodes.is_empty() {
                 warn!("No nodes generated from parsing! Check parser implementation.");
@@ -1223,19 +1111,12 @@ impl ProjectIndexer {
                 );
             }
 
-            // STAGE 4: Persist nodes before embedding so SurrealDB reflects progress
-            // Parsing, analyzer validation and chunk preparation must succeed before replacing
-            // the last usable graph. A failed parse must never erase the previous index.
-            self.flush_surreal_writer().await?;
+            // STAGE 4: Persist nodes.
+            // Parsing and analyzer validation must succeed before replacing the last usable
+            // graph. A failed parse must never erase the previous index.
+            self.flush_writer().await?;
             // Remove the ready marker before the first mutation; interrupted runs cannot skip.
-            self.surreal
-                .lock()
-                .await
-                .db()
-                .query("DELETE project_metadata WHERE project_id = $project")
-                .bind(("project", self.project_id.clone()))
-                .await?
-                .check()?;
+            self.store.delete_project_marker(&self.project_id).await?;
             for node in &nodes {
                 next_catalog.nodes.insert(
                     node.id.to_string(),
@@ -1301,108 +1182,19 @@ impl ProjectIndexer {
                 }
                 store_nodes_pb.inc(chunk.len() as u64);
             }
-            self.flush_surreal_writer().await?;
+            self.flush_writer().await?;
             self.finish_bar(store_nodes_pb, "📈 Nodes stored")?;
-            self.log_surreal_node_count(total_nodes_extracted).await;
+            self.log_graph_counts("nodes", total_nodes_extracted).await;
 
-            let total_chunks = 0u64;
-            let embed_pb = self.create_batch_progress_bar(
-                total_chunks,
-                self.config.batch_size,
-                "🧠 Embedding chunks (vector batch)",
-            );
-            let chunk_store_pb = self.create_batch_progress_bar(
-                total_chunks,
-                chunk_embedding_db_batch_size(self.config.batch_size),
-                "🧩 Persisting chunk embeddings",
-            );
-            let batch = self.config.batch_size.max(1);
-            info!(
-                "   ⚙️ Embedding batch row limit: {} | Chunk DB write row limit: {} (inference token/byte and provider limits may split requests)",
-                batch,
-                chunk_embedding_db_batch_size(batch)
-            );
-            #[allow(unused_mut)]
-            let processed: u64 = 0;
-
-            // Enhanced embedding phase logging
-            let provider = &self.global_config.embedding.provider;
-            info!("💾 Starting semantic embedding generation:");
-            info!(
-                "   🤖 Provider: {} ({}-dimensional embeddings)",
-                provider, self.vector_dim
-            );
-            info!(
-                "   🗄️ SurrealDB column: {}",
-                self.embedding_column.column_name()
-            );
-
-            let total_nodes = nodes.len() as u64;
-            info!("   📊 Nodes to embed: {} semantic entities", total_nodes);
-            info!(
-                "   ⚡ Embedding row limit: {} (estimated system memory: {})",
-                batch,
-                self.estimate_system_memory()
-            );
-            info!("   🎯 Target: Enable similarity search and AI-powered analysis");
             phase_ms.insert(
                 "enqueue_nodes".into(),
                 persist_start.elapsed().as_millis() as u64,
             );
-            let embedding_start = std::time::Instant::now();
-            let processed: u64 = 0;
-            let embedding_rate = if total_chunks > 0 {
-                processed as f64 / total_chunks as f64 * 100.0
-            } else {
-                100.0
-            };
-
+            // Inference is always off (policy.rs): no embeddings are generated or stored.
             let provider = &self.global_config.embedding.provider;
-            let embed_completion_msg = format!(
-                "💾 Semantic embeddings complete: {}/{} chunks (✅ {:.1}% success) | 🤖 {} | 📐 {}-dim | 🚀 Row limit: {}",
-                processed,
-                total_chunks,
-                embedding_rate,
-                provider,
-                self.vector_dim,
-                self.config.batch_size
-            );
-            self.finish_bar(embed_pb, embed_completion_msg.clone())?;
-            self.finish_bar(
-                chunk_store_pb,
-                format!(
-                    "🧩 Chunk embeddings queued for persistence: {}/{} chunks",
-                    total_chunks, total_chunks
-                ),
-            )?;
-
-            stats.embeddings = processed as usize;
-
-            // Enhanced embedding completion statistics
-            info!("💾 Semantic embedding generation results:");
-            info!(
-                "   🎯 Vector search enabled: {} nodes embedded for similarity matching",
-                processed
-            );
-            info!("   📐 Embedding dimensions: {}", self.vector_dim);
-            info!(
-                "   🤖 Provider performance: {} with batch optimization",
-                provider
-            );
-            info!(
-                "   🔍 Capabilities unlocked: Vector search, semantic analysis, AI-powered tools"
-            );
-
-            tracing::info!(
-                target: "codegraph_mcp::indexer",
-                "Vector indexing handled by SurrealDB; local FAISS generation removed"
-            );
+            stats.embeddings = 0;
 
             // Resolve exact/contextual targets once before any semantic inference.
-            phase_ms.insert(
-                "embeddings_and_writes".into(),
-                embedding_start.elapsed().as_millis() as u64,
-            );
             let resolution_start = std::time::Instant::now();
             let catalog = crate::resolution::SymbolCatalog::new(&nodes);
             let symbol_map = catalog.unique_aliases();
@@ -1497,7 +1289,7 @@ impl ProjectIndexer {
                     .is_none_or(|state| !state.edges.contains(&edge.id.to_string()))
             });
             self.enqueue_edges(resolved_edges).await?;
-            self.flush_surreal_writer().await?;
+            self.flush_writer().await?;
             phase_ms.insert(
                 "resolution_edge_preparation_and_writes".into(),
                 edge_persistence_start.elapsed().as_millis() as u64,
@@ -1523,7 +1315,7 @@ impl ProjectIndexer {
             );
             let finish_start = std::time::Instant::now();
             // ELIMINATED: No separate edge processing phase needed - edges extracted during parsing!
-            self.log_surreal_edge_count(stored_edges).await;
+            self.log_graph_counts("edges", stored_edges).await;
 
             // Task 3.3: Update file metadata for incremental indexing
             info!("💾 Updating file metadata for change tracking");
@@ -1537,7 +1329,7 @@ impl ProjectIndexer {
                     previous.as_ref().map(|state| &state.file_metadata_hashes),
                 )
                 .await?;
-            self.flush_surreal_writer().await?;
+            self.flush_writer().await?;
             self.verify_file_metadata_count(file_paths_only.len())
                 .await?;
 
@@ -1594,15 +1386,12 @@ impl ProjectIndexer {
             stats.unresolved_edges = total_edges_extracted.saturating_sub(resolved_count);
             stats.resolution_rate = resolution_rate;
 
-            self.flush_surreal_writer().await?;
-            self.surreal
-                .lock()
-                .await
+            self.flush_writer().await?;
+            self.store
                 .reconcile_catalog(
                     &self.project_id,
                     next_catalog.nodes.keys().cloned().collect(),
                     next_catalog.edges.iter().cloned().collect(),
-                    next_catalog.chunks.iter().cloned().collect(),
                     file_paths_only
                         .iter()
                         .map(|p| p.to_string_lossy().into_owned())
@@ -1623,12 +1412,8 @@ impl ProjectIndexer {
                     "Project inputs changed during indexing; retry reconciliation"
                 ));
             }
-            stats.vector_index_ready = codegraph_graph::vector_indexes::ensure_ready(
-                &self.surreal.lock().await.db(),
-                self.vector_dim,
-                &Self::vector_tables(self.policies),
-            )
-            .await?;
+            // No vector indexes exist without inference.
+            stats.vector_index_ready = false;
             stats.index_ms = start.elapsed().as_millis() as u64;
             phase_ms.insert(
                 "durable_reconcile_and_indexes".into(),
@@ -1636,7 +1421,7 @@ impl ProjectIndexer {
             );
             stats.phase_ms = phase_ms;
             let writer_after = self
-                .surreal_writer
+                .writer
                 .as_ref()
                 .map(|writer| writer.metrics())
                 .unwrap_or_default();
@@ -1660,9 +1445,18 @@ impl ProjectIndexer {
                     },
                 )?;
             }
+            // Leave the database as code-review-graph expects after a build (pending edges
+            // resolved, FTS rebuilt, build metadata), then write the ready marker last.
+            self.store
+                .finalize(if previous.is_some() {
+                    "incremental"
+                } else {
+                    "full"
+                })
+                .await?;
             self.persist_project_metadata(&stats, stats.nodes, stats.edges, &input_fingerprint)
                 .await?;
-            self.flush_surreal_writer().await?;
+            self.flush_writer().await?;
             if !self.policies.pending() {
                 crate::policy::pending_cache(&self.project_root).remove(&self.project_id)?;
             }
@@ -1891,39 +1685,15 @@ impl ProjectIndexer {
     }
 
     async fn is_indexed(&self, _path: &Path) -> Result<bool> {
-        let db = {
-            let storage = self.surreal.lock().await;
-            storage.db()
-        };
-
-        let mut response = db
-            .query(
-                "SELECT count() AS count FROM project_metadata WHERE project_id = $project_id GROUP ALL;",
-            )
-            .bind(("project_id", self.project_id.clone()))
-            .await
-            .context("Failed to query project_metadata")?;
-        let counts: Vec<JsonValue> = response.take(0)?;
-        let count = extract_count(counts)?;
-        Ok(count > 0)
+        Ok(self.store.project_marker(&self.project_id).await?.is_some())
     }
 
     async fn has_file_metadata(&self) -> Result<bool> {
-        let db = {
-            let storage = self.surreal.lock().await;
-            storage.db()
-        };
-
-        let mut response = db
-            .query(
-                "SELECT count() AS count FROM file_metadata WHERE project_id = $project_id GROUP ALL;",
-            )
-            .bind(("project_id", self.project_id.clone()))
-            .await
-            .context("Failed to query file_metadata count")?;
-        let counts: Vec<JsonValue> = response.take(0)?;
-        let count = extract_count(counts)?;
-        Ok(count > 0)
+        Ok(!self
+            .store
+            .get_file_metadata_for_project(&self.project_id)
+            .await?
+            .is_empty())
     }
 
     /// Calculate SHA-256 hash of file content
@@ -1973,11 +1743,10 @@ impl ProjectIndexer {
         current_files: &[PathBuf],
         snapshots: &codegraph_parser::SourceSnapshots,
     ) -> Result<Vec<FileChange>> {
-        let storage = self.surreal.lock().await;
-        let stored_metadata = storage
+        let stored_metadata = self
+            .store
             .get_file_metadata_for_project(&self.project_id)
             .await?;
-        drop(storage);
 
         // Create lookup map of stored files
         let stored_map: HashMap<String, FileMetadataRecord> = stored_metadata
@@ -2050,7 +1819,7 @@ impl ProjectIndexer {
         }
 
         // Use writer to delete nodes, edges, and file metadata as one ordered operation
-        self.surreal_writer_handle()?
+        self.writer_handle()?
             .enqueue_delete_nodes_by_file(file_paths.to_vec(), &self.project_id)
             .await
     }
@@ -2146,7 +1915,7 @@ impl ProjectIndexer {
         // Batch upsert file metadata
         let updated = file_metadata_records.len();
         if updated > 0 {
-            self.surreal_writer_handle()?
+            self.writer_handle()?
                 .enqueue_file_metadata(file_metadata_records)
                 .await?;
         }
@@ -2223,142 +1992,45 @@ impl ProjectIndexer {
         self.enqueue_nodes_chunk(chunk).await
     }
 
-    async fn log_surreal_node_count(&self, expected: usize) {
-        let db = {
-            let storage = self.surreal.lock().await;
-            storage.db()
-        };
-
-        match db
-            .query("SELECT count() AS count FROM nodes WHERE project_id = $project_id GROUP ALL;")
-            .bind(("project_id", self.project_id.clone()))
-            .await
-        {
-            Ok(mut resp) => match resp.take::<Vec<JsonValue>>(0) {
-                Ok(rows) => match extract_count(rows) {
-                    Ok(count) => {
-                        info!(
-                            "🗄️ SurrealDB nodes persisted: {} (expected ≈ {})",
-                            count, expected
-                        );
-                    }
-                    Err(e) => warn!("⚠️ Failed to interpret SurrealDB node count: {}", e),
-                },
-                Err(e) => warn!("⚠️ Failed to read SurrealDB node count: {}", e),
-            },
-            Err(e) => {
-                warn!("⚠️ SurrealDB node count query failed: {}", e);
+    async fn log_graph_counts(&self, what: &str, expected: usize) {
+        match self.store.counts().await {
+            Ok(counts) => {
+                let stored = if what == "edges" {
+                    counts.edges
+                } else {
+                    counts.nodes
+                };
+                info!("🗄️ Graph {what} persisted: {stored} (expected ≈ {expected})");
             }
+            Err(e) => warn!("⚠️ Graph {what} count query failed: {e}"),
         }
     }
 
-    pub async fn surreal_storage(&self) -> Arc<TokioMutex<SurrealDbStorage>> {
-        Arc::clone(&self.surreal)
-    }
-
-    #[cfg(test)]
-    pub async fn test_fetch_file_metadata(
-        &self,
-        file_path: &str,
-    ) -> Result<Option<serde_json::Value>> {
-        let db = {
-            let storage = self.surreal.lock().await;
-            storage.db()
-        };
-
-        let mut resp = db
-	            .query(
-	                "SELECT file_path, last_indexed_at, node_count FROM file_metadata WHERE file_path = $file_path",
-	            )
-	            .bind(("file_path", file_path.to_string()))
-	            .await?;
-        let rows: Vec<serde_json::Value> = resp.take(0)?;
-        Ok(rows.into_iter().next())
-    }
-
-    async fn log_surreal_edge_count(&self, expected: usize) {
-        let db = {
-            let storage = self.surreal.lock().await;
-            storage.db()
-        };
-
-        match db
-            .query("SELECT count() AS count FROM edges WHERE project_id = $project_id GROUP ALL;")
-            .bind(("project_id", self.project_id.clone()))
-            .await
-        {
-            Ok(mut resp) => match resp.take::<Vec<JsonValue>>(0) {
-                Ok(rows) => match extract_count(rows) {
-                    Ok(count) => {
-                        info!(
-                            "🗄️ SurrealDB edges persisted: {} (expected ≈ {})",
-                            count, expected
-                        );
-                        if count < expected as i64 {
-                            warn!(
-                                "⚠️ Edge count ({}) is lower than resolved edges ({}). Verify SurrealDB schema and filters.",
-                                count, expected
-                            );
-                        }
-                    }
-                    Err(e) => warn!("⚠️ Failed to interpret SurrealDB edge count: {}", e),
-                },
-                Err(e) => warn!("⚠️ Failed to read SurrealDB edge count: {}", e),
-            },
-            Err(e) => warn!("⚠️ SurrealDB edge count query failed: {}", e),
-        }
+    /// The SQLite graph store the indexer writes to.
+    pub fn graph_store(&self) -> SqliteGraphStore {
+        self.store.clone()
     }
 
     async fn verify_file_metadata_count(&self, expected_files: usize) -> Result<()> {
         if expected_files == 0 {
             return Ok(());
         }
-
-        let db = {
-            let storage = self.surreal.lock().await;
-            storage.db()
-        };
-
-        let mut last_count = 0i64;
-        for attempt in 1..=3 {
-            let mut resp = db
-                .query(
-                    "SELECT count() AS count FROM file_metadata WHERE project_id = $project_id GROUP ALL;",
-                )
-                .bind(("project_id", self.project_id.clone()))
-                .await
-                .context("Failed to verify file_metadata count")?;
-            let counts: Vec<JsonValue> = resp.take(0)?;
-            last_count = extract_count(counts)?;
-
-            if last_count >= expected_files as i64 {
-                return Ok(());
-            }
-
-            if attempt < 3 {
-                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
-            }
-        }
-
-        // Fetch a small sample to aid debugging
-        let mut sample_resp = db
-            .query("SELECT file_path FROM file_metadata WHERE project_id = $project_id LIMIT 5")
-            .bind(("project_id", self.project_id.clone()))
+        let stored = self
+            .store
+            .get_file_metadata_for_project(&self.project_id)
             .await
-            .context("Failed to collect sample file_metadata rows")?;
-        let sample_rows: Vec<JsonValue> = sample_resp.take(0).unwrap_or_default();
-        let sample_paths: Vec<String> = sample_rows
-            .into_iter()
-            .filter_map(|row| {
-                row.get("file_path")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
+            .context("Failed to verify file metadata count")?;
+        if stored.len() >= expected_files {
+            return Ok(());
+        }
+        let sample_paths: Vec<&str> = stored
+            .iter()
+            .take(5)
+            .map(|row| row.file_path.as_str())
             .collect();
-
         Err(anyhow!(
             "file_metadata count {} is less than expected {} for project {}. Sample stored file_paths: {:?}",
-            last_count,
+            stored.len(),
             expected_files,
             self.project_id,
             sample_paths
@@ -2366,23 +2038,9 @@ impl ProjectIndexer {
     }
 
     async fn verify_project_metadata_present(&self) -> Result<()> {
-        let db = {
-            let storage = self.surreal.lock().await;
-            storage.db()
-        };
-
-        let mut resp = db
-            .query(
-                "SELECT count() AS count FROM project_metadata WHERE project_id = $project_id GROUP ALL;",
-            )
-            .bind(("project_id", self.project_id.clone()))
-            .await
-            .context("Failed to verify project_metadata count")?;
-        let rows: Vec<JsonValue> = resp.take(0)?;
-        let count = extract_count(rows)?;
-        if count < 1 {
+        if self.store.project_marker(&self.project_id).await?.is_none() {
             Err(anyhow!(
-                "project_metadata missing for project {}; ensure schema applied and permissions allow writes",
+                "project metadata missing for project {}",
                 self.project_id
             ))
         } else {
@@ -2390,95 +2048,10 @@ impl ProjectIndexer {
         }
     }
 
-    async fn persist_node_embeddings(&self, nodes: &[CodeNode]) -> Result<()> {
-        let mut records = Vec::new();
-        for node in nodes {
-            if let Some(embedding) = &node.embedding {
-                records.push(NodeEmbeddingRecord {
-                    id: node.id.to_string(),
-                    column: self.embedding_column.column_name(),
-                    embedding: embedding.iter().map(|&v| v as f64).collect(),
-                    updated_at: chrono::Utc::now(),
-                });
-            }
-        }
-        if records.is_empty() {
-            return Ok(());
-        }
-        self.surreal_writer_handle()?
-            .enqueue_node_embeddings(records)
-            .await
-    }
-
-    async fn store_symbol_embedding(
-        &self,
-        symbol: &str,
-        node_id: Option<NodeId>,
-        source_edge_id: Option<&str>,
-        embedding: &[f32],
-    ) -> Result<()> {
-        let record = self.build_symbol_embedding_record(symbol, node_id, source_edge_id, embedding);
-        self.persist_symbol_embedding_records(vec![record]).await
-    }
-
-    fn build_symbol_embedding_record(
-        &self,
-        symbol: &str,
-        node_id: Option<NodeId>,
-        source_edge_id: Option<&str>,
-        embedding: &[f32],
-    ) -> SymbolEmbeddingRecord {
-        let normalized = Self::normalize_symbol(symbol);
-        let node_id_string = node_id.map(|id| id.to_string());
-        SymbolEmbeddingRecord::new(
-            &self.project_id,
-            self.organization_id.as_deref(),
-            symbol,
-            &normalized,
-            embedding,
-            &self.embedding_model,
-            self.embedding_column.column_name(),
-            node_id_string.as_deref(),
-            source_edge_id,
-            None,
-        )
-    }
-
-    async fn persist_symbol_embedding_records(
-        &self,
-        records: Vec<SymbolEmbeddingRecord>,
-    ) -> Result<()> {
-        if records.is_empty() {
-            return Ok(());
-        }
-        let batch_size = symbol_embedding_db_batch_size();
-        let handle = self.surreal_writer_handle()?;
-        for chunk in records.chunks(batch_size) {
-            handle.enqueue_symbol_embeddings(chunk.to_vec()).await?;
-        }
-        Ok(())
-    }
-
-    async fn enqueue_chunk_embeddings(&self, records: Vec<ChunkEmbeddingRecord>) -> Result<()> {
-        if records.is_empty() {
-            return Ok(());
-        }
-        debug!(
-            "🧩 Queueing {} chunk embeddings for SurrealDB",
-            records.len()
-        );
-        let batch_size = chunk_embedding_db_batch_size(self.config.batch_size.max(1));
-        let handle = self.surreal_writer_handle()?;
-        for chunk in records.chunks(batch_size) {
-            handle.enqueue_chunk_embeddings(chunk.to_vec()).await?;
-        }
-        Ok(())
-    }
-
-    fn surreal_writer_handle(&self) -> Result<&SurrealWriterHandle> {
-        self.surreal_writer
+    fn writer_handle(&self) -> Result<&GraphWriterHandle> {
+        self.writer
             .as_ref()
-            .ok_or_else(|| anyhow!("Surreal writer not initialized"))
+            .ok_or_else(|| anyhow!("Graph writer not initialized"))
     }
 
     async fn enqueue_nodes_chunk(&self, nodes: &[CodeNode]) -> Result<()> {
@@ -2486,118 +2059,62 @@ impl ProjectIndexer {
             return Ok(());
         }
         let batch: Vec<CodeNode> = nodes.to_vec();
-        self.surreal_writer_handle()?.enqueue_nodes(batch).await
+        self.writer_handle()?.enqueue_nodes(batch).await
     }
 
     async fn enqueue_edges(&self, edges: Vec<CodeEdge>) -> Result<()> {
         if edges.is_empty() {
             return Ok(());
         }
-        self.surreal_writer_handle()?.enqueue_edges(edges).await
+        self.writer_handle()?.enqueue_edges(edges).await
     }
 
     async fn enqueue_project_metadata_record(&self, record: ProjectMetadataRecord) -> Result<()> {
-        self.surreal_writer_handle()?
-            .enqueue_project_metadata(record)
-            .await
+        self.writer_handle()?.enqueue_project_metadata(record).await
     }
 
-    async fn flush_surreal_writer(&self) -> Result<()> {
-        if let Some(writer) = &self.surreal_writer {
+    async fn flush_writer(&self) -> Result<()> {
+        if let Some(writer) = &self.writer {
             writer.flush().await
         } else {
             Ok(())
         }
     }
 
-    async fn shutdown_surreal_writer(&mut self) -> Result<()> {
-        match self.surreal_writer.take() {
+    async fn shutdown_writer(&mut self) -> Result<()> {
+        match self.writer.take() {
             Some(writer) => writer.shutdown().await,
             _ => Ok(()),
         }
     }
 
-    async fn connect_surreal(
-        project_root: &Path,
-    ) -> Result<(
-        Arc<TokioMutex<SurrealDbStorage>>,
-        Vec<Arc<TokioMutex<SurrealDbStorage>>>,
-    )> {
-        let mut config = SurrealDbConfig::for_project(project_root);
-        config.cache_enabled = false;
-
+    async fn open_store(project_root: &Path) -> Result<SqliteGraphStore> {
+        let root = project_root.to_path_buf();
+        let store = tokio::task::spawn_blocking(move || SqliteGraphStore::open(&root))
+            .await?
+            .with_context(|| {
+                format!(
+                    "Failed to open graph store {}",
+                    codegraph_graph::sqlite_store::db_path(project_root).display()
+                )
+            })?;
         info!(
-            "🗄️ Connecting to SurrealDB: {} namespace={} database={}",
-            Self::sanitize_surreal_url(&config.connection),
-            config.namespace,
-            config.database
+            "🗄️ Graph store opened: {}",
+            codegraph_graph::sqlite_store::db_path(project_root).display()
         );
-
-        // An embedded store is one engine shared by the process, so a pool adds nothing.
-        let pool_size = if config.is_embedded() {
-            1
-        } else {
-            std::env::var("CODEGRAPH_SURREAL_POOL_SIZE")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .map(|n| n.clamp(1, 4))
-                .unwrap_or(1)
-        };
-
-        let mut pool = Vec::with_capacity(pool_size);
-        for _ in 0..pool_size {
-            let storage = SurrealDbStorage::new(config.clone())
-                .await
-                .with_context(|| {
-                    format!("Failed to connect to SurrealDB at {}", config.connection)
-                })?;
-            pool.push(Arc::new(TokioMutex::new(storage)));
-        }
-
-        let storage = pool
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow!("Surreal pool empty after initialization"))?;
-
-        info!(
-            "🗄️ SurrealDB connection established: {} namespace={} database={}",
-            Self::sanitize_surreal_url(&config.connection),
-            config.namespace,
-            config.database
-        );
-
-        Ok((storage, pool))
+        Ok(store)
     }
 
-    fn log_surrealdb_status(&self, phase: &str) {
-        let config = SurrealDbConfig::for_project(&self.project_root);
-        let auth_state = if config.username.is_some() || config.password.is_some() {
-            "credentials configured"
-        } else {
-            "no auth"
-        };
-        info!(
-            "🗄️ SurrealDB ({}): target={} namespace={} database={} auth={}",
-            phase,
-            Self::sanitize_surreal_url(&config.connection),
-            config.namespace,
-            config.database,
-            auth_state
-        );
-    }
-
-    fn sanitize_surreal_url(raw: &str) -> String {
-        if let Ok(mut url) = Url::parse(raw) {
-            if !url.username().is_empty() {
-                let _ = url.set_username("****");
-            }
-            if url.password().is_some() {
-                let _ = url.set_password(Some("****"));
-            }
-            url.to_string()
-        } else {
-            raw.to_string()
+    /// Takes the cross-process write lock, waiting if another writer holds it.
+    async fn acquire_write_lock(&self) -> Result<WriteLock> {
+        if let Some(lock) = WriteLock::acquire(&self.project_root, false)? {
+            return Ok(lock);
         }
+        info!("⏳ Waiting for another process to release the graph write lock");
+        let root = self.project_root.clone();
+        tokio::task::spawn_blocking(move || WriteLock::acquire(&root, true))
+            .await??
+            .ok_or_else(|| anyhow!("Blocking write lock acquisition returned no lock"))
     }
 
     fn normalize_symbol(symbol: &str) -> String {
@@ -2939,94 +2456,9 @@ impl ProjectIndexer {
     }
 }
 
-fn symbol_embedding_db_batch_size() -> usize {
-    parse_symbol_embedding_db_batch_size(
-        std::env::var("CODEGRAPH_SYMBOL_DB_BATCH_SIZE")
-            .ok()
-            .as_deref(),
-    )
-}
-
-fn parse_symbol_embedding_db_batch_size(value: Option<&str>) -> usize {
-    const MAX: usize = 512;
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|parsed| parsed.clamp(1, MAX))
-        .unwrap_or(SYMBOL_EMBEDDING_DB_BATCH_LIMIT)
-}
-
-fn chunk_embedding_db_batch_size(fallback: usize) -> usize {
-    const MAX: usize = 512;
-    const DEFAULT_CAP: usize = 32; // Surreal query depth is limited; keep chunk writes modest by default
-    std::env::var("CODEGRAPH_CHUNK_DB_BATCH_SIZE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|parsed| parsed.clamp(1, MAX))
-        .unwrap_or(fallback.min(DEFAULT_CAP).min(MAX))
-}
-
-fn resolve_surreal_embedding_column(dim: usize) -> Result<SurrealEmbeddingColumn> {
-    match dim {
-        384 => Ok(SurrealEmbeddingColumn::Embedding384),
-        768 => Ok(SurrealEmbeddingColumn::Embedding768),
-        1024 => Ok(SurrealEmbeddingColumn::Embedding1024),
-        1536 => Ok(SurrealEmbeddingColumn::Embedding1536),
-        2048 => Ok(SurrealEmbeddingColumn::Embedding2048),
-        2560 => Ok(SurrealEmbeddingColumn::Embedding2560),
-        3072 => Ok(SurrealEmbeddingColumn::Embedding3072),
-        4096 => Ok(SurrealEmbeddingColumn::Embedding4096),
-        other => Err(anyhow!(
-            "Unsupported embedding dimension {}. Supported: 384, 768, 1024, 1536, 2048, 2560, 3072, 4096",
-            other
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn symbol_embedding_batch_size_defaults() {
-        assert_eq!(
-            parse_symbol_embedding_db_batch_size(None),
-            SYMBOL_EMBEDDING_DB_BATCH_LIMIT
-        );
-    }
-
-    #[test]
-    fn symbol_embedding_batch_size_respects_env_and_clamps() {
-        assert_eq!(parse_symbol_embedding_db_batch_size(Some("1024")), 512);
-        assert_eq!(parse_symbol_embedding_db_batch_size(Some("0")), 1);
-        assert_eq!(
-            parse_symbol_embedding_db_batch_size(Some("invalid")),
-            SYMBOL_EMBEDDING_DB_BATCH_LIMIT
-        );
-    }
-
-    #[test]
-    fn surreal_embedding_column_supports_2560_dimension() {
-        let column =
-            resolve_surreal_embedding_column(2560).expect("2560-d embeddings should be supported");
-        assert_eq!(column.column_name(), SURR_EMBEDDING_COLUMN_2560);
-        assert_eq!(column.dimension(), 2560);
-    }
-
-    #[test]
-    fn surreal_embedding_column_supports_1536_dimension() {
-        let column =
-            resolve_surreal_embedding_column(1536).expect("1536-d embeddings should be supported");
-        assert_eq!(column.column_name(), SURR_EMBEDDING_COLUMN_1536);
-        assert_eq!(column.dimension(), 1536);
-    }
-
-    #[test]
-    fn surreal_embedding_column_supports_3072_dimension() {
-        let column =
-            resolve_surreal_embedding_column(3072).expect("3072-d embeddings should be supported");
-        assert_eq!(column.column_name(), SURR_EMBEDDING_COLUMN_3072);
-        assert_eq!(column.dimension(), 3072);
-    }
 
     #[tokio::test]
     async fn analyzer_requires_rust_analyzer_when_lsp_enabled() {

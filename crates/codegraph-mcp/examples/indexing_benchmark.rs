@@ -8,9 +8,35 @@ use serde_json::{Value, json};
 use std::{path::Path, time::Instant};
 
 async fn graph(indexer: &ProjectIndexer) -> Result<Value> {
-    let storage = indexer.surreal_storage().await;
-    let mut response = storage.lock().await.db().query("SELECT id, name, node_type, file_path, language, metadata.attributes FROM nodes ORDER BY id; SELECT id, from, to, edge_type, metadata FROM edges ORDER BY id").await?.check()?;
-    Ok(json!({"nodes":response.take::<Vec<Value>>(0)?,"edges":response.take::<Vec<Value>>(1)?}))
+    let rows = |sql: &str| {
+        indexer.graph_store().with_conn_blocking(|conn| {
+            let mut stmt = conn.prepare(sql)?;
+            let names: Vec<String> = stmt.column_names().iter().map(|n| n.to_string()).collect();
+            let rows = stmt.query_map([], |row| {
+                let mut object = serde_json::Map::new();
+                for (i, name) in names.iter().enumerate() {
+                    let value = match row.get::<_, rusqlite::types::Value>(i)? {
+                        rusqlite::types::Value::Null => Value::Null,
+                        rusqlite::types::Value::Integer(v) => json!(v),
+                        rusqlite::types::Value::Real(v) => json!(v),
+                        rusqlite::types::Value::Text(v) => json!(v),
+                        rusqlite::types::Value::Blob(v) => json!(v),
+                    };
+                    object.insert(name.clone(), value);
+                }
+                Ok(Value::Object(object))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    };
+    // Row ids and timestamps vary between equivalent builds; compare the graph content.
+    Ok(json!({
+        "nodes": rows("SELECT c.uuid, n.name, n.kind, c.rust_kind, n.file_path, n.language, \
+                       c.attributes FROM cg_nodes c JOIN nodes n USING (qualified_name) \
+                       ORDER BY c.uuid")?,
+        "edges": rows("SELECT c.uuid, e.source_qualified, e.target_qualified, e.kind, e.extra \
+                       FROM cg_edges c JOIN edges e ON e.id = c.edge_id ORDER BY c.uuid")?,
+    }))
 }
 async fn sample(
     indexer: &ProjectIndexer,
@@ -30,10 +56,6 @@ async fn sample(
 }
 #[tokio::main]
 async fn main() -> Result<()> {
-    ensure!(
-        std::env::var("CODEGRAPH_SURREALDB_URL").as_deref() == Ok("mem://"),
-        "Set CODEGRAPH_SURREALDB_URL=mem:// to isolate this benchmark"
-    );
     let repeats = std::env::var("CODEGRAPH_BENCH_REPEATS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -67,18 +89,6 @@ async fn main() -> Result<()> {
             MultiProgress::with_draw_target(ProgressDrawTarget::hidden()),
         )
         .await?;
-        indexer
-            .surreal_storage()
-            .await
-            .lock()
-            .await
-            .db()
-            .query(
-                codegraph_graph::vector_indexes::VectorIndexMode::Off
-                    .initial_schema(include_str!("../../../schema/codegraph_v2.surql")),
-            )
-            .await?
-            .check()?;
         let startup_us = startup.elapsed().as_micros();
         sample(&indexer, &root, "cold", repeat, &mut samples).await?;
         let warm = sample(&indexer, &root, "no_change", repeat, &mut samples).await?;

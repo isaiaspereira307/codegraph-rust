@@ -1,4 +1,4 @@
-// ABOUTME: Health monitoring with circuit breaker pattern for SurrealDB resilience
+// ABOUTME: Health monitoring with circuit breaker pattern for graph-store resilience
 // ABOUTME: Provides automatic reconnection with exponential backoff
 
 use serde::{Deserialize, Serialize};

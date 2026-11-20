@@ -10,7 +10,6 @@ use codegraph_mcp::indexer::{IndexerConfig, ProjectIndexer, set_watch_test_notif
 use indicatif::{MultiProgress, ProgressDrawTarget};
 use notify::Event;
 use notify::event::{DataChange, EventKind, ModifyKind};
-use serde_json::Value;
 use tempfile::tempdir;
 use tokio::fs;
 use tokio::time::sleep;
@@ -23,17 +22,10 @@ async fn watch_updates_file_metadata_on_change() -> Result<()> {
             ("CODEGRAPH_NO_PROGRESS", Some("1")),
             ("CODEGRAPH_ANALYZERS", Some("0")),
             ("CODEGRAPH_ANALYZERS_REQUIRE_TOOLS", Some("0")),
-            ("CODEGRAPH_SURREALDB_URL", Some("mem://")),
-            ("CODEGRAPH_SURREALDB_NAMESPACE", Some("watch_ns")),
-            ("CODEGRAPH_SURREALDB_DATABASE", Some("watch_db")),
-            ("CODEGRAPH_SURREALDB_USERNAME", None),
-            ("CODEGRAPH_SURREALDB_PASSWORD", None),
         ],
     ) {
         return Ok(());
     }
-
-    // Isolated in-memory SurrealDB
 
     let project_dir = tempdir()?;
     let file_path = project_dir.path().join("foo.rs");
@@ -49,20 +41,12 @@ async fn watch_updates_file_metadata_on_change() -> Result<()> {
     let progress = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
     let indexer = ProjectIndexer::new(config, &global_config, progress).await?;
 
-    indexer
-        .surreal_storage()
-        .await
-        .lock()
-        .await
-        .db()
-        .query(include_str!("../../../schema/codegraph_v2.surql"))
-        .await?
-        .check()?;
     // Baseline full index to seed file metadata
     indexer.index_project(project_dir.path()).await?;
     let indexer = Arc::new(indexer);
-    let storage = indexer.surreal_storage().await;
-    let _initial = fetch_metadata(storage.clone(), file_path.to_string_lossy().as_ref())
+    let storage = indexer.graph_store();
+    let initial = storage
+        .get_file_metadata(file_path.to_string_lossy().as_ref())
         .await?
         .expect("baseline metadata missing");
 
@@ -88,30 +72,17 @@ async fn watch_updates_file_metadata_on_change() -> Result<()> {
     watch_indexer
         .simulate_file_event(event, &mut last_events, 300)
         .await;
-    let _updated = fetch_metadata(storage.clone(), file_path.to_string_lossy().as_ref())
+    let updated = storage
+        .get_file_metadata(file_path.to_string_lossy().as_ref())
         .await?
         .expect("updated metadata missing");
+    assert_ne!(initial.content_hash, updated.content_hash);
+    assert!(updated.node_count > initial.node_count);
     let first = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
 
     assert!(matches!(first, Ok(Some(_))), "watch event not observed");
 
     Ok(())
-}
-
-async fn fetch_metadata(
-    storage: Arc<tokio::sync::Mutex<codegraph_graph::SurrealDbStorage>>,
-    file_path: &str,
-) -> Result<Option<Value>> {
-    let db = storage.lock().await;
-    let client = db.db();
-    let mut resp = client
-        .query(
-            "SELECT file_path, last_indexed_at, node_count FROM file_metadata WHERE file_path = $file_path",
-        )
-        .bind(("file_path", file_path.to_string()))
-        .await?;
-    let rows: Vec<Value> = resp.take(0)?;
-    Ok(rows.last().cloned())
 }
 
 #[cfg(test)]

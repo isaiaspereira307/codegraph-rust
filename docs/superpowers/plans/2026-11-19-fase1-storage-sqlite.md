@@ -282,13 +282,13 @@ Snapshot: `StableDiGraph` carregado de `nodes ⟕ cg_nodes` + `edges`, guardado 
   do marcador de pronto), `crates/codegraph-mcp-daemon/src/daemon/*`,
   `crates/codegraph-mcp/tests/{reconciliation_test,daemon_watch}.rs`.
 
-- [ ] Rodar `cargo test -p codegraph-mcp --test reconciliation_test` com o store novo → FAIL
+- [x] Rodar `cargo test -p codegraph-mcp --test reconciliation_test` com o store novo → FAIL
       de compilação, depois ajustar até PASS; mesma coisa para `daemon_watch` e
       `index_cli_integration`.
-- [ ] Verificação manual: `codegraph index <fixture python> -r` cria
+- [x] Verificação manual: `codegraph index <fixture python> -r` cria
       `.code-review-graph/graph.db`; `codegraph tool run find_nodes_by_name --params
       '{"name":"Service"}'` acha o nó; `sqlite3 graph.db "select count(*) from nodes"` > 0.
-- [ ] Commit `feat(indexer): persist the graph in SQLite` + push.
+- [x] Commit `feat(indexer): persist the graph in SQLite` + push.
 
 ### Task 7: Remoção do SurrealDB
 
