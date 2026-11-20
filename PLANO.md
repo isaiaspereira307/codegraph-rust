@@ -46,12 +46,9 @@ Sobras conhecidas (sem efeito, a limpar junto com a Fase 1):
 
 ### Notas de ambiente (máquina local, WSL)
 
-- **OpenSSL**: o `pkg-config` do Linuxbrew faz o build linkar com o OpenSSL 4 do brew, cuja
-  pasta de bibliotecas não está no caminho do carregador. O binário falha com
-  `libssl.so.4: cannot open shared object file`. Para rodar o binário ou os testes:
-  `export LD_LIBRARY_PATH=/home/linuxbrew/.linuxbrew/lib`. Alternativa: compilar com
-  `PKG_CONFIG=/usr/bin/pkg-config` (OpenSSL 3 do sistema; exige rebuild). A Fase 1 resolve
-  isso de vez ao tirar SurrealDB e `reqwest`/`native-tls` do binário.
+- **OpenSSL**: resolvido na Fase 1 (Task 7). O workspace não depende mais de `openssl-sys`
+  nem `native-tls`; o binário release não linka `libssl`, então `LD_LIBRARY_PATH` não é mais
+  necessário.
 - **Watchers no WSL**: 2 testes de `codegraph-core::watch` falham também no código original.
   3 testes de watcher de `codegraph-parser` travam (`test_file_change_detection`,
   `test_file_monitoring_only`, `test_integration_test_suite`). Rodar a suíte com
@@ -60,7 +57,7 @@ Sobras conhecidas (sem efeito, a limpar junto com a Fase 1):
 
 ---
 
-## Fase 1 — Storage: SurrealDB → SQLite + petgraph 🟡
+## Fase 1 — Storage: SurrealDB → SQLite + petgraph ✅
 
 Plano detalhado: `docs/superpowers/plans/2026-11-19-fase1-storage-sqlite.md`.
 
@@ -73,8 +70,12 @@ Progresso:
 - [x] Task 5 — executor, servidor MCP, `tool run` e `db-check` lendo do SQLite.
 - [x] Task 6 — writer e indexer gravando no SQLite (`codegraph index` cria
       `.code-review-graph/graph.db`; lock de escrita e `finalize` por execução).
-- [ ] Task 7 — remover SurrealDB, `schema/*.surql`, `graph_vector.rs` e as sobras de
-      embedding; binário sem `libssl`.
+- [x] Task 7 — remover SurrealDB, `schema/*.surql`, `graph_vector.rs`, `reqwest` e
+      `native-tls`; binário sem `libssl` (`ldd` sem ssl). O cliente WebSocket legado de
+      `codegraph-mcp` aceita só `ws://`.
+- [ ] Sobras de embedding/LLM/rerank na config e na CLI (`[embedding]`, `[llm]`, `[rerank]`,
+      `--batch-size`, `estimate`, `CODEGRAPH_EMBEDDING_*`): commit separado, sem efeito
+      funcional.
 
 Por quê: compatibilidade com o banco do CRG, concorrência (SurrealKV trava o diretório para
 um único processo, e o CRG roda watch + hooks + MCP ao mesmo tempo), licença (SurrealDB é
@@ -199,7 +200,7 @@ harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
 ## Ordem sugerida e marcos
 
 1. ~~Fechar a Fase 0~~ ✅.
-2. Fase 1 inteira (storage; Tasks 1–6 ✅, falta a 7); sem ela, as fases seguintes construiriam sobre o SurrealDB.
+2. ~~Fase 1 (storage)~~ ✅; falta só a limpeza das sobras de embedding.
 3. Harness da Fase 2 antes de qualquer ferramenta nova, para medir regressões desde o início.
 4. Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code.
 5. Fases 4 e 5 conforme o uso real pedir.

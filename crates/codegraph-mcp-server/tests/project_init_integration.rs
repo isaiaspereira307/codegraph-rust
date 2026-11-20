@@ -173,13 +173,9 @@ fn init_indexes_selected_project_using_its_env_after_guidance_is_written() {
     let config = invoking.path().join("providers.toml");
     codegraph_core::config_manager::ConfigManager::create_default_config(&config).unwrap();
     std::fs::write(project.path().join("a.rs"), "pub fn sample() {}\n").unwrap();
-    // Persistent embedded stores apply the bundled schema; mem:// intentionally starts empty.
     std::fs::write(
         project.path().join(".env"),
-        format!(
-            "CODEGRAPH_SURREALDB_URL=surrealkv://{}\nCODEGRAPH_EMBEDDING_POLICY=off\nCODEGRAPH_SEMANTIC_RESOLUTION=off\nCODEGRAPH_ANALYZERS=0\nCODEGRAPH_VECTOR_INDEX_MODE=off\nCODEGRAPH_PROJECT_ID=init-offline\nCODEGRAPH_NO_PROGRESS=1\n",
-            project.path().join(".codegraph/db").display()
-        ),
+        "CODEGRAPH_EMBEDDING_POLICY=off\nCODEGRAPH_SEMANTIC_RESOLUTION=off\nCODEGRAPH_ANALYZERS=0\nCODEGRAPH_VECTOR_INDEX_MODE=off\nCODEGRAPH_PROJECT_ID=init-offline\nCODEGRAPH_NO_PROGRESS=1\n",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_codegraph"))
@@ -194,14 +190,11 @@ fn init_indexes_selected_project_using_its_env_after_guidance_is_written() {
         .current_dir(invoking.path())
         .env("CODEGRAPH_DEBUG", "0")
         .env_remove("CODEGRAPH_CONFIG_PATH")
-        .env_remove("CODEGRAPH_SURREALDB_URL")
         .env_remove("CODEGRAPH_EMBEDDING_POLICY")
         .env_remove("CODEGRAPH_SEMANTIC_RESOLUTION")
         .env_remove("CODEGRAPH_PROJECT_ID")
         .env_remove("CODEGRAPH_ANALYZERS")
         .env_remove("CODEGRAPH_VECTOR_INDEX_MODE")
-        .env_remove("CODEGRAPH_SCHEMA")
-        .env_remove("CODEGRAPH_USE_GRAPH_SCHEMA")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -219,6 +212,7 @@ fn init_indexes_selected_project_using_its_env_after_guidance_is_written() {
     assert_eq!(state["stats"]["files"], 1);
     assert_eq!(state["stats"]["complete"], true);
     assert_eq!(state["stats"]["inference_texts"], 0);
+    assert!(project.path().join(".code-review-graph/graph.db").exists());
     assert!(project.path().join("AGENTS.md").exists());
     assert!(!invoking.path().join("AGENTS.md").exists());
 }

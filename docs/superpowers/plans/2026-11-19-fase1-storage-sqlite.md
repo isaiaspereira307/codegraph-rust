@@ -302,9 +302,9 @@ Snapshot: `StableDiGraph` carregado de `nodes ⟕ cg_nodes` + `edges`, guardado 
   (`CODEGRAPH_SURREALDB_*`, `[embedding]`, `[llm]`, `[rerank]`, `--batch-size`,
   `estimate`), `CLAUDE.md`, `AGENTS.md`, `PLANO.md`.
 
-- [ ] `cargo tree -p codegraph-mcp-server --all-features -i openssl-sys` → nenhum resultado.
-- [ ] `cargo build --release -p codegraph-mcp-server --bin codegraph --features full` e
+- [x] `cargo tree -p codegraph-mcp-server --all-features -i openssl-sys` → nenhum resultado.
+- [x] `cargo build --release -p codegraph-mcp-server --bin codegraph --features full` e
       `ldd target/release/codegraph | grep -c ssl` → `0`.
-- [ ] Suíte completa (`cargo test --workspace --all-features --no-fail-fast` pulando os 5
+- [x] Suíte completa (`cargo test --workspace --all-features --no-fail-fast` pulando os 5
       watchers WSL) verde.
-- [ ] Commit `chore: drop SurrealDB` + push; marcar Fase 1 ✅ no `PLANO.md`.
+- [x] Commit `chore: drop SurrealDB` + push; marcar Fase 1 ✅ no `PLANO.md`.

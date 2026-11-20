@@ -24,7 +24,7 @@ pub struct WatchConfig {
     #[serde(default = "default_health_interval")]
     pub health_check_interval_secs: u64,
 
-    /// SurrealDB reconnection backoff
+    /// Graph store reconnection backoff
     #[serde(default)]
     pub reconnect_backoff: BackoffConfig,
 

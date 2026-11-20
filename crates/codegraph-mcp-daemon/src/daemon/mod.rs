@@ -159,7 +159,7 @@ impl WatchDaemon {
             project_root: self.config.project_root.clone(),
             files_watched,
             metrics,
-            surrealdb_connected: circuit_state == CircuitState::Closed,
+            store_connected: circuit_state == CircuitState::Closed,
             circuit_state,
         }
     }

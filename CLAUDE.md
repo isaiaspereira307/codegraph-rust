@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-CodeGraph indexes a codebase into a SurrealDB knowledge graph (AST nodes, edges) and serves it to AI clients over MCP as deterministic graph tools (`find_nodes_by_name`, dependency/reverse-dependency traversal, call chains, cycles, coupling, hubs, complexity hotspots). No LLM or embedding provider is involved. It is a Rust workspace of 8 crates under `crates/`; the single shipped binary is `codegraph`, built from `crates/codegraph-mcp-server/src/bin/codegraph.rs`.
+CodeGraph indexes a codebase into a SQLite knowledge graph (the code-review-graph v15 schema) (AST nodes, edges) and serves it to AI clients over MCP as deterministic graph tools (`find_nodes_by_name`, dependency/reverse-dependency traversal, call chains, cycles, coupling, hubs, complexity hotspots). No LLM or embedding provider is involved. It is a Rust workspace of 8 crates under `crates/`; the single shipped binary is `codegraph`, built from `crates/codegraph-mcp-server/src/bin/codegraph.rs`.
 
 This fork is being turned into a Rust version of code-review-graph. Phase 0 removed the LLM agent (`codegraph-mcp-rig`), embeddings/reranking (`codegraph-vector`) and the unused `codegraph-zerocopy`/`codegraph-concurrent` crates.
 
@@ -25,7 +25,7 @@ cargo install --path crates/codegraph-mcp-server --bin codegraph --all-features 
 cargo test --workspace                      # or: make test
 cargo test -p codegraph-mcp                 # one crate
 cargo test -p codegraph-mcp <test_name>     # one test by name filter
-cargo test -p codegraph-graph --test schema_indexes_test   # one integration-test file
+cargo test -p codegraph-graph --test sqlite_schema_test     # one integration-test file
 
 # Format / lint
 cargo fmt --all                             # rustfmt.toml: max_width = 100
@@ -49,19 +49,19 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings   # what CI
 
 There are no `#[ignore]` tests; DB-dependent tests are gated by env vars and silently skip (pass) otherwise:
 
-- `crates/codegraph-graph/tests/semantic_search_nodes_via_chunks_test.rs` runs only with `CODEGRAPH_RUN_SEMANTIC_SEARCH_NODES_VIA_CHUNKS_TEST=1` (uses in-memory SurrealDB).
+- None currently; storage tests use temporary SQLite files.
 
 ### Running locally
 
 ```bash
-codegraph db-check                      # opens the store, applying the bundled schema if the store is new
+codegraph db-check                      # opens the store (creating the v15 schema if new) and prints counts
 codegraph init /path/to/project         # choose project hooks, merge agent instructions, then index recursively
 codegraph init . --hooks none --no-index # instruction setup only; no providers or database
 codegraph index /path/to/project -r -l rust,typescript --index-tier fast|balanced|full
 codegraph start stdio --watch           # MCP server over stdio, with re-index-on-change daemon
 ```
 
-Storage defaults to an embedded SurrealKV store at `<project>/.codegraph/db` (`SurrealDbConfig::for_project` in `crates/codegraph-graph/src/surrealdb_storage.rs`), which gets `schema/codegraph_v2.surql` applied on first open. The engine locks the directory, so one process at a time per project: stop `codegraph start` before `codegraph index` on the same project. Setting `CODEGRAPH_SURREALDB_URL` switches to a SurrealDB server (`surreal start --bind 0.0.0.0:3004 --user root --pass root file://$HOME/.codegraph/surreal.db`, then `cd schema && ./apply-schema.sh`; the schema is not applied automatically in server mode).
+Storage is one SQLite file per repository at `<project>/.code-review-graph/graph.db` (`SqliteGraphStore` in `crates/codegraph-graph/src/sqlite_store/`), the same path and v15 schema code-review-graph (Python) uses, so either tool can read the other's index. WAL mode: many readers, one writer. Writers take an exclusive `flock` on `.code-review-graph/write.lock` (shared with code-review-graph), so `codegraph start` can keep serving while `codegraph index` runs. Rust-only state lives in `cg_*` tables; kind mappings and losses are in `docs/architecture/storage-sqlite.md`.
 
 Config resolution (`crates/codegraph-core/src/config_manager.rs`): `./.codegraph.toml`, then `~/.codegraph/config.toml`, overridden by `.env` (cwd, then `~/.codegraph.env`) and `CODEGRAPH_*` env vars. See `.env.example` and `config/example.toml`. The loader ignores unknown TOML keys silently, and `[rerank]`, `[performance]`, `[logging]` are parsed but only shown in status output.
 
@@ -74,7 +74,7 @@ Project init runs before application configuration or the async runtime. `projec
 Dependencies point downward; do not add upward imports (they create cycles):
 
 - `codegraph-core`: types, config, `CodeNode`. Everything depends on it.
-- `codegraph-parser` (tree-sitter) and `codegraph-graph` (SurrealDB storage) depend only on core.
+- `codegraph-parser` (tree-sitter) and `codegraph-graph` (SQLite storage + petgraph queries) depend only on core.
 - `codegraph-mcp-core`: shared MCP types, on core only. `codegraph-mcp-tools` (graph tool schemas + `GraphToolExecutor`) adds graph.
 - `codegraph-mcp` (indexer + analyzers) sits on parser/graph/mcp-core.
 - `codegraph-mcp-daemon` (file watching) depends on `codegraph-mcp`.
@@ -98,17 +98,17 @@ The index tier controls analyzers and early extraction: `fast` (default; core AS
 
 Performance and correctness controls are documented in `docs/indexing-performance-work.md`; use `docs/indexing-benchmarks.md` for reproducible cold/warm/edit/rename/delete/doc/manifest/tier scenarios and same-model retrieval probes. Preserve compatible SHA node IDs, canonical cache fingerprints, source spans, ambiguity and completion barriers. Never silently change the selected model/backend or mix query/document tasks in caches. Reduced precision, candidate caps, alternate splitters and compiler imports stay opt-in until relevant quality measurements support adoption.
 
-Targeted offline checks include reconciliation/watch tests, `cargo test -p codegraph-graph --features surrealdb --test ingestion_write_test`, parser unit tests and the Python benchmark regressions. Strict workspace Clippy currently fails on existing `codegraph-core` diagnostics; do not describe non-strict targeted linting as a strict workspace pass. Debug synthetic measurements do not establish production speedups or live-model quality.
+Targeted offline checks include reconciliation/watch tests, `cargo test -p codegraph-graph --test sqlite_write_test --test sqlite_reconcile_test`, parser unit tests and the Python benchmark regressions. Strict workspace Clippy currently fails on existing `codegraph-core` diagnostics; do not describe non-strict targeted linting as a strict workspace pass. Debug synthetic measurements do not establish production speedups or live-model quality.
 
 ### Flow 2: graph tools (MCP and CLI)
 
-`crates/codegraph-mcp-server/src/official_server.rs` exposes one rmcp `#[tool]` per graph tool, each with a typed parameter struct. The project store is opened lazily on the first call (`open_executor`) and shared through a `OnceCell`; every call goes through `GraphToolExecutor::execute` in `codegraph-mcp-tools`, which validates the tool name, caches results (LRU) and shortens long `content` fields. The executor calls the `fn::*` SurrealQL functions defined in the schema, wrapped by `crates/codegraph-graph/src/graph_functions.rs`.
+`crates/codegraph-mcp-server/src/official_server.rs` exposes one rmcp `#[tool]` per graph tool, each with a typed parameter struct. The project store is opened lazily on the first call (`open_executor`) and shared through a `OnceCell`; every call goes through `GraphToolExecutor::execute` in `codegraph-mcp-tools`, which validates the tool name, caches results (LRU) and shortens long `content` fields. The executor queries `GraphQuery` (`crates/codegraph-graph/src/graph_query/`), an in-memory `petgraph` snapshot of the SQLite store that reloads when `PRAGMA data_version` changes.
 
 `codegraph tool run <name> --params '<json>'` (`tool_cli.rs`) runs the same path without an MCP transport; `codegraph tool list` prints the schemas and `codegraph tool instructions` the agent guidance from `src/prompts/cli_instructions.md`. Adding a tool needs: the schema in `graph_tool_schemas.rs`, a dispatch arm and `execute_*` method in `graph_tool_executor.rs`, and a `#[tool]` method in `official_server.rs` (the `every_graph_tool_is_exposed_over_mcp` test enforces the last step).
 
 ### Schema
 
-Three SurrealDB schemas must stay in sync with the storage layer and with each other: `schema/codegraph_v2.surql` (default; SurrealDB 3.x-optimised functions, tested end to end by `crates/codegraph-graph/tests/schema_v2_test.rs`), `schema/codegraph.surql` (the original, `CODEGRAPH_SCHEMA=v1`), and `schema/codegraph_graph_experimental.surql` (selected with `CODEGRAPH_USE_GRAPH_SCHEMA=true` + `CODEGRAPH_GRAPH_DB_DATABASE`). `crates/codegraph-graph/tests/schema_indexes_test.rs` statically validates them (project-scoped indexes, required `fn::*` functions, SurrealQL parsing constraints) and `schema_runtime_test.rs` applies each to an in-memory engine; run both after any schema edit. A new graph function generally needs: the `fn::` definition in each schema, a wrapper in `graph_functions.rs`, a schema + executor entry in `codegraph-mcp-tools`, and an MCP `#[tool]` in `official_server.rs`. SurrealQL gotcha: `LET` inside a `FOR` body is block-scoped in 3.x, so iterative walks use `array::fold` (see `fn::expand` in v2).
+`crates/codegraph-graph/src/sqlite_store/schema_v15.sql` is copied verbatim from a database created by code-review-graph v15; do not edit it by hand. `schema_cg.sql` holds the Rust-only `cg_*` tables. Opening a database with another `schema_version` is an error (no migrations are ported). Run `cargo test -p codegraph-graph` after touching either file. A new graph tool needs: a query in `graph_query/`, a schema + executor entry in `codegraph-mcp-tools`, and an MCP `#[tool]` in `official_server.rs`.
 
 ## Conventions
 

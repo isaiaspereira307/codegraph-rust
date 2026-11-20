@@ -22,20 +22,11 @@ sha2 = { workspace = true }
 rusqlite = { workspace = true, optional = true }
 petgraph = { workspace = true, optional = true }
 
-# SurrealDB support (optional, default on via feature flag)
-surrealdb = { version = "3.3.0", optional = true, features = ["kv-mem", "kv-surrealkv"] }
-dotenvy = { version = "0.15.7", optional = true }
 tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thread"] }
 
 [features]
 default = ["sqlite"]
 sqlite = ["dep:rusqlite", "dep:petgraph", "dep:tokio"]
-surrealdb = ["dep:surrealdb", "dep:dotenvy", "dep:tokio"]
-
-[[bin]]
-name = "surreal_smoke_test"
-path = "src/bin/surreal_smoke_test.rs"
-required-features = ["surrealdb"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -77,8 +77,8 @@ pub struct DaemonStatus {
     /// Session metrics
     pub metrics: SessionMetrics,
 
-    /// SurrealDB connection status
-    pub surrealdb_connected: bool,
+    /// Graph store connection status
+    pub store_connected: bool,
 
     /// Circuit breaker state
     pub circuit_state: CircuitState,
@@ -93,7 +93,7 @@ impl DaemonStatus {
             project_root,
             files_watched: 0,
             metrics: SessionMetrics::new(),
-            surrealdb_connected: false,
+            store_connected: false,
             circuit_state: CircuitState::Closed,
         }
     }

@@ -103,7 +103,6 @@ async fn start_mcp_server_in(
     let mut cmd = TokioCommand::new(codegraph_bin);
     cmd.args(["start", "stdio"])
         .current_dir(project)
-        .env_remove("CODEGRAPH_SURREALDB_URL")
         .env_remove("CODEGRAPH_PROJECT_ID")
         .env("RUST_LOG", "error") // Minimize log noise during testing
         .env("CODEGRAPH_DEBUG", "0"); // Force-disable debug log files in tests

@@ -128,11 +128,8 @@ enum Commands {
 
     #[command(
         about = "Index a project or directory",
-        long_about = "Index a project into the SurrealDB code graph.\n\
-                      Set CODEGRAPH_EMBEDDING_PROVIDER to a compiled local or remote provider.\n\
-                      CODEGRAPH_EMBEDDING_POLICY and CODEGRAPH_SEMANTIC_RESOLUTION accept sync, deferred or off independently.\n\
-                      Use --complete-deferred to finish a persisted inference job.\n\
-                      Some flags are provider-specific (see individual flag help for details)."
+        long_about = "Index a project into <project>/.code-review-graph/graph.db \
+                      (code-review-graph schema v15)."
     )]
     Index {
         #[arg(help = "Path to project directory")]
@@ -223,7 +220,7 @@ enum Commands {
     },
 
     #[command(
-        about = "Estimate indexing cost (node/edge counts + embedding ETA) without writing to SurrealDB"
+        about = "Estimate indexing cost (node/edge counts + embedding ETA) without writing the graph"
     )]
     Estimate {
         #[arg(help = "Path to project directory")]

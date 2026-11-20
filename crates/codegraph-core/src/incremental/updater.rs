@@ -1,4 +1,3 @@
-use crate::integration::graph_vector::{GraphVectorIntegrator, SnippetExtractor};
 use crate::traits::{CodeParser, GraphStore};
 use crate::{CodeNode, Language, NodeId, NodeType, Result};
 use dashmap::DashMap;
@@ -6,6 +5,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -175,25 +175,110 @@ struct UpdateTransactionLog {
     removed_prev: Vec<CodeNode>,
 }
 
-/// Incremental updater orchestrating parser, graph, vector and cache for a single file.
+/// Produces language-aware text snippets from graph nodes for content signatures.
+pub struct SnippetExtractor {
+    // How many lines of context to include around the node location when reading from file
+    pub context_lines: usize,
+    // Max bytes to read from file to avoid large allocations
+    pub max_read_bytes: usize,
+}
+
+impl Default for SnippetExtractor {
+    fn default() -> Self {
+        Self {
+            context_lines: 40,
+            max_read_bytes: 256 * 1024,
+        }
+    }
+}
+
+impl SnippetExtractor {
+    pub fn extract(&self, node: &CodeNode) -> String {
+        // Prefer in-node content if present
+        if let Some(c) = &node.content {
+            return self.compose_text(node, Some(c.as_str()));
+        }
+        // Fallback to file extraction based on location
+        match std::fs::read(Path::new(&node.location.file_path)) {
+            Ok(bytes) => {
+                let content = std::str::from_utf8(&bytes).unwrap_or("");
+                let snippet = if let Some((start, end)) = self.window_around_location(content, node)
+                {
+                    content[start..end].to_string()
+                } else {
+                    // Entire file, truncated
+                    content.chars().take(self.max_read_bytes / 2).collect()
+                };
+                self.compose_text(node, Some(&snippet))
+            }
+            Err(_) => self.compose_text(node, None),
+        }
+    }
+
+    fn compose_text(&self, node: &CodeNode, body: Option<&str>) -> String {
+        let lang = node
+            .language
+            .as_ref()
+            .map(|l| format!("{:?}", l).to_lowercase())
+            .unwrap_or_else(|| "unknown".into());
+        let ntype = node
+            .node_type
+            .as_ref()
+            .map(|t| format!("{:?}", t).to_lowercase())
+            .unwrap_or_else(|| "unknown".into());
+        let mut out = format!("{} {} {}\n", lang, ntype, node.name);
+        if let Some(b) = body {
+            out.push_str(b);
+        }
+        if out.len() > self.max_read_bytes {
+            out.truncate(self.max_read_bytes);
+        }
+        out
+    }
+
+    fn window_around_location(&self, content: &str, node: &CodeNode) -> Option<(usize, usize)> {
+        let line = node.location.line as usize;
+        if line == 0 {
+            return None;
+        }
+        let start_line = line.saturating_sub(self.context_lines);
+        // If end_line is provided, extend by context; otherwise use current line then extend
+        let base_end: usize = node.location.end_line.unwrap_or(line as u32) as usize;
+        let end_line = base_end.saturating_add(self.context_lines);
+
+        // Map line numbers to byte offsets
+        let mut cur_line = 1usize;
+        let mut start_idx = 0usize;
+        let mut end_idx = content.len();
+        for (idx, ch) in content.char_indices() {
+            if cur_line == start_line {
+                start_idx = idx;
+            }
+            if cur_line > end_line {
+                end_idx = idx;
+                break;
+            }
+            if ch == '\n' {
+                cur_line += 1;
+            }
+        }
+        Some((start_idx.min(content.len()), end_idx.min(content.len())))
+    }
+}
+
+/// Incremental updater orchestrating parser, graph and cache for a single file.
 pub struct IncrementalUpdater {
     parser: Arc<dyn CodeParser>,
     graph: Arc<Mutex<dyn GraphStore + Send>>, // serialized graph ops
-    vector: Option<Arc<GraphVectorIntegrator>>, // vector sync (optional)
     cache: Arc<IncrementalCache>,
     extractor: SnippetExtractor, // for robust signatures
 }
 
 impl IncrementalUpdater {
-    pub fn new(
-        parser: Arc<dyn CodeParser>,
-        graph: Arc<Mutex<dyn GraphStore + Send>>,
-        vector: Option<Arc<GraphVectorIntegrator>>,
-    ) -> Self {
+    pub fn new(parser: Arc<dyn CodeParser>, graph: Arc<Mutex<dyn GraphStore + Send>>) -> Self {
         Self {
             parser,
             graph,
-            vector,
             cache: Arc::new(IncrementalCache::new(100_000)),
             extractor: SnippetExtractor::default(),
         }
@@ -210,7 +295,7 @@ impl IncrementalUpdater {
         &mut self.extractor
     }
 
-    /// Compute a stable content signature for a node (used for change detection and vector updates).
+    /// Compute a stable content signature for a node (used for change detection).
     fn signature(&self, node: &CodeNode) -> u64 {
         let mut s = std::collections::hash_map::DefaultHasher::new();
         // Compose feature-rich content, prefer explicit content or extracted snippet
@@ -285,7 +370,7 @@ impl IncrementalUpdater {
         diff
     }
 
-    /// Update a single file: parse, diff, apply selective graph updates, vector maintenance, cache update.
+    /// Update a single file: parse, diff, apply selective graph updates, cache update.
     pub async fn update_file(&self, file_path: &str) -> Result<UpdateResult> {
         let start = Instant::now();
 
@@ -307,19 +392,6 @@ impl IncrementalUpdater {
                 warn!("rollback also failed: {}", rb);
             }
             return Err(e);
-        }
-
-        // Vector maintenance (best-effort; do not rollback graph if vectors fail)
-        if let Some(v) = &self.vector {
-            // Build the changed+added payload
-            let mut changed_nodes: Vec<CodeNode> =
-                Vec::with_capacity(diff.changed.len() + diff.added.len());
-            changed_nodes.extend(diff.changed.iter().map(|(_id, n)| n.clone()));
-            changed_nodes.extend(diff.added.iter().cloned());
-            let deleted_ids: Vec<NodeId> = diff.removed.clone();
-            if let Err(ve) = v.sync_changes(&changed_nodes, &deleted_ids).await {
-                warn!("vector sync failed (non-fatal): {}", ve);
-            }
         }
 
         // Update cache snapshot by transforming previous entries
@@ -436,7 +508,6 @@ impl IncrementalUpdater {
 mod tests {
     use super::*;
     use crate::CodeGraphError;
-    use crate::traits::VectorStore;
     use async_trait::async_trait;
 
     struct InMemoryParser {
@@ -486,31 +557,6 @@ mod tests {
         }
     }
 
-    struct InMemoryVectorStore {
-        embs: DashMap<NodeId, Vec<f32>>,
-    }
-    #[async_trait]
-    impl VectorStore for InMemoryVectorStore {
-        async fn store_embeddings(&mut self, nodes: &[CodeNode]) -> Result<()> {
-            for n in nodes {
-                if let Some(e) = &n.embedding {
-                    self.embs.insert(n.id, e.clone());
-                }
-            }
-            Ok(())
-        }
-        async fn search_similar(
-            &self,
-            _query_embedding: &[f32],
-            _limit: usize,
-        ) -> Result<Vec<NodeId>> {
-            Ok(vec![])
-        }
-        async fn get_embedding(&self, node_id: NodeId) -> Result<Option<Vec<f32>>> {
-            Ok(self.embs.get(&node_id).map(|e| e.clone()))
-        }
-    }
-
     fn make_node(file: &str, name: &str, content: &str) -> CodeNode {
         let now = chrono::Utc::now();
         CodeNode {
@@ -545,8 +591,7 @@ mod tests {
         let graph = Arc::new(Mutex::new(InMemoryGraph {
             nodes: DashMap::new(),
         }));
-        let vector = None;
-        let updater = IncrementalUpdater::new(parser.clone(), graph.clone(), vector);
+        let updater = IncrementalUpdater::new(parser.clone(), graph.clone());
 
         // initial file with two functions
         let f = "a.rs";
@@ -579,7 +624,7 @@ mod tests {
         let graph = Arc::new(Mutex::new(InMemoryGraph {
             nodes: DashMap::new(),
         }));
-        let updater = IncrementalUpdater::new(parser.clone(), graph.clone(), None);
+        let updater = IncrementalUpdater::new(parser.clone(), graph.clone());
         let f = "b.rs";
         let a1 = make_node(f, "foo", "fn foo()->i32{1}");
         parser.files.insert(f.into(), vec![a1.clone()]);
@@ -629,7 +674,7 @@ mod tests {
         let graph = Arc::new(Mutex::new(FailingGraph {
             nodes: DashMap::new(),
         }));
-        let updater = IncrementalUpdater::new(parser.clone(), graph.clone(), None);
+        let updater = IncrementalUpdater::new(parser.clone(), graph.clone());
         let f = "c.rs";
         let a1 = make_node(f, "foo", "fn foo()->i32{1}");
         parser.files.insert(f.into(), vec![a1.clone()]);
@@ -657,8 +702,7 @@ mod tests {
         let graph = Arc::new(Mutex::new(InMemoryGraph {
             nodes: DashMap::new(),
         }));
-        let updater =
-            IncrementalUpdater::new(parser.clone(), graph.clone(), None).with_cache_capacity(2);
+        let updater = IncrementalUpdater::new(parser.clone(), graph.clone()).with_cache_capacity(2);
         let f1 = "d1.rs";
         let f2 = "d2.rs";
         let f3 = "d3.rs";
@@ -679,48 +723,5 @@ mod tests {
         let present =
             c.get(f1).is_some() as i32 + c.get(f2).is_some() as i32 + c.get(f3).is_some() as i32;
         assert!(present >= 2); // not strict but ensures eviction ran
-    }
-
-    #[tokio::test]
-    async fn vector_updates_only_for_changes() {
-        // Wire vector integrator with simple hasher embedder
-        let parser = Arc::new(InMemoryParser {
-            files: DashMap::new(),
-        });
-        let graph = Arc::new(Mutex::new(InMemoryGraph {
-            nodes: DashMap::new(),
-        }));
-        let vstore = InMemoryVectorStore {
-            embs: DashMap::new(),
-        };
-        let embedder = Arc::new(crate::integration::graph_vector::HasherEmbeddingService::new(64));
-        // Provide a graph instance for vector integrator; it won't be used for indexing path here.
-        let g_for_vec: Arc<dyn GraphStore> = Arc::new(InMemoryGraph {
-            nodes: DashMap::new(),
-        });
-        let integrator = Arc::new(GraphVectorIntegrator::new(
-            g_for_vec,
-            Box::new(vstore),
-            embedder,
-        ));
-        let updater =
-            IncrementalUpdater::new(parser.clone(), graph.clone(), Some(integrator.clone()));
-
-        let f = "vec.rs";
-        let a1 = make_node(f, "foo", "fn foo(){1}");
-        parser.files.insert(f.into(), vec![a1.clone()]);
-        updater.update_file(f).await.unwrap();
-        let first_ct = integrator.signature_len();
-
-        // unchanged update should not add embeddings
-        updater.update_file(f).await.unwrap();
-        assert_eq!(first_ct, integrator.signature_len());
-
-        // change content → should update signature count unchanged but reembed
-        let mut a2 = a1.clone();
-        a2.content = Some("fn foo(){2}".into());
-        parser.files.insert(f.into(), vec![a2.clone()]);
-        updater.update_file(f).await.unwrap();
-        assert_eq!(integrator.signature_len(), first_ct);
     }
 }
