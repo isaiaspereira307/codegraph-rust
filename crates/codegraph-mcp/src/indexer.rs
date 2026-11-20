@@ -38,6 +38,11 @@ use std::sync::{Arc, Mutex};
 
 use std::collections::HashMap;
 
+/// The graph shape and resolver this build writes. It feeds the project input fingerprint
+/// and the ready marker, so a graph written by a build with another shape is rebuilt even
+/// when no source changed. Bump it whenever node kinds, edge kinds or resolution change.
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-1";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {
     Added,
@@ -416,6 +421,7 @@ impl ProjectIndexer {
                 |external_support: &std::collections::BTreeMap<String, String>| {
                     fingerprint(&(
                         "project-input-v7",
+                        GRAPH_SHAPE_VERSION,
                         &self.project_id,
                         source_snapshots
                             .iter()
@@ -439,9 +445,15 @@ impl ProjectIndexer {
                 .as_ref()
                 .and_then(|record| record.metadata.get("input_fingerprint"))
                 .and_then(|v| v.as_str());
+            // A graph written with another shape is never reused, even record by record.
+            let same_shape = marker_record
+                .as_ref()
+                .and_then(|record| record.metadata.get("graph_shape"))
+                .and_then(|v| v.as_str())
+                == Some(GRAPH_SHAPE_VERSION);
             let previous = state_cache
                 .get::<crate::reconciliation::Catalog>(&self.project_id)
-                .filter(|state| !force && marker == Some(state.fingerprint.as_str()));
+                .filter(|state| !force && same_shape && marker == Some(state.fingerprint.as_str()));
             if let Some(state) = &previous
                 && state.fingerprint == input_fingerprint
                 && self
@@ -1111,7 +1123,9 @@ impl ProjectIndexer {
 
             for node in nodes.iter() {
                 match node.node_type {
+                    // Test nodes are functions code-review-graph marks as tests.
                     Some(NodeType::Function) => stats.functions += 1,
+                    Some(NodeType::Other(ref kind)) if kind == "Test" => stats.functions += 1,
                     Some(NodeType::Class) => stats.classes += 1,
                     Some(NodeType::Struct) => stats.structs += 1,
                     Some(NodeType::Trait) => stats.traits += 1,
@@ -1158,6 +1172,18 @@ impl ProjectIndexer {
             let mut lexical_count = 0;
             let mut lexical_cache = HashMap::new();
             for edge in &edges {
+                // Like code-review-graph, a parsed import binds only to the File its text
+                // names; otherwise it stays text. It never binds to a symbol. Analyzer
+                // imports (module linker `module::` targets) keep their exact resolution.
+                if edge.edge_type == EdgeType::Imports && !edge.metadata.contains_key("analyzer") {
+                    let target = catalog.import_target(edge);
+                    if target.is_some() {
+                        exact_count += 1;
+                    }
+                    targets.push(target);
+                    resolution_provenance.push(("import", 1.0f64));
+                    continue;
+                }
                 let mut target = catalog.exact(edge, &[]);
                 let mut provenance = (
                     if target.is_some_and(|id| {
@@ -1169,12 +1195,6 @@ impl ProjectIndexer {
                     },
                     1.0f64,
                 );
-                if target.is_none()
-                    && let Some(file) = catalog.import_target(edge)
-                {
-                    target = Some(file);
-                    provenance.0 = "import";
-                }
                 if target.is_none() {
                     let variants = normalized.entry(edge.to.clone()).or_insert_with(|| {
                         let mut variants = Self::normalize_symbol_target(&edge.to);
@@ -1903,7 +1923,12 @@ impl ProjectIndexer {
         let root_path = self.project_root.to_string_lossy().to_string();
         let primary_language = self.config.languages.first().cloned();
         let record = ProjectMetadataRecord {
-            metadata: serde_json::json!({"input_fingerprint": fingerprint, "complete": stats.complete, "stats": stats}),
+            metadata: serde_json::json!({
+                "input_fingerprint": fingerprint,
+                "graph_shape": GRAPH_SHAPE_VERSION,
+                "complete": stats.complete,
+                "stats": stats,
+            }),
             project_id: self.project_id.clone(),
             name: project_name,
             root_path,

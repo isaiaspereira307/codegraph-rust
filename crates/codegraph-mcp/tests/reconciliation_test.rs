@@ -454,6 +454,107 @@ async fn fast_ml_pattern_labels_are_not_stored_as_edges() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn bare_import_never_binds_to_a_same_file_symbol() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(
+            module_path!(),
+            "::bare_import_never_binds_to_a_same_file_symbol"
+        ),
+        &[
+            ("a.py", "import json\n\ndef json():\n    pass\n"),
+            (
+                "lib.rs",
+                "use anyhow::{Result, anyhow};\nfn f() -> Result<()> { Err(anyhow!(\"x\")) }\nfn anyhow() {}\n",
+            ),
+        ],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let imports = edges_of(&indexer.graph_store(), dir.path(), "'IMPORTS_FROM'")?;
+    assert!(
+        imports
+            .iter()
+            .all(|row| !row.contains(".py::") && !row.contains(".rs::")),
+        "an import bound to a symbol: {imports:?}"
+    );
+    assert!(
+        imports.contains(&"IMPORTS_FROM|a.py|json".to_string()),
+        "{imports:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_function_keeps_its_function_node_id() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(module_path!(), "::test_function_keeps_its_function_node_id"),
+        &[("test_a.py", "def test_x():\n    pass\n")],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let found = rows(
+        &indexer.graph_store(),
+        "SELECT c.uuid, n.file_path, n.kind, CAST(n.line_start AS TEXT) FROM nodes n \
+         JOIN cg_nodes c ON c.qualified_name = n.qualified_name WHERE n.name = 'test_x'",
+    )?;
+    assert_eq!(found.len(), 1, "{found:?}");
+    let columns: Vec<_> = found[0].split('|').collect();
+    assert_eq!(columns[2], "Test");
+    let expected = codegraph_core::generate_node_id(
+        &dir.path().display().to_string(),
+        columns[1],
+        "test_x",
+        "Function",
+        columns[3].parse()?,
+    );
+    assert_eq!(columns[0], expected.to_string());
+    // A test function still counts as a function in the index summary.
+    let stats = indexer.index_project(dir.path()).await?;
+    assert_eq!(stats.functions, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn marker_from_another_graph_shape_triggers_a_rebuild() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(
+            module_path!(),
+            "::marker_from_another_graph_shape_triggers_a_rebuild"
+        ),
+        &[("a.py", "def f():\n    pass\n")],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let store = indexer.graph_store();
+    let files = "SELECT name FROM nodes WHERE kind = 'File'";
+    assert_eq!(rows(&store, files)?.len(), 1);
+    // What an older build leaves: a marker without this build's graph shape, and a graph
+    // without File nodes, for unchanged sources.
+    store.with_conn_blocking(|conn| {
+        conn.execute("DELETE FROM nodes WHERE kind = 'File'", [])?;
+        conn.execute(
+            "UPDATE cg_project_metadata SET record = \
+             json_remove(record, '$.metadata.graph_shape')",
+            [],
+        )?;
+        Ok(())
+    })?;
+    indexer.index_project(dir.path()).await?;
+    assert_eq!(
+        rows(&store, files)?.len(),
+        1,
+        "unchanged sources kept the old shape"
+    );
+    Ok(())
+}
+
 mod test_env {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
