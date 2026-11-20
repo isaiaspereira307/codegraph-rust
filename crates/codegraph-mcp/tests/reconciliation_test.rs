@@ -141,6 +141,62 @@ async fn incremental_catalog_matches_full_graph_and_removes_stale_definitions() 
     Ok(())
 }
 
+#[tokio::test]
+async fn test_detection_reads_paths_relative_to_the_project_root() -> Result<()> {
+    if !test_env::run(
+        concat!(
+            module_path!(),
+            "::test_detection_reads_paths_relative_to_the_project_root"
+        ),
+        &[
+            ("CODEGRAPH_NO_PROGRESS", Some("1")),
+            ("CODEGRAPH_ANALYZERS", Some("0")),
+            ("CODEGRAPH_ANALYZERS_REQUIRE_TOOLS", Some("0")),
+        ],
+    ) {
+        return Ok(());
+    }
+    // The checkout itself sits in a directory named `test`, which must not count.
+    let outer = tempfile::tempdir()?;
+    let root = outer.path().join("test/repo");
+    std::fs::create_dir_all(root.join("src"))?;
+    std::fs::create_dir_all(root.join("tests"))?;
+    std::fs::write(
+        root.join("src/app.ts"),
+        "import os from 'os';\nfunction it() {}\n",
+    )?;
+    std::fs::write(root.join("tests/spec.ts"), "function it() {}\n")?;
+    let config = IndexerConfig {
+        project_root: root.clone(),
+        indexing_tier: IndexingTier::Fast,
+        ..Default::default()
+    };
+    let indexer = ProjectIndexer::new(
+        config,
+        &CodeGraphConfig::default(),
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden()),
+    )
+    .await?;
+    let check = |storage: &SqliteGraphStore| -> Result<()> {
+        let functions = rows(
+            storage,
+            "SELECT substr(file_path, length(file_path) - 10), kind, CAST(is_test AS TEXT) FROM nodes \
+             WHERE name = 'it' ORDER BY file_path",
+        )?;
+        assert_eq!(functions, ["/src/app.ts|Function|0", "sts/spec.ts|Test|1"]);
+        assert!(rows(storage, "SELECT name FROM nodes WHERE kind = 'Import'")?.is_empty());
+        Ok(())
+    };
+    // Full index from the absolute root, then a watch-style single-file run.
+    indexer.index_project(&root).await?;
+    check(&indexer.graph_store())?;
+    indexer
+        .index_single_file(&root.join("tests/spec.ts"))
+        .await?;
+    check(&indexer.graph_store())?;
+    Ok(())
+}
+
 mod test_env {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),

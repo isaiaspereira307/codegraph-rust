@@ -46,6 +46,7 @@ ignore = { workspace = true }
 
 # Fast ML for code analysis
 aho-corasick = "1.1.5"
+regex = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tokio-uring = { workspace = true, optional = true }

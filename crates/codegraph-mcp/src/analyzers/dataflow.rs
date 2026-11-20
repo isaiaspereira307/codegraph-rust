@@ -31,7 +31,13 @@ pub fn enrich_rust_dataflow(
     let functions: Vec<_> = nodes
         .iter()
         .filter(|node| {
-            node.language == Some(Language::Rust) && node.node_type == Some(NodeType::Function)
+            // Test functions are functions the CRG shape renamed to `Test`.
+            node.language == Some(Language::Rust)
+                && match &node.node_type {
+                    Some(NodeType::Function) => true,
+                    Some(NodeType::Other(kind)) => kind == "Test",
+                    _ => false,
+                }
         })
         .collect();
     let mut additions = Vec::new();

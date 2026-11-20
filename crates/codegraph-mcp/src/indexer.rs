@@ -558,7 +558,7 @@ impl ProjectIndexer {
             // Clone files for parsing (we need them again for metadata persistence)
             let ast_cache = codegraph_core::artifact_cache::ArtifactCache::new(
                 self.project_root.join(".codegraph/index-cache"),
-                "unified-ast-v6",
+                "unified-ast-v7",
             );
             let parse_start = std::time::Instant::now();
             let (mut nodes, mut edges, pstats) = crate::estimation::parse_snapshots_with_cache(
@@ -567,6 +567,7 @@ impl ProjectIndexer {
                 total_files as u64,
                 &source_snapshots,
                 Some(&ast_cache),
+                Some(path),
             )
             .await?;
             phase_ms.insert("ast_parse".into(), parse_start.elapsed().as_millis() as u64);
@@ -635,11 +636,7 @@ impl ProjectIndexer {
                     &self.project_id,
                     &node.location.file_path,
                     node.name.as_str(),
-                    &node
-                        .node_type
-                        .as_ref()
-                        .map(|kind| format!("{kind:?}"))
-                        .unwrap_or_else(|| "Unknown".into()),
+                    &codegraph_parser::languages::crg_shape::id_node_type(node),
                     node.location.line,
                 );
                 identities.entry(id).or_default().insert(fingerprint(&(
@@ -650,7 +647,14 @@ impl ProjectIndexer {
             }
             for node in nodes.iter_mut() {
                 let old_id = node.id;
-                node.set_deterministic_id(&self.project_id);
+                // The pre-shape kind, so test functions keep their ids.
+                node.id = codegraph_core::generate_node_id(
+                    &self.project_id,
+                    &node.location.file_path,
+                    node.name.as_str(),
+                    &codegraph_parser::languages::crg_shape::id_node_type(node),
+                    node.location.line,
+                );
                 if identities
                     .get(&node.id)
                     .is_some_and(|identities| identities.len() > 1)
@@ -667,11 +671,7 @@ impl ProjectIndexer {
                         &self.project_id,
                         &node.location.file_path,
                         &identity,
-                        &node
-                            .node_type
-                            .as_ref()
-                            .map(|kind| format!("{kind:?}"))
-                            .unwrap_or_else(|| "Unknown".into()),
+                        &codegraph_parser::languages::crg_shape::id_node_type(node),
                         node.location.line,
                     );
                 }

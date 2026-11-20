@@ -1,15 +1,19 @@
 // ABOUTME: Reshapes an extraction into code-review-graph's graph shape for every language.
 // ABOUTME: Adds the File node, class-qualified names and CONTAINS edges from file/class to members.
 
+use super::test_detection;
 use codegraph_core::{
-    CodeNode, EdgeRelationship, EdgeType, ExtractionResult, Language, Location, NodeType,
+    CodeNode, EdgeRelationship, EdgeType, ExtractionResult, Language, Location, NodeId, NodeType,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Set on every node whose `qualified_name` this pass rewrote.
 pub const SHAPED_ATTR: &str = "crg_shaped";
 /// The `qualified_name` a rewritten node had before this pass, when it had one.
 pub const PRE_SHAPE_QN_ATTR: &str = "pre_shape_qualified_name";
+
+/// The node kind (`{:?}` of its `NodeType`) a node had before this pass turned it into a test.
+pub const PRE_SHAPE_KIND_ATTR: &str = "pre_shape_kind";
 
 /// The `qualified_name` the indexer must use when deriving node ids: the value from before
 /// this pass, so node ids stay byte-identical to the unshaped extraction.
@@ -20,6 +24,24 @@ pub fn id_qualified_name(node: &CodeNode) -> Option<&String> {
     } else {
         attributes.get("qualified_name")
     }
+}
+
+/// The node kind the indexer must hash into node ids: the kind from before this pass, so a
+/// function this pass marks as a `Test` keeps its id.
+pub fn id_node_type(node: &CodeNode) -> String {
+    if let Some(kind) = node.metadata.attributes.get(PRE_SHAPE_KIND_ATTR) {
+        return kind.clone();
+    }
+    node.node_type
+        .as_ref()
+        .map(|kind| format!("{kind:?}"))
+        .unwrap_or_else(|| "Unknown".into())
+}
+
+/// The root-relative path of a parse-time path when the caller knows no better: the
+/// indexer walks `.`, so its paths are relative with a `./` prefix.
+pub fn default_rel_path(file_path: &str) -> &str {
+    file_path.strip_prefix("./").unwrap_or(file_path)
 }
 
 fn is_container(kind: &NodeType) -> bool {
@@ -78,13 +100,26 @@ pub fn line_count(content: &str) -> u32 {
 
 /// Adds the `File` node, rewrites `qualified_name`/`parent_name` of functions and types to
 /// `<file>::<Outer.Inner>.<name>` and links each to its file or innermost enclosing class with
-/// `CONTAINS`, as code-review-graph does for every language.
+/// `CONTAINS`, as code-review-graph does for every language. Import nodes are dropped and
+/// their `Imports` edges leave the file instead; functions that code-review-graph would call
+/// tests (judged on `rel_path`, relative to the project root) become `Test` nodes.
 pub fn shape_for_crg(
     result: &mut ExtractionResult,
     file_path: &str,
+    rel_path: &str,
     language: Language,
     line_count: u32,
 ) {
+    let imports: HashSet<NodeId> = result
+        .nodes
+        .iter()
+        .filter(|n| n.node_type == Some(NodeType::Import))
+        .map(|n| n.id)
+        .collect();
+    result
+        .nodes
+        .retain(|n| n.node_type != Some(NodeType::Import));
+
     let members: Vec<usize> = (0..result.nodes.len())
         .filter(|&i| result.nodes[i].node_type.as_ref().is_some_and(is_member))
         .collect();
@@ -175,6 +210,12 @@ pub fn shape_for_crg(
         .metadata
         .attributes
         .insert("qualified_name".into(), file_path.to_string());
+    if test_detection::is_test_file(rel_path) {
+        file_node
+            .metadata
+            .attributes
+            .insert("is_test".into(), "true".into());
+    }
 
     for &i in &members {
         let qualified = format!("{file_path}::{}", paths[&i]);
@@ -204,6 +245,29 @@ pub fn shape_for_crg(
             ]),
             span: None,
         });
+    }
+
+    // Decorators are not recorded by the extractors, so only names and paths decide.
+    for &i in &members {
+        let node = &mut result.nodes[i];
+        if node.node_type != Some(NodeType::Function)
+            || !test_detection::is_test_function(node.name.as_str(), rel_path, &[])
+        {
+            continue;
+        }
+        let attributes = &mut node.metadata.attributes;
+        attributes.insert(
+            PRE_SHAPE_KIND_ATTR.into(),
+            format!("{:?}", NodeType::Function),
+        );
+        attributes.insert("is_test".into(), "true".into());
+        node.node_type = Some(NodeType::Other("Test".into()));
+    }
+
+    for edge in &mut result.edges {
+        if imports.contains(&edge.from) {
+            edge.from = file_node.id;
+        }
     }
 
     result.nodes.insert(0, file_node);
@@ -347,6 +411,108 @@ mod tests {
             let child = r.nodes.iter().find(|n| n.id.to_string() == target).unwrap();
             assert_eq!(child.metadata.attributes["qualified_name"], edge.to);
         }
+    }
+
+    fn file_node(result: &ExtractionResult) -> &CodeNode {
+        result
+            .nodes
+            .iter()
+            .find(|n| n.node_type == Some(NodeType::Other("File".into())))
+            .unwrap()
+    }
+
+    #[test]
+    fn import_becomes_file_edge() {
+        let r = extract_python("import os\n\ndef f():\n    pass\n");
+        assert!(
+            !r.nodes
+                .iter()
+                .any(|n| n.node_type == Some(NodeType::Import)),
+            "{:?}",
+            r.nodes
+        );
+        let file = file_node(&r);
+        assert!(!file.metadata.attributes.contains_key("is_test"));
+        let imports: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Imports)
+            .map(|e| (e.from, e.to.as_str()))
+            .collect();
+        assert_eq!(imports, vec![(file.id, "os")]);
+    }
+
+    #[test]
+    fn test_function_is_test_kind() {
+        let source = "def test_x():\n    helper()\n\ndef helper():\n    pass\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let r = crate::languages::extract_for_language_at(
+            &Language::Python,
+            &tree,
+            source,
+            "./tests/test_m.py",
+            "tests/test_m.py",
+            Default::default(),
+        )
+        .unwrap();
+        let test_x = r
+            .nodes
+            .iter()
+            .find(|n| n.name.as_str() == "test_x")
+            .unwrap();
+        assert_eq!(test_x.node_type, Some(NodeType::Other("Test".into())));
+        assert_eq!(test_x.metadata.attributes["is_test"], "true");
+        assert_eq!(
+            test_x.metadata.attributes["qualified_name"],
+            "./tests/test_m.py::test_x"
+        );
+        assert_eq!(id_node_type(test_x), "Function");
+        assert_eq!(file_node(&r).metadata.attributes["is_test"], "true");
+        let helper = r
+            .nodes
+            .iter()
+            .find(|n| n.name.as_str() == "helper")
+            .unwrap();
+        assert_eq!(helper.node_type, Some(NodeType::Function));
+        assert!(!helper.metadata.attributes.contains_key("is_test"));
+        assert_eq!(id_node_type(helper), "Function");
+        // Calls made from a test keep their source node.
+        assert!(
+            r.edges
+                .iter()
+                .any(|e| e.edge_type == EdgeType::Calls && e.from == test_x.id)
+        );
+    }
+
+    #[test]
+    fn runner_names_are_tests_only_in_test_files() {
+        let source = "function it() {}\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let kind = |rel: &str| {
+            let r = crate::languages::extract_for_language_at(
+                &Language::TypeScript,
+                &tree,
+                source,
+                rel,
+                rel,
+                Default::default(),
+            )
+            .unwrap();
+            r.nodes
+                .iter()
+                .find(|n| n.name.as_str() == "it")
+                .and_then(|n| n.node_type.clone())
+        };
+        assert_eq!(kind("src/a.ts"), Some(NodeType::Function));
+        assert_eq!(kind("src/a.test.ts"), Some(NodeType::Other("Test".into())));
     }
 
     fn extract(

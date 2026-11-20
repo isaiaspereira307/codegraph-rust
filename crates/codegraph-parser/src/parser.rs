@@ -585,14 +585,38 @@ impl TreeSitterParser {
     }
 
     /// Consumes an immutable source without copying it into the blocking parser task.
+    /// The root-relative path is `file_path` without the project root (when absolute and
+    /// under it) or without a leading `./`.
     pub async fn parse_source_with_edges(
         &self,
         content: Arc<str>,
         file_path: &str,
         language: Language,
     ) -> Result<ExtractionResult> {
+        let rel_path = self
+            .project_root()
+            .and_then(|root| Path::new(file_path).strip_prefix(root).ok())
+            .filter(|_| Path::new(file_path).is_absolute())
+            .map(|rel| rel.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                crate::languages::crg_shape::default_rel_path(file_path).to_string()
+            });
+        self.parse_source_at(content, file_path, &rel_path, language)
+            .await
+    }
+
+    /// [`Self::parse_source_with_edges`] for a file whose path relative to the project root
+    /// is `rel_path`, as the indexer knows it.
+    pub async fn parse_source_at(
+        &self,
+        content: Arc<str>,
+        file_path: &str,
+        rel_path: &str,
+        language: Language,
+    ) -> Result<ExtractionResult> {
         let registry = self.registry.clone();
         let file_path_string = file_path.to_string();
+        let rel_path = rel_path.to_string();
         let parser_pool = self.parser_pool.clone();
         let policy = self.extraction_policy;
         let project_root = self.project_root.clone();
@@ -681,11 +705,12 @@ impl TreeSitterParser {
                     let used_content = content;
 
                     // Use unified dispatch for all supported languages
-                    let ast_result = crate::languages::extract_for_language_with_policy(
+                    let ast_result = crate::languages::extract_for_language_at(
                         &language,
                         &tree_used,
                         &used_content,
                         &file_path,
+                        &rel_path,
                         policy,
                     )
                     .unwrap_or_else(|| {
@@ -703,6 +728,7 @@ impl TreeSitterParser {
                         crate::languages::crg_shape::shape_for_crg(
                             &mut result,
                             &file_path,
+                            &rel_path,
                             language.clone(),
                             crate::languages::crg_shape::line_count(&used_content),
                         );

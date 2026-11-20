@@ -14,6 +14,7 @@ pub mod java;
 pub mod php;
 pub mod ruby;
 pub mod swift;
+pub mod test_detection;
 
 use codegraph_core::{EdgeType, ExtractionResult, Language};
 use tree_sitter::Tree;
@@ -90,9 +91,28 @@ pub fn extract_for_language_with_policy(
     file_path: &str,
     policy: ExtractionPolicy,
 ) -> Option<ExtractionResult> {
+    let rel_path = crg_shape::default_rel_path(file_path);
+    extract_for_language_at(language, tree, content, file_path, rel_path, policy)
+}
+
+/// Extraction for `file_path`, whose path relative to the project root is `rel_path`.
+pub fn extract_for_language_at(
+    language: &Language,
+    tree: &Tree,
+    content: &str,
+    file_path: &str,
+    rel_path: &str,
+    policy: ExtractionPolicy,
+) -> Option<ExtractionResult> {
     let mut result = extract_unshaped(language, tree, content, file_path, policy)?;
     let line_count = crg_shape::line_count(content);
-    crg_shape::shape_for_crg(&mut result, file_path, language.clone(), line_count);
+    crg_shape::shape_for_crg(
+        &mut result,
+        file_path,
+        rel_path,
+        language.clone(),
+        line_count,
+    );
     Some(result)
 }
 

@@ -729,6 +729,7 @@ dependencies = [
  "notify",
  "num_cpus",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

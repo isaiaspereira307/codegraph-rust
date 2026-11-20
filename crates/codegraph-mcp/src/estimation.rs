@@ -128,7 +128,7 @@ pub(crate) async fn parse_snapshots_with_unified_extraction(
     total_files: u64,
     snapshots: &SourceSnapshots,
 ) -> Result<(Vec<CodeNode>, Vec<EdgeRelationship>, ParsingStatistics)> {
-    parse_snapshots_with_cache(parser, files, total_files, snapshots, None).await
+    parse_snapshots_with_cache(parser, files, total_files, snapshots, None, None).await
 }
 
 pub(crate) async fn parse_snapshots_with_cache(
@@ -137,6 +137,7 @@ pub(crate) async fn parse_snapshots_with_cache(
     total_files: u64,
     snapshots: &SourceSnapshots,
     cache: Option<&codegraph_core::artifact_cache::ArtifactCache>,
+    root: Option<&Path>,
 ) -> Result<(Vec<CodeNode>, Vec<EdgeRelationship>, ParsingStatistics)> {
     let mut all_nodes = Vec::new();
     let mut all_edges = Vec::new();
@@ -160,10 +161,15 @@ pub(crate) async fn parse_snapshots_with_cache(
                 .detect_language(&file_path.to_string_lossy())
                 .ok_or_else(|| anyhow::anyhow!("Unsupported source: {}", file_path.display()))?;
             let policy = parser_ref.extraction_policy();
+            // Path relative to the walked project root, for root-relative rules (tests/).
+            let rel_path = root
+                .and_then(|root| file_path.strip_prefix(root).ok())
+                .map(|rel| rel.to_string_lossy().into_owned());
             let cache_key = codegraph_core::artifact_cache::fingerprint(&(
-                "unified-ast-v6",
+                "unified-ast-v7",
                 parser_ref.project_root(),
                 &file_path,
+                &rel_path,
                 &snapshot.content_hash,
                 policy.uses,
                 policy.references,
@@ -179,13 +185,20 @@ pub(crate) async fn parse_snapshots_with_cache(
                     return Ok((extraction, snapshot.lines, true));
                 }
             }
-            let extraction = parser_ref
-                .parse_source_with_edges(
-                    snapshot.contents_async().await?,
-                    &file_path.to_string_lossy(),
-                    language,
-                )
-                .await?;
+            let content = snapshot.contents_async().await?;
+            let path = file_path.to_string_lossy();
+            let extraction = match &rel_path {
+                Some(rel) => {
+                    parser_ref
+                        .parse_source_at(content, &path, rel, language)
+                        .await?
+                }
+                None => {
+                    parser_ref
+                        .parse_source_with_edges(content, &path, language)
+                        .await?
+                }
+            };
             let extraction = if let Some(cache) = cache {
                 let cache = cache.clone();
                 tokio::task::spawn_blocking(move || {
@@ -353,7 +366,7 @@ mod tests {
         for expected_cached in [0, 1] {
             let sources = SourceSnapshots::capture(&files, 0, 2).await.unwrap();
             let (nodes, _, stats) =
-                parse_snapshots_with_cache(&parser, files.clone(), 1, &sources, Some(&cache))
+                parse_snapshots_with_cache(&parser, files.clone(), 1, &sources, Some(&cache), None)
                     .await
                     .unwrap();
             assert!(nodes.iter().any(|node| node.name.as_str() == "initial"));
@@ -362,7 +375,7 @@ mod tests {
         std::fs::write(&file, "fn changed() {}\n").unwrap();
         let sources = SourceSnapshots::capture(&files, 0, 2).await.unwrap();
         let (nodes, _, stats) =
-            parse_snapshots_with_cache(&parser, files.clone(), 1, &sources, Some(&cache))
+            parse_snapshots_with_cache(&parser, files.clone(), 1, &sources, Some(&cache), None)
                 .await
                 .unwrap();
         assert_eq!(stats.cached_files, 0);
@@ -373,9 +386,10 @@ mod tests {
                 references: false,
             },
         );
-        let (_, _, stats) = parse_snapshots_with_cache(&fast, files, 1, &sources, Some(&cache))
-            .await
-            .unwrap();
+        let (_, _, stats) =
+            parse_snapshots_with_cache(&fast, files, 1, &sources, Some(&cache), None)
+                .await
+                .unwrap();
         assert_eq!(stats.cached_files, 0);
     }
 

@@ -133,11 +133,17 @@ pub fn link_modules(
     stats.contains_edges_added = contains_edges.len();
     edges.extend(contains_edges);
 
+    // The parser's imports are `Imports` edges from the File node to the imported module text.
+    let file_nodes: HashMap<NodeId, &CodeNode> = nodes
+        .iter()
+        .filter(|n| n.node_type == Some(NodeType::Other("File".into())))
+        .map(|n| (n.id, n))
+        .collect();
     let mut import_edges: Vec<EdgeRelationship> = Vec::new();
-    for n in nodes.iter() {
-        if n.node_type != Some(NodeType::Import) {
+    for edge in edges.iter().filter(|e| e.edge_type == EdgeType::Imports) {
+        let Some(n) = file_nodes.get(&edge.from) else {
             continue;
-        }
+        };
         let Some(lang) = &n.language else { continue };
         if !module_linker_languages().contains(lang) {
             continue;
@@ -146,7 +152,7 @@ pub fn link_modules(
             continue;
         };
 
-        let spec = n.name.to_string();
+        let spec = edge.to.clone();
         let target = canonical_import_target(
             project_root,
             &PathBuf::from(&n.location.file_path),
@@ -407,6 +413,16 @@ mod tests {
     use super::*;
     use codegraph_core::{Language, Location, NodeType};
 
+    fn import_edge(file: &CodeNode, spec: &str) -> EdgeRelationship {
+        EdgeRelationship {
+            from: file.id,
+            to: spec.to_string(),
+            edge_type: EdgeType::Imports,
+            metadata: HashMap::new(),
+            span: None,
+        }
+    }
+
     #[test]
     fn module_linker_creates_module_nodes_and_import_edges() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -429,8 +445,8 @@ mod tests {
                 },
             ),
             CodeNode::new(
-                "./bar",
-                Some(NodeType::Import),
+                foo.to_string_lossy().to_string(),
+                Some(NodeType::Other("File".into())),
                 Some(Language::TypeScript),
                 Location {
                     file_path: foo.to_string_lossy().to_string(),
@@ -453,12 +469,12 @@ mod tests {
                 },
             ),
         ];
-        let mut edges = Vec::new();
+        let mut edges = vec![import_edge(&nodes[1], "./bar")];
 
         let stats = link_modules(root, "project", &mut nodes, &mut edges).expect("link");
 
         assert_eq!(stats.module_nodes_added, 2);
-        assert!(edges.iter().any(|e| e.edge_type == EdgeType::Imports));
+        assert_eq!(stats.module_import_edges_added, 1);
         assert!(edges.iter().any(|e| e.edge_type == EdgeType::Contains));
     }
 
@@ -472,8 +488,8 @@ mod tests {
 
         let mut nodes = vec![
             CodeNode::new(
-                "crate::foo",
-                Some(NodeType::Import),
+                lib.to_string_lossy().to_string(),
+                Some(NodeType::Other("File".into())),
                 Some(Language::Rust),
                 Location {
                     file_path: lib.to_string_lossy().to_string(),
@@ -508,7 +524,7 @@ mod tests {
                 },
             ),
         ];
-        let mut edges = Vec::new();
+        let mut edges = vec![import_edge(&nodes[0], "crate::foo")];
 
         let stats = link_modules(root, "project", &mut nodes, &mut edges).expect("link");
 
@@ -517,7 +533,7 @@ mod tests {
 
         let import_edge = edges
             .iter()
-            .find(|e| e.edge_type == EdgeType::Imports)
+            .find(|e| e.edge_type == EdgeType::Imports && e.to.starts_with("module::"))
             .expect("imports edge");
         assert_eq!(import_edge.to, "module::rust::foo");
     }
