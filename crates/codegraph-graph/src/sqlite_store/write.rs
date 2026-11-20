@@ -145,6 +145,12 @@ fn write_node(tx: &Transaction, root: &Path, node: &CodeNode, now: f64) -> Resul
         .map(mapping::crg_node_kind)
         .unwrap_or_else(|| "Function".to_string());
     let file_path = absolute_path(root, &node.location.file_path);
+    // CRG names a File node by its absolute path.
+    let name = if kind == "File" {
+        file_path.clone()
+    } else {
+        node.name.to_string()
+    };
     let parent = attrs.get("parent_name").or_else(|| attrs.get("parent"));
     let symbol = qualified
         .split_once("::")
@@ -171,7 +177,7 @@ fn write_node(tx: &Transaction, root: &Path, node: &CodeNode, now: f64) -> Resul
          updated_at = excluded.updated_at",
         params![
             kind,
-            node.name.to_string(),
+            name,
             qualified,
             file_path,
             node.location.line,

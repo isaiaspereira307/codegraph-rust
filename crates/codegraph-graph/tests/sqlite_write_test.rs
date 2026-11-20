@@ -161,6 +161,48 @@ async fn name_tokens_follow_crg_camel_case_split() {
 }
 
 #[tokio::test]
+async fn file_node_is_named_and_qualified_by_absolute_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, conn) = open(dir.path());
+    let mut file = node(
+        1,
+        "./pkg/svc.py",
+        NodeType::Other("File".into()),
+        "./pkg/svc.py",
+        1,
+    );
+    file.metadata
+        .attributes
+        .insert("qualified_name".into(), "./pkg/svc.py".into());
+    let mut run = node(2, "run", NodeType::Function, "./pkg/svc.py", 3);
+    run.metadata
+        .attributes
+        .insert("qualified_name".into(), "./pkg/svc.py::Svc.run".into());
+    run.metadata
+        .attributes
+        .insert("parent_name".into(), "Svc".into());
+    store.upsert_nodes_batch(&[file, run]).await.unwrap();
+
+    let path = abs(dir.path(), "pkg/svc.py");
+    let row: (String, String, String) = conn
+        .query_row(
+            "SELECT kind, name, qualified_name FROM nodes WHERE kind = 'File'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("File".into(), path.clone(), path.clone()));
+    let run: (String, String) = conn
+        .query_row(
+            "SELECT qualified_name, parent_name FROM nodes WHERE name = 'run'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(run, (format!("{path}::Svc.run"), "Svc".into()));
+}
+
+#[tokio::test]
 async fn duplicate_symbol_gets_line_suffix() {
     let dir = tempfile::tempdir().unwrap();
     let (store, conn) = open(dir.path());

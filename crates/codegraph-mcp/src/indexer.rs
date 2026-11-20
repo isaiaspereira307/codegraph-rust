@@ -558,7 +558,7 @@ impl ProjectIndexer {
             // Clone files for parsing (we need them again for metadata persistence)
             let ast_cache = codegraph_core::artifact_cache::ArtifactCache::new(
                 self.project_root.join(".codegraph/index-cache"),
-                "unified-ast-v4",
+                "unified-ast-v5",
             );
             let parse_start = std::time::Instant::now();
             let (mut nodes, mut edges, pstats) = crate::estimation::parse_snapshots_with_cache(
@@ -645,7 +645,7 @@ impl ProjectIndexer {
                 identities.entry(id).or_default().insert(fingerprint(&(
                     &node.location,
                     &node.span,
-                    node.metadata.attributes.get("qualified_name"),
+                    codegraph_parser::languages::crg_shape::id_qualified_name(node),
                 ))?);
             }
             for node in nodes.iter_mut() {
@@ -659,9 +659,7 @@ impl ProjectIndexer {
                         "{}#{}:{}",
                         node.name,
                         node.location.column,
-                        node.metadata
-                            .attributes
-                            .get("qualified_name")
+                        codegraph_parser::languages::crg_shape::id_qualified_name(node)
                             .map(String::as_str)
                             .unwrap_or("")
                     );

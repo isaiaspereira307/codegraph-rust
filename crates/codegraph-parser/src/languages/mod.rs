@@ -1,6 +1,7 @@
 // ABOUTME: Language extractor modules and shared infrastructure
 // ABOUTME: Provides unified extraction interface for all supported languages
 
+pub mod crg_shape;
 pub mod extractor_utils;
 pub mod javascript;
 pub mod python;
@@ -83,6 +84,20 @@ pub fn extract_for_language(
 }
 
 pub fn extract_for_language_with_policy(
+    language: &Language,
+    tree: &Tree,
+    content: &str,
+    file_path: &str,
+    policy: ExtractionPolicy,
+) -> Option<ExtractionResult> {
+    let mut result = extract_unshaped(language, tree, content, file_path, policy)?;
+    // code-review-graph's File node ends at `source.count("\n") + 1`.
+    let line_count = content.matches('\n').count() as u32 + 1;
+    crg_shape::shape_for_crg(&mut result, file_path, language.clone(), line_count);
+    Some(result)
+}
+
+fn extract_unshaped(
     language: &Language,
     tree: &Tree,
     content: &str,
