@@ -113,12 +113,13 @@ mais resolvers específicos (C#, AOP, eventos, HCL, aliases npm, workspaces, jed
 
 Plano detalhado (harness + camada comum): `docs/superpowers/plans/2026-11-20-fase2-paridade-parser.md`.
 
-Piloto (2026-11-20, 7 fixtures de `../code-review-graph/tests/fixtures`): CRG 90 nós / 203
-arestas, Rust 96 / 29. A maior diferença não é por linguagem, é de forma do grafo: o Rust não
-gera nó `File`, `CONTAINS`, `Test`/`TESTED_BY`, `INHERITS`; grava métodos sem a classe no
-nome (`__init__@L10`), imports como nós `Import` com `IMPORTS_FROM` em laço e descarta
-chamadas não resolvidas (o CRG guarda o texto do alvo). Por isso a camada comum
-(`crg_shape`) vem antes das regras por linguagem.
+Estado antes do plano 1 (histórico; piloto de 2026-11-20, 7 fixtures de
+`../code-review-graph/tests/fixtures`): CRG 90 nós / 203 arestas, Rust 96 / 29. A maior
+diferença não era por linguagem, era de forma do grafo: o Rust não gerava nó `File`,
+`CONTAINS`, `Test`/`TESTED_BY`; gravava métodos sem a classe no nome (`__init__@L10`), imports
+como nós `Import` com `IMPORTS_FROM` em laço e descartava chamadas não resolvidas (o CRG guarda
+o texto do alvo). Tudo isso foi corrigido pela camada comum (`crg_shape`); ver "Progresso da
+Fase 2" abaixo. Ainda aberto: `INHERITS` (e `IMPLEMENTS`/`REFERENCES`) não são gerados.
 
 Atenção: o `code-review-graph` instalado no PATH é 2.3.7 e cria schema **9**; o hook de
 SessionStart dele já gravou `.code-review-graph/graph.db` v9 neste repo, que o Rust recusa
@@ -162,7 +163,8 @@ Jaccard depois do plano 1 (antes → depois, nós / CALLS / IMPORTS_FROM):
 
 ### Próximos planos por linguagem
 
-Ordem pela pior concordância de CALLS/IMPORTS_FROM (TESTED_BY junto):
+Ordem pela pior concordância de CALLS/IMPORTS_FROM (TESTED_BY junto). TS e Go empatam em
+CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS e TESTED_BY:
 
 1. **TypeScript/JS** (CALLS 0.13, nós 0.44, TESTED_BY 0): o extrator descarta métodos de
    classe (CONTAINS 0.31); `INHERITS`; `TESTED_BY`; especificadores `.`/`..`; stems com
@@ -172,7 +174,7 @@ Ordem pela pior concordância de CALLS/IMPORTS_FROM (TESTED_BY junto):
    pacote (vários arquivos).
 3. **Java** (CALLS 0.35): `@Test` por anotações (decorators não são gravados pelos
    extratores); construtor/estático do mesmo pacote; `INHERITS`/`IMPLEMENTS`.
-4. **Rust** (CALLS 0.50, IMPORTS_FROM 0.50, TESTED_BY 0): nós `impl` duplicados (CONTAINS
+4. **Rust** (CALLS 0.50, IMPORTS_FROM 0.50 — o único score de import abaixo de 1.0, TESTED_BY 0): nós `impl` duplicados (CONTAINS
    pode ligar ao `impl` e não à struct); `#[test]` precisa de decorators; `use m::f` com
    primeiro segmento solto (CRG percorre a raiz do crate); raiz do crate por `lib.rs`/
    `main.rs`, não por `Cargo.toml`; grupos `use` aninhados; busca não limitada à raiz do
