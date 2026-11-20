@@ -20,6 +20,7 @@ sha2 = { workspace = true }
 
 # SQLite store (code-review-graph v15 schema)
 rusqlite = { workspace = true, optional = true }
+petgraph = { workspace = true, optional = true }
 
 # SurrealDB support (optional, default on via feature flag)
 surrealdb = { version = "3.3.0", optional = true, features = ["kv-mem", "kv-surrealkv"] }
@@ -28,7 +29,7 @@ tokio = { workspace = true, optional = true, features = ["macros", "rt-multi-thr
 
 [features]
 default = ["sqlite"]
-sqlite = ["dep:rusqlite", "dep:tokio"]
+sqlite = ["dep:rusqlite", "dep:petgraph", "dep:tokio"]
 surrealdb = ["dep:surrealdb", "dep:dotenvy", "dep:tokio"]
 
 [[bin]]
