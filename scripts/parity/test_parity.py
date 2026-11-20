@@ -7,7 +7,7 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 
-from parity import Graph, compare, load_graph, main, render_markdown
+from parity import Graph, compare, load_graph, main, prepare_copies, render_markdown
 
 
 def make_db(path, root, nodes, edges=()):
@@ -95,6 +95,38 @@ class ParityTest(unittest.TestCase):
         self.assertEqual(rep.nodes_by_language["python"]["only_crg"], ["m.py::f"])
         self.assertEqual(rep.nodes_by_language["rust"]["only_rust"], ["x.rs::h"])
         self.assertEqual(rep.nodes_by_language["rust"]["jaccard"], 0.0)
+
+    def test_language_mismatch_bucketed_under_crg_language(self):
+        rep = self.pair(
+            [("Function", "/a/r1/m.py::f", "python", 1, 2, 0)],
+            [("Function", "/b/r2/m.py::f", "unknown", 1, 2, 0)],
+        )
+        self.assertEqual(list(rep.nodes_by_language), ["python"])
+        py = rep.nodes_by_language["python"]
+        self.assertEqual((py["both"], py["only_crg"], py["only_rust"]), (1, [], []))
+        self.assertEqual(
+            py["divergent"],
+            [{"qn": "m.py::f", "field": "language", "crg": "python", "rust": "unknown"}],
+        )
+
+    def test_load_graph_path_with_special_chars(self):
+        d = self.d / "a b#c"
+        d.mkdir()
+        db = make_db(d / "g.db", "/a/r1", [("Function", "/a/r1/m.py::f", "python", 1, 2, 0)])
+        self.assertIn("m.py::f", load_graph(db, "/a/r1").nodes)
+
+    def test_prepare_copies_drops_existing_index(self):
+        src = self.d / "src"
+        (src / ".code-review-graph").mkdir(parents=True)
+        (src / ".code-review-graph" / "graph.db").write_text("x")
+        (src / ".git").mkdir()
+        (src / "target").mkdir()
+        (src / "m.py").write_text("x = 1\n")
+        crg, rust = prepare_copies(src, self.d / "work")
+        self.assertFalse((crg / ".code-review-graph").exists())
+        self.assertTrue((rust / ".git").is_dir())
+        self.assertFalse((rust / "target").exists())
+        self.assertEqual(sorted(p.name for p in crg.iterdir() if p.name != ".git"), ["m.py"])
 
     def test_empty_union_is_full_agreement(self):
         self.assertEqual(compare(Graph(), Graph()).edges_by_kind, {})

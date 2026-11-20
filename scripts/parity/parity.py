@@ -2,7 +2,9 @@
 # ABOUTME: Loads nodes/edges with root-relative keys and reports per-language/per-kind Jaccard.
 import argparse
 import json
+import shutil
 import sqlite3
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -44,7 +46,7 @@ def _strip(value, prefix):
 def load_graph(db, root):
     prefix = str(root).rstrip("/") + "/"
     graph = Graph()
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con = sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         for kind, qn, fp, ls, le, lang, is_test in con.execute(
             "SELECT kind, qualified_name, file_path, line_start, line_end, language, is_test "
@@ -76,14 +78,24 @@ def compare(crg, rust):
     langs = {}
     for qn, n in crg.nodes.items():
         langs.setdefault(n.language, [set(), set()])[0].add(qn)
+    lang_mismatch = {}
     for qn, n in rust.nodes.items():
-        langs.setdefault(n.language, [set(), set()])[1].add(qn)
+        lang = n.language
+        if qn in crg.nodes:
+            lang = crg.nodes[qn].language
+            if lang != n.language:
+                lang_mismatch[qn] = n.language
+        langs.setdefault(lang, [set(), set()])[1].add(qn)
     for lang in sorted(langs):
         a, b = langs[lang]
         both = a & b
         divergent = []
         for qn in sorted(both):
             ca, ra = crg.nodes[qn], rust.nodes[qn]
+            if qn in lang_mismatch:
+                divergent.append(
+                    {"qn": qn, "field": "language", "crg": ca.language, "rust": lang_mismatch[qn]}
+                )
             for f in DIVERGENT_FIELDS:
                 if getattr(ca, f) != getattr(ra, f):
                     divergent.append(
@@ -159,6 +171,94 @@ def render_markdown(report):
     return "\n".join(lines) + "\n"
 
 
+IGNORED = (".git", "target", "node_modules", ".code-review-graph")
+GIT = ["git", "-c", "user.name=parity", "-c", "user.email=parity@localhost"]
+TIMEOUT = 600
+
+
+def prepare_copies(src, work):
+    """Copy src to work/crg and work/rust (no VCS/build/index dirs), each a fresh git repo."""
+    src, work = Path(src), Path(work)
+    out = []
+    for name in ("crg", "rust"):
+        dest = work / name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(src, dest, ignore=shutil.ignore_patterns(*IGNORED))
+        for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--allow-empty", "-m", "parity"]):
+            subprocess.run(GIT + args, cwd=dest, check=True, capture_output=True)
+        out.append(dest)
+    return tuple(out)
+
+
+def _run_tool(cmd, cwd, label):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"{label} timed out after {TIMEOUT}s")
+    if r.returncode != 0:
+        raise SystemExit(f"{label} failed ({r.returncode}):\n{r.stderr}")
+
+
+def _check_crg_schema(db):
+    con = sqlite3.connect(Path(db).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+    finally:
+        con.close()
+    if not row or str(row[0]) != "15":
+        raise SystemExit(
+            f"CRG graph.db schema_version is {row[0] if row else None}, expected 15: the "
+            "installed code-review-graph 2.3.7 (schema 9) was probably used; run CRG from source "
+            "with `uv run --frozen --project <crg_repo> code-review-graph`."
+        )
+
+
+def run_pair(src, work, crg_repo, codegraph):
+    """Index src with CRG and Rust in separate copies; return the comparison Report."""
+    crg_dir, rust_dir = prepare_copies(src, work)
+    crg_dir, rust_dir = crg_dir.resolve(), rust_dir.resolve()
+    _run_tool(
+        ["uv", "run", "--frozen", "--project", str(Path(crg_repo).resolve()),
+         "code-review-graph", "build"],
+        crg_dir, "code-review-graph build",
+    )
+    _run_tool([str(Path(codegraph).resolve()), "index", ".", "-r"], rust_dir, "codegraph index")
+    crg_db = crg_dir / ".code-review-graph" / "graph.db"
+    rust_db = rust_dir / ".code-review-graph" / "graph.db"
+    _check_crg_schema(crg_db)
+    return compare(load_graph(crg_db, crg_dir), load_graph(rust_db, rust_dir))
+
+
+def _emit(rep, md, js):
+    if js:
+        Path(js).write_text(json.dumps(asdict(rep), indent=2))
+    text = render_markdown(rep)
+    if md:
+        Path(md).write_text(text)
+    else:
+        sys.stdout.write(text)
+
+
+def run_corpus(corpus_file, crg_repo, work, crg_repo_fixtures, codegraph):
+    corpus = json.loads(Path(corpus_file).read_text())
+    fixtures = Path(crg_repo_fixtures)
+    parts = [f"# Parity baseline\n\nCRG commit `{corpus['crg_commit']}`; corpus: fixtures from "
+             "`tests/fixtures`, one repository per language.\n"]
+    for lang, files in corpus["languages"].items():
+        src = Path(work) / "src" / lang
+        if src.exists():
+            shutil.rmtree(src)
+        src.mkdir(parents=True)
+        for f in files:
+            shutil.copy(fixtures / f, src / Path(f).name)
+        rep = run_pair(src, Path(work) / lang, crg_repo, codegraph)
+        lines = render_markdown(rep).splitlines()[1:]
+        demoted = ["#" + ln if ln.startswith("#") else ln for ln in lines]
+        parts.append(f"## Language corpus: {lang}\n" + "\n".join(demoted) + "\n")
+    return "\n".join(parts)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -169,7 +269,32 @@ def main(argv=None):
     c.add_argument("rust_root")
     c.add_argument("--json", type=Path)
     c.add_argument("--md", type=Path)
+    r = sub.add_parser("run", help="index a directory with both tools and compare")
+    r.add_argument("src_dir", type=Path)
+    r.add_argument("--work", type=Path, required=True)
+    r.add_argument("--crg-repo", type=Path, default=Path("../code-review-graph"))
+    r.add_argument("--codegraph", type=Path, default=Path("target/debug/codegraph"))
+    r.add_argument("--json", type=Path)
+    r.add_argument("--md", type=Path)
+    k = sub.add_parser("corpus", help="run the per-language fixture corpus")
+    k.add_argument("--work", type=Path, required=True)
+    k.add_argument("--crg-repo", type=Path, default=Path("../code-review-graph"))
+    k.add_argument("--codegraph", type=Path, default=Path("target/debug/codegraph"))
+    k.add_argument("--corpus", type=Path, default=Path(__file__).with_name("corpus.json"))
+    k.add_argument("--md", type=Path)
     args = p.parse_args(argv)
+    if args.cmd == "run":
+        _emit(run_pair(args.src_dir, args.work, args.crg_repo, args.codegraph), args.md, args.json)
+        return 0
+    if args.cmd == "corpus":
+        text = run_corpus(args.corpus, args.crg_repo, args.work,
+                          args.crg_repo / "tests" / "fixtures", args.codegraph)
+        if args.md:
+            args.md.parent.mkdir(parents=True, exist_ok=True)
+            args.md.write_text(text)
+        else:
+            sys.stdout.write(text)
+        return 0
     if args.cmd == "compare":
         rep = compare(load_graph(args.crg_db, args.crg_root), load_graph(args.rust_db, args.rust_root))
         if args.json:

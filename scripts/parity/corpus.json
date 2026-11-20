@@ -1,0 +1,10 @@
+{
+  "crg_commit": "bbdda4b",
+  "languages": {
+    "python": ["sample_python.py", "test_sample.py", "caller_example.py", "multi_call_example.py", "sample_callback_refs.py"],
+    "typescript": ["sample_typescript.ts", "alias_importer.ts", "sample_vitest.test.ts"],
+    "go": ["sample_go.go", "sample_dead_guard.go"],
+    "rust": ["sample_rust.rs", "sample_dead_guard.rs", "sample_dead_guard_impl.rs"],
+    "java": ["SampleJava.java", "SpringDI.java"]
+  }
+}
