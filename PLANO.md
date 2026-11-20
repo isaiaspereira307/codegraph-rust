@@ -184,15 +184,20 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
 6. Demais linguagens (C#, C/C++, Ruby, PHP, Kotlin, Swift, Dart): nenhuma resolve imports
    ainda; corpus e fixtures a criar.
 
-Dívida menor registrada: `stats.functions` e hotspots de complexidade ignoram nós `Test`;
-atributos `crg_shaped`/`pre_shape_qualified_name` em todo nó (tamanho); sem teste de uuid
-de nó `Test` no indexador.
+Dívida menor registrada: hotspots de complexidade ignoram nós `Test`; atributos
+`crg_shaped`/`pre_shape_qualified_name` em todo nó (tamanho).
+
+- `line` das arestas é 0 em CALLS/IMPORTS_FROM, e o `TESTED_BY` herda o 0 (o CRG grava a
+  linha da chamada; `source_span` pode preenchê-la).
+- Alvos de texto não resolvidos aumentam o banco e a carga do snapshot (igual ao CRG).
+- `resolution::reachable` aloca um vetor por alias; medir em repositórios grandes.
+- IDs de nó dependem de indexar por `.` ou pelo caminho absoluto (anterior ao plano;
+  sufixos `@L` mudam em execuções mistas) — precisa de issue própria.
 
 Polimento do harness (parqueado): `_check_crg_schema` sem tabela `metadata` gera traceback;
-`FileNotFoundError` quando faltam `uv`/`git`; `git` com `-c commit.gpgsign=false -c
-core.hooksPath=/dev/null`; incluir stdout quando a ferramenta falha; `crg_commit` não é
-verificado contra o checkout; `_emit` duplicado em `compare`; URI `file:` sem escape;
-divergência de linguagem não reportada.
+`FileNotFoundError` quando faltam `uv`/`git`; incluir stdout quando a ferramenta falha;
+`_emit` duplicado em `compare`; URI `file:` sem escape; divergência de linguagem não
+reportada.
 
 ---
 
