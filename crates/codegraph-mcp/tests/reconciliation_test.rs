@@ -73,15 +73,17 @@ async fn incremental_catalog_matches_full_graph_and_removes_stale_definitions() 
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
-    let caller = dir.path().join("caller.rs");
-    let target = dir.path().join("target.rs");
-    // `target()` crosses files through its `use`; `missing()` names nothing and stays text.
+    // The crate root is the caller, so `crate::target` anchors at `src/`.
+    std::fs::create_dir(dir.path().join("src"))?;
+    let caller = dir.path().join("src/lib.rs");
+    let target = dir.path().join("src/target.rs");
+    // `compute()` crosses files through its `use`; `missing()` names nothing and stays text.
     std::fs::write(
         &caller,
-        "use crate::target::target;\nfn caller() { target(); helper(); missing(); }\n\
-         fn helper() {}\n",
+        "mod target;\nuse crate::target::compute;\n\
+         fn caller() { compute(); helper(); missing(); }\nfn helper() {}\n",
     )?;
-    std::fs::write(&target, "fn target() {}\n")?;
+    std::fs::write(&target, "fn compute() {}\n")?;
     let config = IndexerConfig {
         project_root: dir.path().into(),
         indexing_tier: IndexingTier::Fast,
@@ -118,10 +120,10 @@ async fn incremental_catalog_matches_full_graph_and_removes_stale_definitions() 
     let targets: Vec<_> = cold_calls.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(
         targets,
-        ["caller.rs::helper", "missing", "target.rs::target"]
+        ["missing", "src/lib.rs::helper", "src/target.rs::compute"]
     );
-    assert_eq!(cold_calls[0].1["resolution_method"], "exact");
-    assert_eq!(cold_calls[1].1["unresolved_target"], "missing");
+    assert_eq!(cold_calls[0].1["unresolved_target"], "missing");
+    assert_eq!(cold_calls[1].1["resolution_method"], "exact");
     assert_eq!(cold_calls[2].1["resolution_method"], "exact");
     let warm = indexer.index_project(dir.path()).await?;
     assert_eq!(warm.nodes, cold.nodes);
@@ -143,10 +145,10 @@ async fn incremental_catalog_matches_full_graph_and_removes_stale_definitions() 
         caller_metadata(&after_metadata)
     );
     let incremental = graph(&storage)?;
-    assert!(!has_node(&incremental, "target"));
+    assert!(!has_node(&incremental, "compute"));
     // The edit unbinds the cross-file call: it is now kept as its text.
     let targets: Vec<_> = calls(&storage)?.into_iter().map(|(t, _)| t).collect();
-    assert_eq!(targets, ["caller.rs::helper", "missing", "target"]);
+    assert_eq!(targets, ["compute", "missing", "src/lib.rs::helper"]);
     assert!(has_node(&incremental, "replacement"));
     indexer.reconcile_project(dir.path(), true).await?;
     assert_eq!(incremental, graph(&storage)?);
@@ -386,6 +388,40 @@ async fn imported_module_lets_a_bare_call_cross_files() -> Result<()> {
             "IMPORTS_FROM|a.py|b.py",
         ]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn package_imports_never_bind_to_a_same_named_repo_file() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(
+            module_path!(),
+            "::package_imports_never_bind_to_a_same_named_repo_file"
+        ),
+        &[
+            (
+                "main.go",
+                "package main\n\nimport \"errors\"\n\nfunc run() { New() }\n",
+            ),
+            ("errors.go", "package main\n\nfunc New() {}\n"),
+            (
+                "app.ts",
+                "import React from 'react';\nfunction f() { render(); }\n",
+            ),
+            ("react.ts", "export function render() {}\n"),
+        ],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let imports = edges_of(&indexer.graph_store(), dir.path(), "'IMPORTS_FROM'")?;
+    assert_eq!(
+        imports,
+        ["IMPORTS_FROM|app.ts|react", "IMPORTS_FROM|main.go|errors"]
+    );
+    let calls = edges_of(&indexer.graph_store(), dir.path(), "'CALLS'")?;
+    assert_eq!(calls, ["CALLS|app.ts::f|render", "CALLS|main.go::run|New"]);
     Ok(())
 }
 

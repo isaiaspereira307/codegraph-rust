@@ -18,7 +18,9 @@ impl SqliteGraphStore {
     /// Makes the graph equal to the complete prepared catalog: nodes, edges and file metadata
     /// outside it are removed, as are edges whose endpoints were removed. Rows written by
     /// another tool (no `cg_*` identity) are outside every catalog and are removed too, except
-    /// TESTED_BY: it is derived, has no identity, and `finalize` rebuilds it.
+    /// TESTED_BY: it is derived, has no identity, and `finalize` rebuilds it. Trade-off: if a
+    /// run fails between this call and `finalize` (e.g. inputs changed during indexing), the
+    /// old TESTED_BY rows may name removed nodes until the next successful `finalize`.
     pub async fn reconcile_catalog(
         &self,
         project: &str,

@@ -1,129 +1,263 @@
-// ABOUTME: Maps import text (Python dotted modules, TS relative paths, Rust use paths) to the
-// ABOUTME: one indexed file it names, by whole path segments; ambiguous modules map to nothing.
+// ABOUTME: Maps an import's text to the indexed file it names, per the importer's language,
+// ABOUTME: following code-review-graph's resolvers; anything else (Go, packages) stays text.
 
 use std::collections::HashMap;
 
-/// File stems that name their directory as a module (`pkg/__init__.py`, `m/mod.rs`, `x/index.ts`).
-const DIRECTORY_STEMS: [&str; 3] = ["__init__", "mod", "index"];
-/// Leading Rust path keywords that name no directory.
-const RUST_ROOTS: [&str; 3] = ["crate", "self", "super"];
+/// Extensions code-review-graph appends to a relative TS/JS import, in order.
+const JS_EXTENSIONS: [&str; 7] = [".ts", ".tsx", ".js", ".jsx", ".vue", ".mts", ".cts"];
+/// ESM writes `./foo.js` for `foo.ts`: the only case where a suffix is replaced.
+const JS_SUFFIX_SUBSTITUTIONS: [(&str, &[&str]); 4] = [
+    (".js", &[".ts", ".tsx", ".jsx"]),
+    (".jsx", &[".ts", ".tsx"]),
+    (".mjs", &[".mts", ".ts", ".tsx"]),
+    (".cjs", &[".cts", ".ts", ".tsx"]),
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum ImportLanguage {
+    Python,
+    Script,
+    Rust,
+    Java,
+}
+
+fn language(importer: &str) -> Option<ImportLanguage> {
+    let extension = importer.rsplit_once('.')?.1;
+    Some(match extension {
+        "py" | "pyi" => ImportLanguage::Python,
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" | "vue" => {
+            ImportLanguage::Script
+        }
+        "rs" => ImportLanguage::Rust,
+        "java" => ImportLanguage::Java,
+        _ => return None,
+    })
+}
+
+/// A path split into segments, remembering whether it was absolute.
+#[derive(Clone)]
+struct PathParts<'a> {
+    absolute: bool,
+    segments: Vec<&'a str>,
+}
+
+impl<'a> PathParts<'a> {
+    fn new(path: &'a str) -> Self {
+        Self {
+            absolute: path.starts_with('/'),
+            segments: path
+                .split('/')
+                .filter(|s| !s.is_empty() && *s != ".")
+                .collect(),
+        }
+    }
+
+    fn parent(&self) -> Self {
+        let mut parent = self.clone();
+        parent.segments.pop();
+        parent
+    }
+
+    fn join(&self, tail: &str) -> String {
+        let mut joined = String::new();
+        if self.absolute {
+            joined.push('/');
+        }
+        for segment in &self.segments {
+            joined.push_str(segment);
+            joined.push('/');
+        }
+        joined.push_str(tail);
+        joined
+    }
+}
+
+/// Collapses `.`/`..` segments, keeping a leading `/`.
+fn normalize(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    let joined = segments.join("/");
+    if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
 
 pub(crate) struct ModuleIndex {
-    /// Every `/`-joined suffix of every file's extensionless path; `None` when ambiguous.
-    modules: HashMap<String, Option<String>>,
-}
-
-fn segments(path: &str) -> Vec<&str> {
-    path.split('/')
-        .filter(|s| !s.is_empty() && *s != ".")
-        .collect()
-}
-
-fn strip_extension(segment: &str) -> &str {
-    match segment.rsplit_once('.') {
-        Some((stem, _)) if !stem.is_empty() => stem,
-        _ => segment,
-    }
+    /// Normalized path → the indexed file path as given.
+    files: HashMap<String, String>,
 }
 
 impl ModuleIndex {
     pub(crate) fn new<'a>(files: impl IntoIterator<Item = &'a str>) -> Self {
-        let mut modules: HashMap<String, Option<String>> = HashMap::new();
-        for file in files {
-            let mut parts = segments(file);
-            let Some(last) = parts.pop() else { continue };
-            parts.push(strip_extension(last));
-            let mut keys = vec![parts.clone()];
-            if parts.len() > 1 && DIRECTORY_STEMS.contains(parts.last().unwrap()) {
-                keys.push(parts[..parts.len() - 1].to_vec());
-            }
-            for key in keys {
-                for start in 0..key.len() {
-                    let module = key[start..].join("/");
-                    let entry = modules
-                        .entry(module)
-                        .or_insert_with(|| Some(file.to_string()));
-                    if entry.as_deref() != Some(file) {
-                        *entry = None;
-                    }
-                }
-            }
+        Self {
+            files: files
+                .into_iter()
+                .map(|file| (normalize(file), file.to_string()))
+                .collect(),
         }
-        Self { modules }
     }
 
-    fn lookup(&self, parts: &[&str]) -> Option<&str> {
-        if parts.is_empty() {
-            return None;
-        }
-        self.modules.get(&parts.join("/"))?.as_deref()
-    }
-
-    /// Like `lookup`, but `parts` must be the file's whole path (a resolved relative import).
-    fn lookup_path(&self, parts: &[&str]) -> Option<&str> {
-        let file = self.lookup(parts)?;
-        let depth = segments(file).len();
-        let directory_module = DIRECTORY_STEMS.iter().any(|stem| {
-            segments(file)
-                .last()
-                .is_some_and(|last| strip_extension(last) == *stem)
-        });
-        (depth == parts.len() || (directory_module && depth == parts.len() + 1)).then_some(file)
+    fn file(&self, path: &str) -> Option<&str> {
+        self.files.get(&normalize(path)).map(String::as_str)
     }
 
     /// The indexed file the import `text`, written in `importer`, names.
     pub(crate) fn resolve(&self, importer: &str, text: &str) -> Option<&str> {
         let text = text.trim().trim_matches(|c| c == '"' || c == '\'');
-        let directory = || {
-            let mut dir = segments(importer);
-            dir.pop();
-            dir
+        if text.is_empty() {
+            return None;
+        }
+        match language(importer)? {
+            ImportLanguage::Python => self.python(importer, text),
+            ImportLanguage::Script => self.script(importer, text),
+            ImportLanguage::Rust => self.rust(importer, text),
+            ImportLanguage::Java => self.java(importer, text),
+        }
+    }
+
+    /// Relative modules climb one package per extra dot; absolute ones are looked up from
+    /// the caller's directory upwards, package (`__init__.py`) before module.
+    fn python(&self, importer: &str, text: &str) -> Option<&str> {
+        let module = text.trim_start_matches('.');
+        let level = text.len() - module.len();
+        let relative = module.replace('.', "/");
+        let candidates = |dir: &PathParts| -> Option<&str> {
+            if relative.is_empty() {
+                return self.file(&dir.join("__init__.py"));
+            }
+            self.file(&dir.join(&format!("{relative}/__init__.py")))
+                .or_else(|| self.file(&dir.join(&format!("{relative}.py"))))
         };
-        if text.starts_with("./") || text.starts_with("../") {
-            // A path relative to the importing file (TS/JS).
-            let mut parts = directory();
-            for segment in segments(text) {
-                if segment == ".." {
-                    parts.pop()?;
-                } else {
-                    parts.push(segment);
-                }
+        let mut dir = PathParts::new(importer).parent();
+        if level > 0 {
+            for _ in 1..level {
+                dir.segments.pop()?;
             }
-            let last = parts.pop()?;
-            parts.push(strip_extension(last));
-            return self.lookup_path(&parts);
+            return candidates(&dir);
         }
-        if text.starts_with('.') {
-            // A Python relative module: each extra leading dot climbs one directory.
-            let module = text.trim_start_matches('.');
-            let mut parts = directory();
-            for _ in 1..text.len() - module.len() {
-                parts.pop()?;
-            }
-            parts.extend(module.split('.').filter(|s| !s.is_empty()));
-            return self.lookup_path(&parts);
-        }
-        if text.contains("::") {
-            // A Rust use path names an item inside its module; try the module itself, then
-            // its parent.
-            let mut parts: Vec<_> = text
-                .split("::")
-                .skip_while(|s| RUST_ROOTS.contains(s))
-                .filter(|s| !s.is_empty() && !s.starts_with('{') && *s != "*")
-                .collect();
-            if let Some(file) = self.lookup(&parts) {
+        loop {
+            if let Some(file) = candidates(&dir) {
                 return Some(file);
             }
-            parts.pop();
-            return self.lookup(&parts);
+            dir.segments.pop()?;
         }
-        let text = text
-            .strip_prefix("@/")
-            .or_else(|| text.strip_prefix("~/"))
-            .unwrap_or(text);
-        let separator = if text.contains('/') { '/' } else { '.' };
-        let parts: Vec<_> = text.split(separator).filter(|s| !s.is_empty()).collect();
-        self.lookup(&parts)
+    }
+
+    /// Only relative specifiers name a file; bare package names stay text.
+    fn script(&self, importer: &str, text: &str) -> Option<&str> {
+        if !(text.starts_with("./") || text.starts_with("../")) {
+            return None;
+        }
+        let base = PathParts::new(importer).parent().join(text);
+        if let Some(file) = self.file(&base) {
+            return Some(file);
+        }
+        // Append, never replace: `./outlet.entity` is `outlet.entity.ts`.
+        for extension in JS_EXTENSIONS {
+            if let Some(file) = self.file(&format!("{base}{extension}")) {
+                return Some(file);
+            }
+        }
+        for (suffix, replacements) in JS_SUFFIX_SUBSTITUTIONS {
+            if let Some(stem) = base.strip_suffix(suffix) {
+                for replacement in replacements {
+                    if let Some(file) = self.file(&format!("{stem}{replacement}")) {
+                        return Some(file);
+                    }
+                }
+            }
+        }
+        JS_EXTENSIONS
+            .iter()
+            .find_map(|extension| self.file(&format!("{base}/index{extension}")))
+    }
+
+    /// `crate::` paths start at the crate root (the nearest ancestor directory holding
+    /// `lib.rs` or `main.rs`); `self::`/`super::` at the importer's module. Other first
+    /// segments (std, extern crates) stay text. The last segment may be an item.
+    fn rust(&self, importer: &str, text: &str) -> Option<&str> {
+        let mut remaining: Vec<&str> = text.split("::").filter(|s| !s.is_empty()).collect();
+        let first = *remaining.first()?;
+        if !matches!(first, "crate" | "self" | "super") {
+            return None;
+        }
+        let file = PathParts::new(importer);
+        let mut root = file.parent();
+        let root_file = loop {
+            if let Some(found) = ["lib.rs", "main.rs"]
+                .iter()
+                .find_map(|name| self.file(&root.join(name)))
+            {
+                break found;
+            }
+            root.segments.pop()?;
+        };
+        let module_file = |parts: &[&str]| -> Option<&str> {
+            if parts.is_empty() {
+                return Some(root_file);
+            }
+            let path = parts.join("/");
+            self.file(&root.join(&format!("{path}.rs")))
+                .or_else(|| self.file(&root.join(&format!("{path}/mod.rs"))))
+        };
+        let mut current: Vec<&str> = Vec::new();
+        if first == "crate" {
+            remaining.remove(0);
+        } else {
+            // The importer's own module path below the crate root.
+            current = file.segments[root.segments.len()..].to_vec();
+            let stem = current.pop()?.trim_end_matches(".rs");
+            if !matches!(stem, "lib" | "main" | "mod") {
+                current.push(stem);
+            }
+            if first == "self" {
+                remaining.remove(0);
+            }
+            while remaining.first() == Some(&"super") {
+                remaining.remove(0);
+                current.pop()?;
+            }
+        }
+        let mut resolved = module_file(&current)?;
+        for (index, segment) in remaining.iter().enumerate() {
+            current.push(segment);
+            match module_file(&current) {
+                Some(found) => resolved = found,
+                None if index == remaining.len() - 1 => break,
+                None => return None,
+            }
+        }
+        Some(resolved)
+    }
+
+    /// `com.example.Foo` is `com/example/Foo.java` under some ancestor of the importer;
+    /// a static member import retries without its last segment.
+    fn java(&self, importer: &str, text: &str) -> Option<&str> {
+        if text.ends_with(".*") {
+            return None;
+        }
+        let find = |module: &str| -> Option<&str> {
+            let relative = format!("{}.java", module.replace('.', "/"));
+            let mut dir = PathParts::new(importer).parent();
+            loop {
+                if let Some(file) = self.file(&dir.join(&relative)) {
+                    return Some(file);
+                }
+                dir.segments.pop()?;
+            }
+        };
+        find(text).or_else(|| find(text.rsplit_once('.')?.0))
     }
 }
 
@@ -131,21 +265,34 @@ impl ModuleIndex {
 mod tests {
     use super::*;
 
-    #[test]
-    fn modules_map_to_their_single_file() {
-        let index = ModuleIndex::new([
+    fn index() -> ModuleIndex {
+        ModuleIndex::new([
             "app/caller.py",
             "app/sample.py",
+            "app/core.py",
             "pkg/__init__.py",
             "pkg/core.py",
-            "other/core.py",
+            "tools/config.py",
             "web/src/x.ts",
             "web/src/util.ts",
+            "web/src/outlet.ts",
+            "web/src/outlet.entity.ts",
             "web/src/lib/index.ts",
-            "src/m.rs",
-            "src/lib.rs",
-            "com/example/Foo.java",
-        ]);
+            "web/react.ts",
+            "go/errors.go",
+            "go/main.go",
+            "crate/src/lib.rs",
+            "crate/src/m.rs",
+            "crate/src/m/inner.rs",
+            "crate/src/serde.rs",
+            "j/src/com/example/Foo.java",
+            "j/src/com/example/Main.java",
+        ])
+    }
+
+    #[test]
+    fn python_modules_resolve_from_the_callers_directory_upwards() {
+        let index = index();
         assert_eq!(
             index.resolve("app/caller.py", "sample"),
             Some("app/sample.py")
@@ -166,13 +313,20 @@ mod tests {
             index.resolve("app/caller.py", "pkg.core"),
             Some("pkg/core.py")
         );
-        // Two files answer to `core`; neither is evidence.
-        assert_eq!(index.resolve("app/caller.py", "core"), None);
+        // `core` next to the caller wins over `pkg/core.py`.
+        assert_eq!(index.resolve("app/caller.py", "core"), Some("app/core.py"));
+        // `tools/config.py` is not on the caller's path.
+        assert_eq!(index.resolve("app/caller.py", "config"), None);
         assert_eq!(
             index.resolve("app/caller.py", "tests.fixtures.sample"),
             None
         );
         assert_eq!(index.resolve("app/caller.py", "os"), None);
+    }
+
+    #[test]
+    fn script_imports_resolve_only_relative_specifiers() {
+        let index = index();
         assert_eq!(
             index.resolve("web/src/x.ts", "./util"),
             Some("web/src/util.ts")
@@ -182,25 +336,57 @@ mod tests {
             Some("web/src/util.ts")
         );
         assert_eq!(
+            index.resolve("web/src/x.ts", "./outlet.entity"),
+            Some("web/src/outlet.entity.ts")
+        );
+        assert_eq!(
             index.resolve("web/src/x.ts", "./lib"),
             Some("web/src/lib/index.ts")
         );
         assert_eq!(
-            index.resolve("web/src/x.ts", "../../src/m"),
-            Some("src/m.rs")
+            index.resolve("web/src/x.ts", "../react"),
+            Some("web/react.ts")
         );
-        // A relative path names one location, never a deeper file sharing its suffix.
+        assert_eq!(index.resolve("web/src/x.ts", "react"), None);
+        assert_eq!(index.resolve("web/x.ts", "./util"), None);
+    }
+
+    #[test]
+    fn rust_paths_anchor_at_the_crate_root_or_the_current_module() {
+        let index = index();
+        let lib = "crate/src/lib.rs";
+        assert_eq!(index.resolve(lib, "crate::m::f"), Some("crate/src/m.rs"));
+        assert_eq!(index.resolve(lib, "crate::m"), Some("crate/src/m.rs"));
         assert_eq!(
-            index.resolve("web/x.ts", "./src/util"),
-            Some("web/src/util.ts")
+            index.resolve(lib, "crate::m::inner::g"),
+            Some("crate/src/m/inner.rs")
         );
-        assert_eq!(index.resolve("x.ts", "./util"), None);
-        assert_eq!(index.resolve("src/lib.rs", "crate::m::f"), Some("src/m.rs"));
-        assert_eq!(index.resolve("src/lib.rs", "crate::m"), Some("src/m.rs"));
-        assert_eq!(index.resolve("src/lib.rs", "std::fmt"), None);
+        assert_eq!(index.resolve(lib, "crate::missing::deep::g"), None);
         assert_eq!(
-            index.resolve("x/Main.java", "com.example.Foo"),
-            Some("com/example/Foo.java")
+            index.resolve("crate/src/m.rs", "self::inner::g"),
+            Some("crate/src/m/inner.rs")
         );
+        assert_eq!(
+            index.resolve("crate/src/m/inner.rs", "super::f"),
+            Some("crate/src/m.rs")
+        );
+        assert_eq!(index.resolve(lib, "serde::Serialize"), None);
+        assert_eq!(index.resolve(lib, "std::fmt"), None);
+    }
+
+    #[test]
+    fn java_classes_resolve_under_an_ancestor_and_other_languages_stay_text() {
+        let index = index();
+        let main = "j/src/com/example/Main.java";
+        assert_eq!(
+            index.resolve(main, "com.example.Foo"),
+            Some("j/src/com/example/Foo.java")
+        );
+        assert_eq!(
+            index.resolve(main, "com.example.Foo.member"),
+            Some("j/src/com/example/Foo.java")
+        );
+        assert_eq!(index.resolve(main, "com.example.*"), None);
+        assert_eq!(index.resolve("go/main.go", "errors"), None);
     }
 }
