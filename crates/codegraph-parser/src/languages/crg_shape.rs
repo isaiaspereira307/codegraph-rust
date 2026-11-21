@@ -20,6 +20,10 @@ pub const FILE_SCOPE_ATTR: &str = "crg_file_scope";
 /// This pass turns it into a `Test` and links it from the function or runner around it.
 pub const TEST_RUNNER_ATTR: &str = "crg_test_runner";
 
+/// Comma-separated annotation/decorator names an extractor recorded on a node, without the
+/// `@` (Java `@Test`); test detection reads them like CRG's `decorators`.
+pub const DECORATORS_ATTR: &str = "decorators";
+
 /// The node kind (`{:?}` of its `NodeType`) a node had before this pass turned it into a test.
 pub const PRE_SHAPE_KIND_ATTR: &str = "pre_shape_kind";
 
@@ -286,12 +290,18 @@ pub fn shape_for_crg(
         });
     }
 
-    // Decorators are not recorded by the extractors, so only names and paths decide.
+    // Only the extractors that record decorators (DECORATORS_ATTR) let them decide.
     for &i in &members {
         let node = &mut result.nodes[i];
+        let decorators: Vec<&str> = node
+            .metadata
+            .attributes
+            .get(DECORATORS_ATTR)
+            .map(|d| d.split(',').collect())
+            .unwrap_or_default();
         if node.node_type != Some(NodeType::Function)
             || !(is_test_runner(node)
-                || test_detection::is_test_function(node.name.as_str(), rel_path, &[]))
+                || test_detection::is_test_function(node.name.as_str(), rel_path, &decorators))
         {
             continue;
         }
