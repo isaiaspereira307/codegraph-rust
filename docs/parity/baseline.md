@@ -23,8 +23,11 @@ divergencia de kind), CALLS e CONTAINS (de 0.129 / 0.932); IMPORTS_FROM segue 1.
 linguagens nao mudaram. O corpus rust e nao deterministico (divergentes 6/9/12 e CONTAINS
 0.576/0.677 entre execucoes iguais: qual dos nos `S` duplicados, struct ou `impl`, ganha o
 sufixo `@L` varia); ja acontecia antes deste plano.
+Plano Java (`docs/superpowers/plans/2026-11-20-fase2-java.md`): java passou a 1.000 em nos,
+CALLS, INHERITS e INJECTS (de 0.947 / 0.350 / 0 / 0); CONTAINS e IMPORTS_FROM seguem 1.000. As
+outras linguagens nao mudaram.
 
-"Depois" abaixo e o relatorio regerado apos o plano Go.
+"Depois" abaixo e o relatorio regerado apos o plano Java.
 
 # Depois
 
@@ -150,7 +153,7 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
 | CALLS | 20 | 19 | 13 | 0.500 | 0.562 |
-| CONTAINS | 27 | 25 | 21 | 0.677 | 0.677 |
+| CONTAINS | 27 | 25 | 23 | 0.793 | 0.793 |
 | IMPLEMENTS | 1 | 0 | 0 | 0.000 | 0.000 |
 | IMPORTS_FROM | 1 | 2 | 1 | 0.500 | 1.000 |
 | TESTED_BY | 6 | 0 | 0 | 0.000 | 0.000 |
@@ -162,8 +165,8 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 ##### rust: nodes only in Rust
 
-- `sample_dead_guard_impl.rs::S@L11`
-- `sample_rust.rs::InMemoryRepo@L15`
+- `sample_dead_guard_impl.rs::S@L5`
+- `sample_rust.rs::InMemoryRepo@L19`
 - `sample_rust.rs::InMemoryRepo@L27`
 - `sample_rust.rs::println`
 - `sample_rust.rs::tests`
@@ -173,9 +176,9 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 ##### rust: divergent nodes
 
-- `sample_rust.rs::InMemoryRepo` kind: crg=Class rust=impl
-- `sample_rust.rs::InMemoryRepo` line_start: crg=15 rust=19
-- `sample_rust.rs::InMemoryRepo` line_end: crg=17 rust=25
+- `sample_dead_guard_impl.rs::S` kind: crg=Class rust=impl
+- `sample_dead_guard_impl.rs::S` line_start: crg=5 rust=11
+- `sample_dead_guard_impl.rs::S` line_end: crg=5 rust=15
 - `sample_rust.rs::async_test_is_detected` kind: crg=Test rust=Function
 - `sample_rust.rs::async_test_is_detected` is_test: crg=1 rust=0
 - `sample_rust.rs::create_user_saves_to_repo` kind: crg=Test rust=Function
@@ -204,19 +207,15 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 ##### CONTAINS: edges only in CRG
 
-- `sample_rust.rs` -> `sample_rust.rs::InMemoryRepo`
-- `sample_rust.rs::InMemoryRepo` -> `sample_rust.rs::InMemoryRepo.find_by_id`
-- `sample_rust.rs::InMemoryRepo` -> `sample_rust.rs::InMemoryRepo.new`
-- `sample_rust.rs::InMemoryRepo` -> `sample_rust.rs::InMemoryRepo.save`
+- `sample_dead_guard_impl.rs` -> `sample_dead_guard_impl.rs::S`
+- `sample_dead_guard_impl.rs::S` -> `sample_dead_guard_impl.rs::S.run`
 - `sample_rust.rs::Repository` -> `sample_rust.rs::Repository.find_by_id`
 - `sample_rust.rs::Repository` -> `sample_rust.rs::Repository.save`
 
 ##### CONTAINS: edges only in Rust
 
-- `sample_rust.rs` -> `sample_rust.rs::InMemoryRepo@L15`
-- `sample_rust.rs::InMemoryRepo@L15` -> `sample_rust.rs::InMemoryRepo.find_by_id`
-- `sample_rust.rs::InMemoryRepo@L15` -> `sample_rust.rs::InMemoryRepo.new`
-- `sample_rust.rs::InMemoryRepo@L15` -> `sample_rust.rs::InMemoryRepo.save`
+- `sample_dead_guard_impl.rs` -> `sample_dead_guard_impl.rs::S@L5`
+- `sample_dead_guard_impl.rs::S@L5` -> `sample_dead_guard_impl.rs::S.run`
 
 ##### IMPLEMENTS: edges only in CRG
 
@@ -241,54 +240,17 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
-| java | 36 | 38 | 36 | 0.947 | 0 |
+| java | 36 | 36 | 36 | 1.000 | 0 |
 
 #### Edges by kind
 
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
-| CALLS | 15 | 12 | 7 | 0.350 | 0.300 |
+| CALLS | 15 | 15 | 15 | 1.000 | 1.000 |
 | CONTAINS | 34 | 34 | 34 | 1.000 | 1.000 |
 | IMPORTS_FROM | 11 | 11 | 11 | 1.000 | 1.000 |
-| INHERITS | 3 | 0 | 0 | 0.000 | 1.000 |
-| INJECTS | 4 | 0 | 0 | 0.000 | 1.000 |
-
-##### java: nodes only in Rust
-
-- `SampleJava.java::com.example.auth`
-- `SpringDI.java::com.example.shop`
-
-##### CALLS: edges only in CRG
-
-- `SampleJava.java` -> `HashMap`
-- `SampleJava.java::CachedRepo.save` -> `SampleJava.java::UserRepository.save`
-- `SampleJava.java::UserService.createUser` -> `SampleJava.java::User`
-- `SampleJava.java::UserService.createUser` -> `SampleJava.java::UserRepository.save`
-- `SampleJava.java::UserService.getUser` -> `SampleJava.java::UserRepository.findById`
-- `SpringDI.java::AppConfig.orderRepository` -> `SpringDI.java::JpaOrderRepository`
-- `SpringDI.java::NotificationService.notify` -> `SpringDI.java::JpaOrderRepository.findById`
-- `SpringDI.java::OrderService.placeOrder` -> `SpringDI.java::JpaOrderRepository.save`
-
-##### CALLS: edges only in Rust
-
-- `SampleJava.java::CachedRepo.save` -> `save`
-- `SampleJava.java::UserService.createUser` -> `save`
-- `SampleJava.java::UserService.getUser` -> `findById`
-- `SpringDI.java::NotificationService.notify` -> `findById`
-- `SpringDI.java::OrderService.placeOrder` -> `save`
-
-##### INHERITS: edges only in CRG
-
-- `SampleJava.java::CachedRepo` -> `InMemoryRepo`
-- `SampleJava.java::InMemoryRepo` -> `UserRepository`
-- `SpringDI.java::JpaOrderRepository` -> `OrderRepository`
-
-##### INJECTS: edges only in CRG
-
-- `SpringDI.java::AuditLogger` -> `OrderRepository`
-- `SpringDI.java::NotificationService` -> `OrderRepository`
-- `SpringDI.java::OrderService` -> `NotificationService`
-- `SpringDI.java::OrderService` -> `OrderRepository`
+| INHERITS | 3 | 3 | 3 | 1.000 | 1.000 |
+| INJECTS | 4 | 4 | 4 | 1.000 | 1.000 |
 
 # Antes
 
