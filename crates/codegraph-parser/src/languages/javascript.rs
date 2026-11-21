@@ -1,6 +1,7 @@
 // ABOUTME: TypeScript/JavaScript extractor producing code-review-graph's declarations and calls.
 // ABOUTME: Tracks the enclosing named function so calls in anonymous callbacks stay with it.
 
+use super::crg_shape;
 use codegraph_core::{
     CodeNode, EdgeRelationship, EdgeType, ExtractionResult, Language, Location, NodeId, NodeType,
     Span,
@@ -205,27 +206,45 @@ impl<'a> TypeScriptCollector<'a> {
     }
 
     fn call(&mut self, node: &Node) {
-        let Some(&from) = self.functions.last() else {
+        let Some(target) = self.call_name(node) else {
             return;
         };
-        let Some(target) = self.extract_call_target(node) else {
-            return;
+        let mut metadata = HashMap::from([
+            ("call_type".to_string(), "function_call".to_string()),
+            ("source_file".to_string(), self.file_path.to_string()),
+        ]);
+        // Outside every function the call belongs to the file, which `crg_shape` adds.
+        let from = match self.functions.last() {
+            Some(&id) => id,
+            None => {
+                metadata.insert(crg_shape::FILE_SCOPE_ATTR.to_string(), "true".to_string());
+                NodeId::nil()
+            }
         };
         self.edges.push(EdgeRelationship {
             from,
             to: target,
             edge_type: EdgeType::Calls,
-            metadata: HashMap::from([
-                ("call_type".to_string(), "function_call".to_string()),
-                ("source_file".to_string(), self.file_path.to_string()),
-            ]),
+            metadata,
             span: Some(self.span_for(node)),
         });
     }
 
-    fn extract_call_target(&self, node: &Node) -> Option<String> {
-        node.child_by_field_name("function")
-            .map(|function| self.node_text(&function))
+    /// CRG `_get_call_name`: the callee identifier, or the rightmost member of a member
+    /// expression (`res.status(404).json` -> `json`); other callees (`super(...)`,
+    /// `import(...)`, `f()()`, `(0, f)()`) name nothing.
+    fn call_name(&self, node: &Node) -> Option<String> {
+        let callee = node.child_by_field_name("function")?;
+        match callee.kind() {
+            "identifier" => Some(self.node_text(&callee)),
+            "member_expression" => match callee.child_by_field_name("property") {
+                Some(property) if property.kind() == "property_identifier" => {
+                    Some(self.node_text(&property))
+                }
+                _ => Some(self.node_text(&callee)),
+            },
+            _ => None,
+        }
     }
 
     fn field_text(&self, node: &Node, field: &str) -> Option<String> {
@@ -332,5 +351,29 @@ mod tests {
         let qns = qualified_names(&r);
         assert!(!qns.iter().any(|q| q.ends_with("::x")), "{qns:?}");
         assert!(calls_from(&r, "m.ts::outer").contains(&"inner".to_string()));
+    }
+
+    #[test]
+    fn call_names_are_the_rightmost_member() {
+        let r = extract_ts(
+            "function h(res) {\n  res.status(404).json({});\n  this.users.get(1);\n  Date.now();\n\
+             Number(1);\n  new Map();\n  super.x();\n  (0, f)();\n}\n",
+            "m.ts",
+        );
+        assert_eq!(
+            calls_from(&r, "m.ts::h"),
+            vec!["Number", "get", "json", "now", "status", "x"]
+        );
+    }
+
+    #[test]
+    fn module_scope_calls_leave_the_file() {
+        let r = extract_ts("function a() {}\nmain();\n", "m.ts");
+        assert!(calls_from(&r, "m.ts::a").is_empty());
+        assert_eq!(calls_from(&r, "m.ts"), vec!["main"]);
+        assert!(r.edges.iter().all(|e| {
+            !e.metadata
+                .contains_key(super::super::crg_shape::FILE_SCOPE_ATTR)
+        }));
     }
 }

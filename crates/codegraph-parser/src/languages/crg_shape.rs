@@ -12,6 +12,10 @@ pub const SHAPED_ATTR: &str = "crg_shaped";
 /// The `qualified_name` a rewritten node had before this pass, when it had one.
 pub const PRE_SHAPE_QN_ATTR: &str = "pre_shape_qualified_name";
 
+/// Set by an extractor on an edge made outside every function; this pass moves its source to
+/// the `File` node (the extractor records `NodeId::nil()`) and removes the key.
+pub const FILE_SCOPE_ATTR: &str = "crg_file_scope";
+
 /// The node kind (`{:?}` of its `NodeType`) a node had before this pass turned it into a test.
 pub const PRE_SHAPE_KIND_ATTR: &str = "pre_shape_kind";
 
@@ -265,7 +269,7 @@ pub fn shape_for_crg(
     }
 
     for edge in &mut result.edges {
-        if imports.contains(&edge.from) {
+        if imports.contains(&edge.from) || edge.metadata.remove(FILE_SCOPE_ATTR).is_some() {
             edge.from = file_node.id;
         }
     }
