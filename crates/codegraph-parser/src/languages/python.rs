@@ -67,25 +67,25 @@ impl super::LanguageExtractor for PythonExtractor {
 /// What the top level of a Python file binds, read before the walk (CRG
 /// `_collect_file_scope` and `_python_type_checking_aliases`).
 #[derive(Debug, Default, Clone)]
-pub struct FileScope {
+struct FileScope {
     /// Functions and classes defined at the top level.
-    pub defined: HashSet<String>,
+    defined: HashSet<String>,
     /// Classes defined at the top level.
-    pub classes: HashSet<String>,
+    classes: HashSet<String>,
     /// `from M import X [as Y]`: local name -> (module as written, dots included; `X`).
-    pub from_imports: HashMap<String, (String, String)>,
+    from_imports: HashMap<String, (String, String)>,
     /// `import a.b as c`: `c` -> `a.b`; plain `import a.b`: `a` -> `a`.
-    pub module_aliases: HashMap<String, String>,
+    module_aliases: HashMap<String, String>,
     /// Unshadowed local names of `typing.TYPE_CHECKING`.
-    pub type_checking: HashSet<String>,
+    type_checking: HashSet<String>,
     /// Unshadowed local names of the `typing` module (`t.TYPE_CHECKING`).
-    pub typing_modules: HashSet<String>,
+    typing_modules: HashSet<String>,
     /// Every class of the file: leaf name -> dotted class chains (`Outer.Inner`) using it.
-    pub class_chains: HashMap<String, HashSet<String>>,
+    class_chains: HashMap<String, HashSet<String>>,
 }
 
 impl FileScope {
-    pub fn collect(root: Node, content: &str) -> Self {
+    fn collect(root: Node, content: &str) -> Self {
         let text = |n: &Node| node_text(n, content);
         let mut scope = FileScope::default();
         for child in named_children(&root) {
@@ -110,26 +110,18 @@ impl FileScope {
                     }
                 }
                 "import_statement" => {
-                    for name in field_children(&target, "name") {
-                        if name.kind() == "dotted_name" {
-                            // `import a.b` binds only `a`, to the module `a`.
-                            let root = text(&name)
-                                .split('.')
-                                .next()
-                                .unwrap_or_default()
-                                .to_string();
-                            scope.module_aliases.insert(root.clone(), root);
-                            continue;
-                        }
-                        if name.kind() != "aliased_import" {
-                            continue;
-                        }
-                        if let (Some(module), Some(alias)) = (
-                            name.child_by_field_name("name"),
-                            name.child_by_field_name("alias"),
-                        ) {
-                            scope.module_aliases.insert(text(&alias), text(&module));
-                        }
+                    // `import a.b` binds only `a`, to the module `a`; `import a.b as c`
+                    // binds `c` to `a.b`.
+                    for (original, local) in imported_names(&target, content) {
+                        let module = if original.split('.').next() == Some(local.as_str())
+                            && original != local
+                            && !is_aliased(&target, &original, content)
+                        {
+                            local.clone()
+                        } else {
+                            original
+                        };
+                        scope.module_aliases.insert(local, module);
                     }
                 }
                 _ => {}
@@ -828,6 +820,17 @@ fn unwrap_decorated(node: Node) -> Node {
     }
 }
 
+/// Whether `import <original> as ...` is spelled with an alias in `node`.
+fn is_aliased(node: &Node, original: &str, content: &str) -> bool {
+    field_children(node, "name").into_iter().any(|n| {
+        n.kind() == "aliased_import"
+            && n.child_by_field_name("name")
+                .map(|m| node_text(&m, content))
+                .as_deref()
+                == Some(original)
+    })
+}
+
 /// `(original, local)` names an import statement binds: `import a.b` -> `(a.b, a)`,
 /// `import a.b as c` -> `(a.b, c)`, `from M import x as y` -> `(x, y)`; `*` binds nothing.
 fn imported_names(node: &Node, content: &str) -> Vec<(String, String)> {
@@ -1357,6 +1360,30 @@ mod tests {
                 ("m.py::Solo.s", "m.py::Solo.s"),
             ])
         );
+    }
+
+    /// Guards the class-scope naming rule duplicated in crg_shape.rs and here: every
+    /// `self.m()` CALLS target must be the `qualified_name` of an extracted node.
+    #[test]
+    fn self_call_targets_are_extracted_qualified_names() {
+        let r = extract_py(
+            "class A:\n    class Inner:\n        def m(self):\n            return self.n()\n        def n(self):\n            def deep():\n                return self.m()\n            return deep()\n\
+             class B:\n    class Inner:\n        def m(self):\n            return self.m()\n\
+             class C:\n    class Solo:\n        def s(self):\n            return self.s()\n    def t(self):\n        return self.t()\n",
+            "m.py",
+        );
+        let names: BTreeSet<String> = r.nodes.iter().map(|n| qualified(&r, &n.id)).collect();
+        let targets: Vec<String> = edges(&r, EdgeType::Calls)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+        assert!(!targets.is_empty());
+        for t in targets {
+            assert!(
+                names.contains(&t),
+                "CALLS target {t} is not an extracted node: {names:?}"
+            );
+        }
     }
 
     #[test]
