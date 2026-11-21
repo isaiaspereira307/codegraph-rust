@@ -207,10 +207,20 @@ impl SymbolCatalog {
             return Some(id);
         }
         for alias in std::iter::once(edge.to.as_str()).chain(variants.iter().map(String::as_str)) {
-            if let Some(ids) = self.aliases.get(alias)
-                && let Some(id) =
-                    self.choose(&self.reachable(&edge.to, alias, ids, edge.from), edge.from)
-            {
+            let Some(ids) = self.aliases.get(alias) else {
+                continue;
+            };
+            let reachable = self.reachable(&edge.to, alias, ids, edge.from);
+            // A target spelled as a symbol's exact qualified name (`f.java::User`) names that
+            // symbol, not a member that merely shares the `file::name` alias (`User.User`).
+            let named: Vec<_> = reachable
+                .iter()
+                .filter(|id| self.symbols.get(id).is_some_and(|s| s.qualified == alias))
+                .collect();
+            if let [id] = named.as_slice() {
+                return Some(**id);
+            }
+            if let Some(id) = self.choose(&reachable, edge.from) {
                 return Some(id);
             }
         }
@@ -406,6 +416,27 @@ mod tests {
                 .insert("target_node_id".into(), a.id.to_string());
             assert_eq!(catalog.exact(&direct, &[]), Some(a.id));
         }
+    }
+
+    #[test]
+    fn an_exact_qualified_name_beats_a_shared_file_alias() {
+        let mut class = node("a.java", "User");
+        let mut constructor = node("a.java", "User");
+        let caller = node("a.java", "create");
+        class
+            .metadata
+            .attributes
+            .insert("qualified_name".into(), "a.java::User".into());
+        constructor
+            .metadata
+            .attributes
+            .insert("qualified_name".into(), "a.java::User.User".into());
+        constructor.set_deterministic_id("constructor");
+        let catalog = SymbolCatalog::new(&[class.clone(), constructor, caller.clone()]);
+        assert_eq!(
+            catalog.exact(&edge(caller.id, "a.java::User"), &[]),
+            Some(class.id)
+        );
     }
 
     #[test]

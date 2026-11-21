@@ -41,7 +41,7 @@ use std::collections::HashMap;
 /// The graph shape and resolver this build writes. It feeds the project input fingerprint
 /// and the ready marker, so a graph written by a build with another shape is rebuilt even
 /// when no source changed. Bump it whenever node kinds, edge kinds or resolution change.
-pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-3";
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-4";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {
@@ -1162,6 +1162,12 @@ impl ProjectIndexer {
 
             // Resolve exact/contextual targets once before any semantic inference.
             let resolution_start = std::time::Instant::now();
+            // Like code-review-graph after a build: calls on Spring-injected fields go to the
+            // bean that answers them. Needs every file's INJECTS/INHERITS, so runs here.
+            let spring_resolved = crate::spring::resolve_spring_di_calls(&nodes, &mut edges);
+            if spring_resolved > 0 {
+                info!("   🌱 Spring DI calls resolved: {spring_resolved}");
+            }
             let mut catalog = crate::resolution::SymbolCatalog::new(&nodes);
             catalog.link_imports(&edges);
             let symbol_map = catalog.unique_aliases();
@@ -1184,9 +1190,13 @@ impl ProjectIndexer {
                     resolution_provenance.push(("import", 1.0f64));
                     continue;
                 }
-                // Like code-review-graph, a parsed base class stays the text the source wrote,
-                // even when the class it names is indexed.
-                if edge.edge_type == EdgeType::Extends && !edge.metadata.contains_key("analyzer") {
+                // Like code-review-graph, a parsed base class or injected type stays the text
+                // the source wrote, even when the class it names is indexed.
+                let injects = edge.edge_type
+                    == EdgeType::Other(codegraph_parser::languages::java::INJECTS.into());
+                if (edge.edge_type == EdgeType::Extends || injects)
+                    && !edge.metadata.contains_key("analyzer")
+                {
                     targets.push(None);
                     resolution_provenance.push(("inherits", 1.0f64));
                     continue;
@@ -2121,6 +2131,7 @@ impl ProjectIndexer {
                     | EdgeType::Implements
                     | EdgeType::References
             )
+            || edge.edge_type == EdgeType::Other(codegraph_parser::languages::java::INJECTS.into())
     }
 
     fn normalize_symbol_target(target: &str) -> Vec<String> {

@@ -9,6 +9,7 @@ mod reconciliation;
 mod resolution;
 #[cfg(test)]
 mod semantic_scoring;
+mod spring;
 pub mod transport;
 pub mod utils;
 mod writer;
