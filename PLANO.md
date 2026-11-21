@@ -169,6 +169,7 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
 1. **TypeScript/JS** (CALLS 0.13, nós 0.44, TESTED_BY 0): o extrator descarta métodos de
    classe (CONTAINS 0.31); `INHERITS`; `TESTED_BY`; especificadores `.`/`..`; stems com
    ponto (`./outlet.entity`) já tratados, revisar aliases npm e workspaces.
+   Plano: `docs/superpowers/plans/2026-11-20-fase2-typescript.md`.
 2. **Go** (CALLS 0.13): o extrator grava texto de chamada multi-linha / literais de closure
    como alvo; `IMPORTS_FROM` no CRG aponta para o diretório do pacote; ligação no mesmo
    pacote (vários arquivos).
