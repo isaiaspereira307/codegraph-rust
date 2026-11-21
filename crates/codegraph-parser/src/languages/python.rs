@@ -31,11 +31,12 @@ impl PythonExtractor {
         tree: &Tree,
         content: &str,
         file_path: &str,
-        _policy: super::ExtractionPolicy,
+        policy: super::ExtractionPolicy,
     ) -> ExtractionResult {
         let root = tree.root_node();
         let scope = FileScope::collect(root, content);
         let mut collector = PythonCollector::new(content, file_path, scope);
+        collector.references = policy.references;
         collector.walk(root);
         ExtractionResult {
             nodes: collector.nodes,
@@ -50,7 +51,12 @@ impl super::LanguageExtractor for PythonExtractor {
     }
 
     fn supported_edge_types() -> &'static [EdgeType] {
-        &[EdgeType::Imports, EdgeType::Calls, EdgeType::Extends]
+        &[
+            EdgeType::Imports,
+            EdgeType::Calls,
+            EdgeType::Extends,
+            EdgeType::References,
+        ]
     }
 
     fn language() -> Language {
@@ -194,6 +200,8 @@ struct PythonCollector<'a> {
     classes: Vec<String>,
     /// Depth of statically dead branches around the walk position.
     dead: usize,
+    /// Whether value `References` edges are emitted (`ExtractionPolicy.references`).
+    references: bool,
 }
 
 impl<'a> PythonCollector<'a> {
@@ -207,6 +215,7 @@ impl<'a> PythonCollector<'a> {
             frames: Vec::new(),
             classes: Vec::new(),
             dead: 0,
+            references: true,
         }
     }
 
@@ -217,6 +226,10 @@ impl<'a> PythonCollector<'a> {
             "if_statement" => return self.if_statement(node),
             "import_statement" | "import_from_statement" => self.import(&node),
             "call" => self.call(&node),
+            "argument_list" => self.argument_references(&node),
+            "list" => self.list_references(&node),
+            "pair" => self.pair_reference(&node),
+            "assignment" => self.assignment_reference(&node),
             _ => {}
         }
         self.walk_children(node);
@@ -519,7 +532,17 @@ impl<'a> PythonCollector<'a> {
             _ => return,
         };
 
-        // The innermost `def`; a class body (or no frame) is the file.
+        self.push_edge(EdgeType::Calls, target, metadata, node);
+    }
+
+    /// An edge from the innermost `def`; a class body (or no frame) is the file.
+    fn push_edge(
+        &mut self,
+        edge_type: EdgeType,
+        to: String,
+        mut metadata: HashMap<String, String>,
+        node: &Node,
+    ) {
         let from = match self.frames.last().and_then(|f| f.caller) {
             Some(id) => id,
             None => {
@@ -529,11 +552,70 @@ impl<'a> PythonCollector<'a> {
         };
         self.edges.push(EdgeRelationship {
             from,
-            to: target,
-            edge_type: EdgeType::Calls,
+            to,
+            edge_type,
             metadata,
             span: Some(self.span_for(node)),
         });
+    }
+
+    /// CRG `_emit_reference_if_known`: a plain identifier naming a top-level def/class or a
+    /// `from` import references it, with the target of a receiver-less call.
+    fn reference(&mut self, node: &Node) {
+        if !self.references || node.kind() != "identifier" {
+            return;
+        }
+        let name = self.text(node);
+        if matches!(
+            name.as_str(),
+            "self" | "cls" | "super" | "None" | "True" | "False"
+        ) || name.chars().count() <= 1
+            || is_upper(&name)
+            || !(self.scope.defined.contains(&name) || self.scope.from_imports.contains_key(&name))
+        {
+            return;
+        }
+        let mut metadata = HashMap::from([
+            ("kind".to_string(), "value".to_string()),
+            ("source_file".to_string(), self.file_path.to_string()),
+        ]);
+        let target = self.bare_target(&name, &mut metadata);
+        self.push_edge(EdgeType::References, target, metadata, node);
+    }
+
+    /// Call arguments and class bases: identifiers and `key=identifier` values.
+    fn argument_references(&mut self, node: &Node) {
+        for child in named_children(node) {
+            if child.kind() == "keyword_argument" {
+                if let Some(value) = child.child_by_field_name("value") {
+                    self.reference(&value);
+                }
+            } else {
+                self.reference(&child);
+            }
+        }
+    }
+
+    fn list_references(&mut self, node: &Node) {
+        for child in named_children(node) {
+            self.reference(&child);
+        }
+    }
+
+    fn pair_reference(&mut self, node: &Node) {
+        if let Some(value) = node.child_by_field_name("value") {
+            self.reference(&value);
+        }
+    }
+
+    /// `obj.attr = f` and `obj[k] = f`; plain `h = f` is not a reference.
+    fn assignment_reference(&mut self, node: &Node) {
+        let is_member = node
+            .child_by_field_name("left")
+            .is_some_and(|l| matches!(l.kind(), "attribute" | "subscript"));
+        if let (true, Some(right)) = (is_member, node.child_by_field_name("right")) {
+            self.reference(&right);
+        }
     }
 
     /// `name()`: a `def` of an enclosing function, then a top-level def/class, then a name
@@ -643,6 +725,11 @@ impl<'a> PythonCollector<'a> {
             .find(|n| kinds.contains(&n.kind()));
         found.map(|n| self.text(&n))
     }
+}
+
+/// Python `str.isupper`: has a cased character and no lowercase one.
+fn is_upper(name: &str) -> bool {
+    name.chars().any(char::is_uppercase) && !name.chars().any(char::is_lowercase)
 }
 
 /// Truth of a Python integer literal (`0`, `0x0`, `1_000`); `1j` is complex: unknown.
@@ -943,7 +1030,9 @@ mod tests {
              def f():\n    b.helper()\n    bm.helper()\n    hh()\n    Thing.go()\n    Thing().go()\n    b.Thing.go()\n",
             "pkg/a.py",
         );
-        let calls: BTreeSet<(String, String, bool, bool)> = r
+        // One row per call (a multiset, receiver text included), so `Thing.go()` and
+        // `Thing().go()` are asserted separately.
+        let mut calls: Vec<(String, String, bool, String)> = r
             .edges
             .iter()
             .filter(|e| e.edge_type == EdgeType::Calls)
@@ -955,22 +1044,111 @@ mod tests {
                         .cloned()
                         .unwrap_or_default(),
                     e.metadata.contains_key(crg_shape::UNBOUND_ATTR),
-                    e.metadata.contains_key("receiver"),
+                    e.metadata.get("receiver").cloned().unwrap_or_default(),
                 )
             })
             .collect();
-        let expected: BTreeSet<(String, String, bool, bool)> = [
-            ("helper", "pkg|b", false, true),
-            ("helper", "pkg.b|", false, true),
-            ("hh", "pkg.b|helper", false, false),
-            ("go", "pkg.b|Thing", false, true),
-            ("Thing", "pkg.b|Thing", false, false),
-            ("go", "", true, true),
+        calls.sort();
+        let mut expected: Vec<(String, String, bool, String)> = [
+            ("helper", "pkg|b", false, "b"),
+            ("helper", "pkg.b|", false, "bm"),
+            ("hh", "pkg.b|helper", false, ""),
+            ("go", "pkg.b|Thing", false, "Thing"),
+            ("go", "pkg.b|Thing", false, "Thing()"),
+            ("Thing", "pkg.b|Thing", false, ""),
+            ("go", "", true, "b.Thing"),
         ]
         .iter()
-        .map(|(a, b, c, d)| (a.to_string(), b.to_string(), *c, *d))
+        .map(|(a, b, c, d)| (a.to_string(), b.to_string(), *c, d.to_string()))
         .collect();
+        expected.sort();
         assert_eq!(calls, expected);
+    }
+
+    #[test]
+    fn relative_imports_carry_the_dotted_module() {
+        let r = extract_py(
+            "from . import x\nfrom ..p import y\n\ndef f():\n    x.a()\n    y()\n",
+            "pkg/m.py",
+        );
+        assert_eq!(
+            edge_attr(&r, EdgeType::Calls, "a", crg_shape::PY_IMPORT_ATTR).as_deref(),
+            Some(".|x")
+        );
+        assert_eq!(
+            edge_attr(&r, EdgeType::Calls, "y", crg_shape::PY_IMPORT_ATTR).as_deref(),
+            Some("..p|y")
+        );
+    }
+
+    #[test]
+    fn local_class_instance_receiver_names_the_method() {
+        let r = extract_py(
+            "class X:\n    def m(self):\n        pass\n\ndef f():\n    X().m()\n",
+            "m.py",
+        );
+        // `X()` is itself a call to the class.
+        assert_eq!(calls_from(&r, "m.py::f"), names(&["m.py::X", "m.py::X.m"]));
+        assert!(edge_attr(&r, EdgeType::Calls, "m.py::X.m", crg_shape::UNBOUND_ATTR).is_none());
+    }
+
+    const REFERENCE_SOURCE: &str = "from x import imp\n\nclass Base:\n    pass\n\nclass C(Base, metaclass=Base):\n    pass\n\n\
+         def work():\n    pass\n\ndef use(items):\n    sorted(items, key=work)\n    run(work, cb=imp)\n    l = [work]\n    d = {'k': work}\n    obj.cb = work\n    h = work\n    t = (work,)\n    g(self, None, X, w2)\n    return work\n";
+
+    #[test]
+    fn value_references_follow_crg() {
+        let r = extract_py(REFERENCE_SOURCE, "m.py");
+        let mut refs: Vec<(String, String)> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::References)
+            .map(|e| (qualified(&r, &e.from), e.to.clone()))
+            .collect();
+        refs.sort();
+        let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+        // Base appears twice in the bases list (positional and `metaclass=`), origin File;
+        // `use` references work in (a one-letter name is filtered out) key=, an argument, a list, a dict value and `obj.cb = work`.
+        assert_eq!(
+            refs,
+            vec![
+                pair("m.py", "m.py::Base"),
+                pair("m.py", "m.py::Base"),
+                pair("m.py::use", "imp"),
+                pair("m.py::use", "m.py::work"),
+                pair("m.py::use", "m.py::work"),
+                pair("m.py::use", "m.py::work"),
+                pair("m.py::use", "m.py::work"),
+                pair("m.py::use", "m.py::work"),
+            ]
+        );
+        assert_eq!(
+            edge_attr(&r, EdgeType::References, "imp", crg_shape::PY_IMPORT_ATTR).as_deref(),
+            Some("x|imp")
+        );
+        assert!(edge_attr(&r, EdgeType::References, "imp", "receiver").is_none());
+    }
+
+    #[test]
+    fn references_policy_off_drops_them() {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(REFERENCE_SOURCE, None).unwrap();
+        let r = crate::languages::extract_for_language_at(
+            &Language::Python,
+            &tree,
+            REFERENCE_SOURCE,
+            "m.py",
+            "m.py",
+            crate::languages::ExtractionPolicy {
+                references: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(edges(&r, EdgeType::References).is_empty());
+        assert!(!edges(&r, EdgeType::Calls).is_empty());
     }
 
     #[test]
