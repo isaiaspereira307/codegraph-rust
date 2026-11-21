@@ -144,6 +144,18 @@ impl<'a> TypeScriptCollector<'a> {
                     NodeType::Class
                 };
                 let code = self.code_node(name, node_type, &node);
+                for base in self.bases(&node) {
+                    self.edges.push(EdgeRelationship {
+                        from: code.id,
+                        to: base,
+                        edge_type: EdgeType::Extends,
+                        metadata: HashMap::from([(
+                            "source_file".to_string(),
+                            self.file_path.to_string(),
+                        )]),
+                        span: Some(self.span_for(&node)),
+                    });
+                }
                 self.nodes.push(code);
             }
         } else if kind == "import_statement" {
@@ -294,6 +306,48 @@ impl<'a> TypeScriptCollector<'a> {
         let normalized = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
         let description: String = normalized.chars().take(MAX_TEST_DESCRIPTION_LEN).collect();
         (!description.is_empty()).then_some(description)
+    }
+
+    /// CRG `_get_bases`: the names in `extends`/`implements` clauses (both become CRG
+    /// `INHERITS`); of a generic base, its head. Other base forms (`ns.J`) name nothing.
+    fn bases(&self, node: &Node) -> Vec<String> {
+        let mut clauses = Vec::new();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "class_heritage" {
+                let mut inner = child.walk();
+                clauses.extend(child.children(&mut inner));
+            } else {
+                clauses.push(child);
+            }
+        }
+        let mut bases = Vec::new();
+        for clause in clauses {
+            if !matches!(
+                clause.kind(),
+                "extends_clause" | "implements_clause" | "extends_type_clause"
+            ) {
+                continue;
+            }
+            let mut cursor = clause.walk();
+            for sub in clause.children(&mut cursor) {
+                match sub.kind() {
+                    "identifier" | "type_identifier" | "nested_identifier" => {
+                        bases.push(self.node_text(&sub))
+                    }
+                    "generic_type" => {
+                        let mut inner = sub.walk();
+                        if let Some(head) = sub.children(&mut inner).find(|n| {
+                            matches!(n.kind(), "type_identifier" | "nested_type_identifier")
+                        }) {
+                            bases.push(self.node_text(&head));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        bases
     }
 
     /// CRG `_get_call_name`: the callee identifier, or the rightmost member of a member
@@ -516,5 +570,39 @@ mod tests {
         let r = extract_ts(&format!("it('{long}', () => {{}});\n"), "a.test.ts");
         let expected = format!("a.test.ts::it:{}@L1", "x".repeat(200));
         assert!(qualified_names(&r).contains(&expected));
+    }
+
+    #[test]
+    fn heritage_clauses_become_extends_edges() {
+        let r = extract_ts(
+            "class A extends B<T> implements I, ns.J {}\ninterface K extends L, M {}\n",
+            "m.ts",
+        );
+        let qn_of = |id: NodeId| {
+            r.nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .metadata
+                .attributes["qualified_name"]
+                .clone()
+        };
+        let mut got: Vec<(String, String)> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Extends)
+            .map(|e| (qn_of(e.from), e.to.clone()))
+            .collect();
+        got.sort();
+        let expected: Vec<(String, String)> = [
+            ("m.ts::A", "B"),
+            ("m.ts::A", "I"),
+            ("m.ts::K", "L"),
+            ("m.ts::K", "M"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        assert_eq!(got, expected);
     }
 }

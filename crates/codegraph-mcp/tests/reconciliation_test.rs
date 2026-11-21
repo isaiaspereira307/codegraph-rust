@@ -561,3 +561,21 @@ mod test_env {
         "/../../tests/support/env.rs"
     ));
 }
+
+#[tokio::test]
+async fn inherits_targets_stay_text() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(module_path!(), "::inherits_targets_stay_text"),
+        &[(
+            "base.ts",
+            "export class Base {}\nexport class Leaf extends Base {}\n",
+        )],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let inherits = edges_of(&indexer.graph_store(), dir.path(), "'INHERITS'")?;
+    assert_eq!(inherits, vec!["INHERITS|base.ts::Leaf|Base".to_string()]);
+    Ok(())
+}

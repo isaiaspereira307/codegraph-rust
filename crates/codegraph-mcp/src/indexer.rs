@@ -41,7 +41,7 @@ use std::collections::HashMap;
 /// The graph shape and resolver this build writes. It feeds the project input fingerprint
 /// and the ready marker, so a graph written by a build with another shape is rebuilt even
 /// when no source changed. Bump it whenever node kinds, edge kinds or resolution change.
-pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-1";
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-2";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {
@@ -1182,6 +1182,13 @@ impl ProjectIndexer {
                     }
                     targets.push(target);
                     resolution_provenance.push(("import", 1.0f64));
+                    continue;
+                }
+                // Like code-review-graph, a parsed base class stays the text the source wrote,
+                // even when the class it names is indexed.
+                if edge.edge_type == EdgeType::Extends && !edge.metadata.contains_key("analyzer") {
+                    targets.push(None);
+                    resolution_provenance.push(("inherits", 1.0f64));
                     continue;
                 }
                 let mut target = catalog.exact(edge, &[]);
