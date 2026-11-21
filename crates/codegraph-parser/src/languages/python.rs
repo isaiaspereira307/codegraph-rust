@@ -80,6 +80,8 @@ pub struct FileScope {
     pub type_checking: HashSet<String>,
     /// Unshadowed local names of the `typing` module (`t.TYPE_CHECKING`).
     pub typing_modules: HashSet<String>,
+    /// Every class of the file: leaf name -> dotted class chains (`Outer.Inner`) using it.
+    pub class_chains: HashMap<String, HashSet<String>>,
 }
 
 impl FileScope {
@@ -134,7 +136,29 @@ impl FileScope {
             }
         }
         scope.collect_type_checking(root, content);
+        scope.collect_class_chains(root, content, None);
         scope
+    }
+
+    /// Dotted chain of each class through its enclosing classes (functions are transparent),
+    /// as crg_shape names them.
+    fn collect_class_chains(&mut self, node: Node, content: &str, chain: Option<&str>) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "class_definition"
+                && let Some(name) = child.child_by_field_name("name")
+            {
+                let name = node_text(&name, content);
+                let path = chain.map_or_else(|| name.clone(), |c| format!("{c}.{name}"));
+                self.class_chains
+                    .entry(name)
+                    .or_default()
+                    .insert(path.clone());
+                self.collect_class_chains(child, content, Some(&path));
+            } else {
+                self.collect_class_chains(child, content, chain);
+            }
+        }
     }
 
     /// CRG `_python_type_checking_aliases`: only when the file imports `typing` or
@@ -206,8 +230,11 @@ struct PythonCollector<'a> {
     edges: Vec<EdgeRelationship>,
     scope: FileScope,
     frames: Vec<Frame>,
-    /// Leaf names of the classes around the walk position, innermost last.
+    /// Scopes of the classes around the walk position, innermost last: the leaf name, or
+    /// the full chain for a nested class whose leaf another class of the file shares.
     classes: Vec<String>,
+    /// Dotted chains (`Outer.Inner`) of the classes around the walk position.
+    class_chains: Vec<String>,
     /// Depth of statically dead branches around the walk position.
     dead: usize,
     /// Whether value `References` edges are emitted (`ExtractionPolicy.references`).
@@ -224,6 +251,7 @@ impl<'a> PythonCollector<'a> {
             scope,
             frames: Vec::new(),
             classes: Vec::new(),
+            class_chains: Vec::new(),
             dead: 0,
             references: true,
         }
@@ -457,8 +485,24 @@ impl<'a> PythonCollector<'a> {
             type_checking,
             typing_modules,
         });
-        self.classes.push(name);
+        let chain = match self.class_chains.last() {
+            Some(outer) => format!("{outer}.{name}"),
+            None => name.clone(),
+        };
+        let ambiguous = self
+            .scope
+            .class_chains
+            .get(&name)
+            .is_some_and(|chains| chains.len() > 1);
+        let class_scope = if ambiguous && !self.class_chains.is_empty() {
+            chain.clone()
+        } else {
+            name
+        };
+        self.classes.push(class_scope);
+        self.class_chains.push(chain);
         self.walk_children(node);
+        self.class_chains.pop();
         self.classes.pop();
         self.frames.pop();
     }
@@ -1289,6 +1333,28 @@ mod tests {
                 ("m.py::K.make", "m.py::K.build"),
                 ("m.py::K.nested", "m.py::K.make"),
                 ("m.py::K.build", "m.py::K.nested"),
+            ])
+        );
+    }
+
+    /// Inside a nested class `self.m()` and nested defs use the leaf scope (`Inner.m`),
+    /// unless another class of the file has the same leaf: then the full chain, as crg_shape.
+    #[test]
+    fn ambiguous_nested_class_leaf_uses_the_full_chain() {
+        let r = extract_py(
+            "class A:\n    class Inner:\n        def m(self):\n            return self.n()\n        def n(self):\n            def deep():\n                return self.m()\n            return deep()\n\
+             class B:\n    class Inner:\n        def m(self):\n            return self.m()\n\
+             class C:\n    class Solo:\n        def s(self):\n            return self.s()\n",
+            "m.py",
+        );
+        assert_eq!(
+            edges(&r, EdgeType::Calls),
+            set(&[
+                ("m.py::A.Inner.m", "m.py::A.Inner.n"),
+                ("m.py::A.Inner.deep", "m.py::A.Inner.m"),
+                ("m.py::A.Inner.n", "m.py::A.Inner.deep"),
+                ("m.py::B.Inner.m", "m.py::B.Inner.m"),
+                ("m.py::Solo.s", "m.py::Solo.s"),
             ])
         );
     }
