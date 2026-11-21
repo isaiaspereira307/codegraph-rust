@@ -191,6 +191,7 @@ pub fn shape_for_crg(
         parent_of.insert(i, parent);
     }
 
+    let python = language == Language::Python;
     // Dotted class path (`Outer.Inner`) of each member, outermost first.
     let mut paths: HashMap<usize, String> = HashMap::new();
     fn path_of(
@@ -265,9 +266,42 @@ pub fn shape_for_crg(
         })
         .collect();
 
+    // Python (CRG): inside a nested class the scope is only its leaf name, unless two classes
+    // of the file share that leaf under different chains; a class nested in a class hangs off
+    // the file, not off its parent.
+    let scopes: HashMap<usize, String> = containers
+        .iter()
+        .map(|&p| {
+            let scope = if !python || !parent_of.contains_key(&p) {
+                paths[&p].clone()
+            } else {
+                let leaf = result.nodes[p].name.as_str();
+                let ambiguous = containers.iter().any(|&c| {
+                    c != p && result.nodes[c].name.as_str() == leaf && paths[&c] != paths[&p]
+                });
+                if ambiguous {
+                    paths[&p].clone()
+                } else {
+                    leaf.to_string()
+                }
+            };
+            (p, scope)
+        })
+        .collect();
+
     for &i in &members {
-        let qualified = format!("{file_path}::{}", paths[&i]);
+        let mut qualified = format!("{file_path}::{}", paths[&i]);
         let (parent, mut from) = match parent_of.get(&i) {
+            Some(Parent::Node(p)) if python => {
+                let scope = scopes[p].clone();
+                qualified = format!("{file_path}::{scope}.{}", result.nodes[i].name);
+                let from = if result.nodes[i].node_type == Some(NodeType::Class) {
+                    file_node.id
+                } else {
+                    result.nodes[*p].id
+                };
+                (Some(scope), from)
+            }
             Some(Parent::Node(p)) => (Some(paths[p].clone()), result.nodes[*p].id),
             Some(Parent::Name(owner)) => (Some(owner.clone()), file_node.id),
             None => (None, file_node.id),
@@ -320,6 +354,15 @@ pub fn shape_for_crg(
         );
         attributes.insert("is_test".into(), "true".into());
         node.node_type = Some(NodeType::Other("Test".into()));
+    }
+
+    if test_detection::is_test_file(rel_path) {
+        for &i in &members {
+            result.nodes[i]
+                .metadata
+                .attributes
+                .insert("is_test".into(), "true".into());
+        }
     }
 
     for edge in &mut result.edges {
@@ -417,11 +460,98 @@ mod tests {
         );
         let qns = qualified_names(&r);
         assert!(qns.contains("m.py::Outer.Inner"));
-        assert!(qns.contains("m.py::Outer.Inner.go"));
+        assert!(qns.contains("m.py::Inner.go"));
         assert!(contains_edges(&r).contains(&(
             "m.py::Outer.Inner".to_string(),
-            "m.py::Outer.Inner.go".to_string()
+            "m.py::Inner.go".to_string()
         )));
+    }
+
+    #[test]
+    fn python_nested_classes_scope_members_by_leaf() {
+        let r = extract_python(
+            "class Child:\n    class Inner:\n        def go(self):\n            pass\n        class Deep:\n            pass\n",
+        );
+        let qns = qualified_names(&r);
+        for q in [
+            "m.py::Child",
+            "m.py::Child.Inner",
+            "m.py::Inner.go",
+            "m.py::Inner.Deep",
+        ] {
+            assert!(qns.contains(q), "missing {q}: {qns:?}");
+        }
+        let edges = contains_edges(&r);
+        for (a, b) in [
+            ("m.py", "m.py::Child"),
+            ("m.py", "m.py::Child.Inner"),
+            ("m.py::Child.Inner", "m.py::Inner.go"),
+            ("m.py", "m.py::Inner.Deep"),
+        ] {
+            assert!(
+                edges.contains(&(a.to_string(), b.to_string())),
+                "missing {a}->{b}: {edges:?}"
+            );
+        }
+        let go = r.nodes.iter().find(|n| n.name.as_str() == "go").unwrap();
+        assert_eq!(go.metadata.attributes["parent_name"], "Inner");
+    }
+
+    #[test]
+    fn python_ambiguous_leaf_keeps_the_full_chain() {
+        let r = extract_python(
+            "class A:\n    class In:\n        def go(self): pass\nclass B:\n    class In:\n        def go(self): pass\n",
+        );
+        let qns = qualified_names(&r);
+        assert!(qns.contains("m.py::A.In.go"), "{qns:?}");
+        assert!(qns.contains("m.py::B.In.go"), "{qns:?}");
+        assert!(
+            contains_edges(&r).contains(&("m.py::A.In".to_string(), "m.py::A.In.go".to_string()))
+        );
+        let go = r
+            .nodes
+            .iter()
+            .find(|n| {
+                n.metadata
+                    .attributes
+                    .get("qualified_name")
+                    .map(String::as_str)
+                    == Some("m.py::A.In.go")
+            })
+            .unwrap();
+        assert_eq!(go.metadata.attributes["parent_name"], "A.In");
+    }
+
+    #[test]
+    fn every_node_of_a_test_file_is_flagged() {
+        let source =
+            "class TestA:\n    def setUp(self):\n        pass\n\ndef helper():\n    pass\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let r = crate::languages::extract_for_language_at(
+            &Language::Python,
+            &tree,
+            source,
+            "./tests/test_m.py",
+            "tests/test_m.py",
+            Default::default(),
+        )
+        .unwrap();
+        for name in ["TestA", "setUp", "helper"] {
+            let n = r.nodes.iter().find(|n| n.name.as_str() == name).unwrap();
+            assert_eq!(n.metadata.attributes["is_test"], "true", "{name}");
+        }
+        let helper = r
+            .nodes
+            .iter()
+            .find(|n| n.name.as_str() == "helper")
+            .unwrap();
+        assert_eq!(helper.node_type, Some(NodeType::Function));
+        let class = r.nodes.iter().find(|n| n.name.as_str() == "TestA").unwrap();
+        assert_eq!(class.node_type, Some(NodeType::Class));
     }
 
     #[test]
@@ -536,7 +666,8 @@ mod tests {
             .find(|n| n.name.as_str() == "helper")
             .unwrap();
         assert_eq!(helper.node_type, Some(NodeType::Function));
-        assert!(!helper.metadata.attributes.contains_key("is_test"));
+        // Every node of a test file is flagged, whatever its kind.
+        assert_eq!(helper.metadata.attributes["is_test"], "true");
         assert_eq!(id_node_type(helper), "Function");
         // Calls made from a test keep their source node.
         assert!(
