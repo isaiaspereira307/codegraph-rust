@@ -268,6 +268,32 @@ reportada.
 
 ---
 
+## Fase 2.5 — Pré-requisitos do MVP
+
+Itens pequenos que bloqueiam a Fase 3. As demais linguagens da Fase 2 (item 6) ficam sob
+demanda, depois do MVP.
+
+1. **IDs estáveis por caminho**: canonicalizar o caminho de cada arquivo relativo à raiz do
+   repositório antes de gerar o ID do nó, para que indexar por `.`, por caminho relativo ou
+   por caminho absoluto produza os mesmos IDs (hoje os sufixos `@L` mudam em execuções
+   mistas). Sem isso, o `detect_changes` (git hook com caminho relativo, servidor MCP com
+   absoluto) não cruza os arquivos do diff com os nós do banco. Teste: indexar o mesmo
+   fixture pelos três caminhos e comparar os conjuntos de IDs.
+2. **`line` das arestas**: preencher a linha da chamada/import em CALLS e IMPORTS_FROM (hoje
+   0, e o `TESTED_BY` herda o 0), a partir do `source_span`, como o CRG grava. O
+   `get_review_context` e os snippets dependem disso. Incluir `line` na comparação do
+   harness de paridade.
+3. **Conflito com o CRG instalado**: o `code-review-graph` 2.3.7 no PATH grava schema v9 pelo
+   hook de SessionStart, e o Rust recusa abrir. Definir a convivência: desligar o hook do CRG
+   nos repositórios que usam o Rust (ou atualizar o CRG para v15) e fazer o erro de versão
+   do Rust dizer o que fazer, em vez de só recusar.
+
+Critério de aceite: os mesmos IDs de nó para os três modos de caminho; `line` ≠ 0 em
+CALLS/IMPORTS_FROM com concordância ≥ 95% com o CRG no corpus; `codegraph` abre (ou explica
+como resolver) um repositório que já tem banco do CRG.
+
+---
+
 ## Fase 3 — Núcleo de revisão (MVP usável)
 
 Ferramentas MCP e comandos CLI equivalentes aos do CRG:
@@ -340,5 +366,6 @@ harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
 1. ~~Fechar a Fase 0~~ ✅.
 2. ~~Fase 1 (storage)~~ ✅.
 3. Harness da Fase 2 antes de qualquer ferramenta nova, para medir regressões desde o início.
-4. Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code.
-5. Fases 4 e 5 conforme o uso real pedir.
+4. Fase 2.5 (IDs canônicos, `line` das arestas, convivência com o CRG v9).
+5. Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code.
+6. Fases 4 e 5 conforme o uso real pedir.
