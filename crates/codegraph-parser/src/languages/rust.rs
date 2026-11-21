@@ -196,13 +196,13 @@ impl<'a> Collector<'a> {
 
             // Imports (use)
             "use_declaration" => {
-                let text = self.node_text(&node);
-                let imports = parse_use_declaration(text.as_ref());
-                let name = imports
-                    .iter()
-                    .map(|i| i.full_path.clone())
-                    .next()
-                    .unwrap_or_else(|| "use".into());
+                let imports: Vec<String> = flatten_use(node, self.content, &[])
+                    .into_iter()
+                    .map(|(_, path)| path)
+                    .collect();
+                let Some(name) = imports.first().cloned() else {
+                    return;
+                };
                 let loc = self.location(&node);
                 let mut code =
                     CodeNode::new(name, Some(NodeType::Import), Some(Language::Rust), loc)
@@ -223,7 +223,7 @@ impl<'a> Collector<'a> {
                 for import in &imports {
                     let edge = EdgeRelationship {
                         from: import_node_id,
-                        to: import.full_path.clone(),
+                        to: import.clone(),
                         edge_type: EdgeType::Imports,
                         metadata: {
                             let mut meta = HashMap::new();
@@ -917,70 +917,64 @@ fn is_in_rust_dead_guard(node: Node, content: &str) -> bool {
     false
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-struct ImportItem {
-    full_path: String,
-    alias: Option<String>,
-    is_glob: bool,
-}
-
-fn parse_use_declaration(text: &str) -> Vec<ImportItem> {
-    // Handles common forms: use a::b; use a::b as c; use a::{b, c as d, *}; use super::a; use crate::x::y;
-    let mut s = text.trim();
-    if s.starts_with("use ") {
-        s = &s[4..];
-    }
-    if let Some(idx) = s.rfind(';') {
-        s = &s[..idx];
-    }
-
-    // Brace group
-    if let Some(open) = s.find('{') {
-        let prefix = s[..open].trim().trim_end_matches("::");
-        let rest = &s[open + 1..];
-        let close = rest.rfind('}').unwrap_or(rest.len());
-        let inside = &rest[..close];
-        let mut out = Vec::new();
-        for part in inside.split(',') {
-            let p = part.trim();
-            if p.is_empty() {
-                continue;
-            }
-            if p == "*" {
-                out.push(ImportItem {
-                    full_path: format!("{}::*", prefix),
-                    alias: None,
-                    is_glob: true,
-                });
-                continue;
-            }
-            let (name, alias) = split_alias(p);
-            out.push(ImportItem {
-                full_path: format!("{}::{}", prefix, name),
-                alias,
-                is_glob: false,
-            });
+/// CRG `_parse_rust_use_node`: a `use` tree flattened into `(local name, original path)`
+/// pairs. A glob has no `path` field, so a top-level `use a::*` yields nothing and a nested one
+/// (`use a::{b::*}`) yields the group prefix.
+fn flatten_use(node: Node, content: &str, prefix: &[String]) -> Vec<(String, String)> {
+    let joined = |extra: &[String]| [prefix, extra].concat().join("::");
+    match node.kind() {
+        "use_declaration" => node
+            .child_by_field_name("argument")
+            .map(|argument| flatten_use(argument, content, prefix))
+            .unwrap_or_default(),
+        "identifier" | "type_identifier" => {
+            let name = node.utf8_text(content.as_bytes()).unwrap_or("").to_string();
+            vec![(name.clone(), joined(&[name]))]
         }
-        return out;
-    }
-
-    let (name, alias) = split_alias(s.trim());
-    vec![ImportItem {
-        full_path: name.to_string(),
-        alias,
-        is_glob: name.ends_with("::*"),
-    }]
-}
-
-fn split_alias(s: &str) -> (String, Option<String>) {
-    // e.g., "foo as bar" -> ("foo", Some("bar"))
-    if let Some(idx) = s.rfind(" as ") {
-        (
-            s[..idx].trim().to_string(),
-            Some(s[idx + 4..].trim().to_string()),
-        )
-    } else {
-        (s.trim().to_string(), None)
+        "self" => match prefix.last() {
+            Some(last) => vec![(last.clone(), joined(&[]))],
+            None => Vec::new(),
+        },
+        "scoped_identifier" | "scoped_type_identifier" => {
+            let segments = rust_path_segments(node, content);
+            match segments.last() {
+                Some(last) => vec![(last.clone(), joined(&segments))],
+                None => Vec::new(),
+            }
+        }
+        "use_as_clause" => {
+            let segments = node
+                .child_by_field_name("path")
+                .map(|path| rust_path_segments(path, content))
+                .unwrap_or_default();
+            match node.child_by_field_name("alias") {
+                Some(alias) if !segments.is_empty() => vec![(
+                    alias
+                        .utf8_text(content.as_bytes())
+                        .unwrap_or("")
+                        .to_string(),
+                    joined(&segments),
+                )],
+                _ => Vec::new(),
+            }
+        }
+        "scoped_use_list" => {
+            let mut nested = prefix.to_vec();
+            if let Some(path) = node.child_by_field_name("path") {
+                nested.extend(rust_path_segments(path, content));
+            }
+            node.child_by_field_name("list")
+                .map(|list| flatten_use(list, content, &nested))
+                .unwrap_or_default()
+        }
+        "use_list" => {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .flat_map(|child| flatten_use(child, content, prefix))
+                .collect()
+        }
+        "use_wildcard" if !prefix.is_empty() => vec![("*".into(), joined(&[]))],
+        _ => Vec::new(),
     }
 }
 
@@ -1325,5 +1319,31 @@ mod tests {
             "m.rs",
         );
         assert_eq!(calls_from(&r, "m.rs::f"), set(&["b", "c", "d"]));
+    }
+
+    #[test]
+    fn use_trees_flatten_like_crg() {
+        let r = extract_rust(
+            "use std::collections::HashMap;\nuse a::{b, c::D, self as e};\nuse a::{self};\n\
+             use x::Y as Z;\nuse p::{q::{r, s}};\nuse super::*;\nuse std::io::*;\nuse k::{l::*};\n",
+            "m.rs",
+        );
+        let imports = edges(&r, EdgeType::Imports);
+        let targets: BTreeSet<_> = imports.iter().map(|(_, to)| to.clone()).collect();
+        assert_eq!(
+            targets,
+            set(&[
+                "std::collections::HashMap",
+                "a::b",
+                "a::c::D",
+                "a::self",
+                "a",
+                "x::Y",
+                "p::q::r",
+                "p::q::s",
+                "k",
+            ])
+        );
+        assert!(imports.iter().all(|(from, _)| from == "m.rs"));
     }
 }
