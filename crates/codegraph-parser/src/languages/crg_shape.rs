@@ -24,6 +24,10 @@ pub const TEST_RUNNER_ATTR: &str = "crg_test_runner";
 /// `@` (Java `@Test`); test detection reads them like CRG's `decorators`.
 pub const DECORATORS_ATTR: &str = "decorators";
 
+/// Set by an extractor on an edge whose target text code-review-graph keeps; the indexer
+/// only binds it to a symbol with that exact alias.
+pub const VERBATIM_TARGET_ATTR: &str = "crg_verbatim_target";
+
 /// The node kind (`{:?}` of its `NodeType`) a node had before this pass turned it into a test.
 pub const PRE_SHAPE_KIND_ATTR: &str = "pre_shape_kind";
 

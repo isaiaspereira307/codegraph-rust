@@ -1,9 +1,10 @@
+use super::crg_shape;
 use codegraph_core::{
     CodeNode, EdgeRelationship, EdgeType, ExtractionResult, Language, Location, NodeId, NodeType,
     Span,
 };
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tree_sitter::{Node, Tree, TreeCursor};
 
 /// Advanced Rust AST extractor using tree-sitter-rust.
@@ -24,6 +25,8 @@ struct WalkContext {
     module_path: Vec<String>,
     current_impl_for: Option<String>,
     current_impl_trait: Option<String>,
+    /// The trait whose body is being walked: its signatures and default methods belong to it.
+    current_trait: Option<String>,
 }
 
 impl RustExtractor {
@@ -45,6 +48,7 @@ impl RustExtractor {
     ) -> ExtractionResult {
         let mut collector = Collector::new(content, file_path);
         collector.references = policy.references;
+        collector.defined_names = defined_names(tree.root_node(), content);
         let mut cursor = tree.walk();
         collector.walk(&mut cursor, WalkContext::default());
         collector.into_result()
@@ -77,6 +81,11 @@ struct Collector<'a> {
     edges: Vec<EdgeRelationship>,
     current_node_id: Option<NodeId>, // Track current context for edge relationships
     references: bool,
+    /// CRG `defined_names`: struct/enum/trait/fn names declared at the top of the file.
+    defined_names: HashSet<String>,
+    /// `impl Trait for Type` blocks, as (type name, trait path segments), turned into
+    /// `IMPLEMENTS` edges once every type node of the file exists.
+    pending_implements: Vec<(String, Vec<String>, Span)>,
 }
 
 impl<'a> Collector<'a> {
@@ -88,6 +97,8 @@ impl<'a> Collector<'a> {
             edges: Vec::new(),
             current_node_id: None,
             references: true,
+            defined_names: HashSet::new(),
+            pending_implements: Vec::new(),
         }
     }
 
@@ -99,7 +110,45 @@ impl<'a> Collector<'a> {
     }
 
     /// REVOLUTIONARY: Return both nodes and edges from single AST traversal
-    fn into_result(self) -> ExtractionResult {
+    fn into_result(mut self) -> ExtractionResult {
+        // Like code-review-graph, `impl Trait for Type` links the type to the trait: the
+        // file's own trait when it is a top-level name here, otherwise the path as written.
+        for (type_name, trait_segments, span) in std::mem::take(&mut self.pending_implements) {
+            let Some(from) = self
+                .nodes
+                .iter()
+                .find(|n| {
+                    n.name.as_str() == type_name
+                        && matches!(
+                            n.node_type,
+                            Some(NodeType::Struct | NodeType::Enum | NodeType::Trait)
+                        )
+                })
+                .map(|n| n.id)
+            else {
+                continue;
+            };
+            let mut metadata = HashMap::from([
+                ("source_file".to_string(), self.file_path.to_string()),
+                ("implements_type".to_string(), "trait_impl".to_string()),
+            ]);
+            let to = match trait_segments.as_slice() {
+                [name] if self.defined_names.contains(name) => {
+                    format!("{}::{name}", self.file_path)
+                }
+                _ => {
+                    metadata.insert(crg_shape::VERBATIM_TARGET_ATTR.into(), "true".into());
+                    trait_segments.join("::")
+                }
+            };
+            self.edges.push(EdgeRelationship {
+                from,
+                to,
+                edge_type: EdgeType::Implements,
+                metadata,
+                span: Some(span),
+            });
+        }
         ExtractionResult {
             nodes: self.nodes,
             edges: self.edges,
@@ -111,23 +160,9 @@ impl<'a> Collector<'a> {
 
         match node.kind() {
             // Modules
+            // Like code-review-graph, a module is not a node; its items keep the file scope.
             "mod_item" => {
                 if let Some(name) = self.child_text_by_kinds(node, &["identifier"]) {
-                    let loc = self.location(&node);
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Module),
-                        Some(Language::Rust),
-                        loc,
-                    )
-                    .with_content(self.node_text(&node));
-                    let qn = self.qname(&ctx.module_path, &name);
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "module".into());
-                    code.metadata.attributes.insert("qualified_name".into(), qn);
-                    self.nodes.push(code);
-
                     // push module path for nested items only if there's a body
                     let has_body = node.child_by_field_name("body").is_some();
                     if has_body {
@@ -219,6 +254,13 @@ impl<'a> Collector<'a> {
                         .attributes
                         .insert("qualified_name".into(), self.qname(&ctx.module_path, &name));
                     self.nodes.push(code);
+
+                    let mut next_ctx = ctx.clone();
+                    next_ctx.current_trait = Some(name);
+                    next_ctx.current_impl_for = None;
+                    next_ctx.current_impl_trait = None;
+                    self.walk_children(cursor, &next_ctx);
+                    return;
                 }
             }
 
@@ -279,94 +321,38 @@ impl<'a> Collector<'a> {
                 }
             }
 
-            // Impl (inherent or trait impl)
+            // Like code-review-graph, an impl is not a node: it only scopes its methods to the
+            // type it names, wherever it is written.
             "impl_item" => {
-                let loc = self.location(&node);
-                let text = self.node_text(&node);
                 let impl_info = parse_impl_signature(&node, self.content)
-                    .unwrap_or_else(|| parse_impl_signature_text(&text));
-
-                let mut code = CodeNode::new(
-                    impl_info.for_type.clone().unwrap_or_else(|| "impl".into()),
-                    Some(NodeType::Other("impl".into())),
-                    Some(Language::Rust),
-                    loc,
-                )
-                .with_content(text.clone());
-                let impl_span = self.span_for(&node);
-                code.span = Some(impl_span.clone());
-                if let Some(for_type) = &impl_info.for_type {
-                    code.metadata
-                        .attributes
-                        .insert("impl_for".into(), for_type.clone());
-
-                    // Add reference to the 'for' type
-                    if let Some(type_node) =
-                        node.child_by_field_name("type").filter(|_| self.references)
-                    {
-                        self.edges.push(EdgeRelationship {
-                            from: code.id,
-                            to: for_type.clone(),
-                            edge_type: EdgeType::References,
-                            metadata: HashMap::from([("kind".into(), "impl_for".into())]),
-                            span: Some(self.span_for(&type_node)),
-                        });
+                    .unwrap_or_else(|| parse_impl_signature_text(&self.node_text(&node)));
+                let type_name = node
+                    .child_by_field_name("type")
+                    .map(|t| rust_path_segments(t, self.content))
+                    .and_then(|segments| segments.last().cloned());
+                if let (Some(type_name), Some(trait_node)) =
+                    (&type_name, node.child_by_field_name("trait"))
+                {
+                    let trait_segments = rust_path_segments(trait_node, self.content);
+                    if !trait_segments.is_empty() {
+                        self.pending_implements.push((
+                            type_name.clone(),
+                            trait_segments,
+                            self.span_for(&node),
+                        ));
                     }
                 }
-                if let Some(trait_name) = &impl_info.trait_name {
-                    code.metadata
-                        .attributes
-                        .insert("impl_trait".into(), trait_name.clone());
 
-                    // Add reference to the trait
-                    if let Some(trait_node) = node
-                        .child_by_field_name("trait")
-                        .filter(|_| self.references)
-                    {
-                        self.edges.push(EdgeRelationship {
-                            from: code.id,
-                            to: trait_name.clone(),
-                            edge_type: EdgeType::References,
-                            metadata: HashMap::from([("kind".into(), "impl_trait".into())]),
-                            span: Some(self.span_for(&trait_node)),
-                        });
-                    }
-                }
-                code.metadata.attributes.insert(
-                    "inherent".into(),
-                    json!(impl_info.trait_name.is_none()).to_string(),
-                );
-                code.metadata
-                    .attributes
-                    .insert("generics".into(), json!(impl_info.generics).to_string());
-                code.metadata
-                    .attributes
-                    .insert("lifetimes".into(), json!(impl_info.lifetimes).to_string());
-                code.metadata.attributes.insert(
-                    "qualified_name".into(),
-                    self.qname(&ctx.module_path, code.name.as_str()),
-                );
-                self.nodes.push(code);
-
-                // Walk methods inside impl with context
                 let mut next_ctx = ctx.clone();
                 next_ctx.current_impl_for = impl_info.for_type;
                 next_ctx.current_impl_trait = impl_info.trait_name;
-
-                if cursor.goto_first_child() {
-                    loop {
-                        self.walk(cursor, next_ctx.clone());
-                        if !cursor.goto_next_sibling() {
-                            break;
-                        }
-                    }
-                    cursor.goto_parent();
-                }
-                return; // done own recursion
+                next_ctx.current_trait = None;
+                self.walk_children(cursor, &next_ctx);
+                return;
             }
 
             // Functions (includes methods inside impl)
-            "function_item" => {
+            "function_item" | "function_signature_item" => {
                 if let Some(name) = self.child_text_by_kinds(node, &["identifier"]) {
                     let loc = self.location(&node);
                     let mut code = CodeNode::new(
@@ -375,10 +361,18 @@ impl<'a> Collector<'a> {
                         Some(Language::Rust),
                         loc,
                     )
-                    .with_content(self.node_text(&node))
-                    .with_complexity(
-                        crate::complexity::calculate_cyclomatic_complexity(&node, self.content),
-                    );
+                    .with_content(self.node_text(&node));
+                    if node.kind() == "function_item" {
+                        code = code.with_complexity(
+                            crate::complexity::calculate_cyclomatic_complexity(&node, self.content),
+                        );
+                    }
+                    let decorators = rust_attributes(node, self.content);
+                    if !decorators.is_empty() {
+                        code.metadata
+                            .attributes
+                            .insert(crg_shape::DECORATORS_ATTR.into(), decorators.join(","));
+                    }
                     let function_span = self.span_for(&node);
                     code.span = Some(function_span.clone());
                     let (generics, lifetimes) = self.collect_generics_and_lifetimes(node);
@@ -407,10 +401,12 @@ impl<'a> Collector<'a> {
                         "has_unsafe_block".into(),
                         json!(has_unsafe_block).to_string(),
                     );
-                    if let Some(for_type) = &ctx.current_impl_for {
+                    if let Some(owner) =
+                        ctx.current_impl_for.as_ref().or(ctx.current_trait.as_ref())
+                    {
                         code.metadata
                             .attributes
-                            .insert("method_of".into(), for_type.clone());
+                            .insert("method_of".into(), owner.clone());
                     }
                     if let Some(trait_name) = &ctx.current_impl_trait {
                         code.metadata
@@ -427,31 +423,6 @@ impl<'a> Collector<'a> {
 
                     self.nodes.push(code);
                 }
-            }
-
-            // Macros
-            "macro_invocation" => {
-                // Try to get macro name: often in child field "macro" -> identifier or scoped_identifier
-                let macro_name = self
-                    .child_by_field_text(node, "macro")
-                    .or_else(|| {
-                        self.child_text_by_kinds(node, &["identifier", "scoped_identifier"])
-                    })
-                    .unwrap_or_else(|| "macro".into());
-                let loc = self.location(&node);
-                let mut code = CodeNode::new(
-                    macro_name,
-                    Some(NodeType::Other("macro_invocation".into())),
-                    Some(Language::Rust),
-                    loc,
-                )
-                .with_content(self.node_text(&node));
-                code.span = Some(self.span_for(&node));
-                code.metadata.attributes.insert(
-                    "qualified_name".into(),
-                    self.qname(&ctx.module_path, code.name.as_str()),
-                );
-                self.nodes.push(code);
             }
 
             // Function calls (extract edges during AST traversal for MAXIMUM SPEED)
@@ -544,10 +515,6 @@ impl<'a> Collector<'a> {
         None
     }
 
-    fn child_by_field_text(&self, node: Node, field: &str) -> Option<String> {
-        node.child_by_field_name(field).map(|n| self.node_text(&n))
-    }
-
     fn collect_generics_and_lifetimes(&self, node: Node) -> (Vec<String>, Vec<String>) {
         let mut generics = Vec::new();
         let mut lifetimes = Vec::new();
@@ -614,10 +581,29 @@ impl<'a> Collector<'a> {
     }
 
     fn qname_with_impl(&self, ctx: &WalkContext, name: &str) -> String {
-        match (&ctx.current_impl_for, &ctx.current_impl_trait) {
-            (Some(t), Some(tr)) => format!("{}::impl<{} for {}>::{}", self.file_path, tr, t, name),
-            (Some(t), None) => format!("{}::impl<{}>::{}", self.file_path, t, name),
+        match (
+            &ctx.current_impl_for,
+            &ctx.current_impl_trait,
+            &ctx.current_trait,
+        ) {
+            (Some(t), Some(tr), _) => {
+                format!("{}::impl<{} for {}>::{}", self.file_path, tr, t, name)
+            }
+            (Some(t), None, _) => format!("{}::impl<{}>::{}", self.file_path, t, name),
+            (None, _, Some(tr)) => format!("{}::trait<{}>::{}", self.file_path, tr, name),
             _ => self.qname(&ctx.module_path, name),
+        }
+    }
+
+    fn walk_children(&mut self, cursor: &mut TreeCursor, ctx: &WalkContext) {
+        if cursor.goto_first_child() {
+            loop {
+                self.walk(cursor, ctx.clone());
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+            cursor.goto_parent();
         }
     }
 
@@ -731,6 +717,74 @@ impl<'a> Collector<'a> {
             }
         }
     }
+}
+
+/// CRG `_rust_path_segments`: the semantic segments of a Rust path, without type arguments.
+fn rust_path_segments(node: Node, content: &str) -> Vec<String> {
+    let text = |n: Node| n.utf8_text(content.as_bytes()).unwrap_or("").to_string();
+    match node.kind() {
+        "identifier" | "type_identifier" | "crate" | "self" | "super" => vec![text(node)],
+        "scoped_identifier" | "scoped_type_identifier" => {
+            let mut segments = node
+                .child_by_field_name("path")
+                .map(|p| rust_path_segments(p, content))
+                .unwrap_or_default();
+            if let Some(name) = node.child_by_field_name("name") {
+                segments.extend(rust_path_segments(name, content));
+            }
+            segments
+        }
+        "generic_type" => node
+            .child_by_field_name("type")
+            .map(|t| rust_path_segments(t, content))
+            .unwrap_or_default(),
+        "generic_function" => node
+            .child_by_field_name("function")
+            .map(|f| rust_path_segments(f, content))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// CRG decorators of a Rust item: the `#[...]` attributes right before it, nearest first,
+/// without the `#[`/`#![` and `]` wrapper.
+fn rust_attributes(node: Node, content: &str) -> Vec<String> {
+    let mut attributes = Vec::new();
+    let mut sibling = node.prev_sibling();
+    while let Some(attribute) = sibling.filter(|s| s.kind() == "attribute_item") {
+        let text = attribute.utf8_text(content.as_bytes()).unwrap_or("").trim();
+        let inner = text
+            .strip_prefix("#![")
+            .or_else(|| text.strip_prefix("#["))
+            .map(str::trim_end)
+            .unwrap_or(text);
+        attributes.push(inner.strip_suffix(']').unwrap_or(inner).trim().to_string());
+        sibling = attribute.prev_sibling();
+    }
+    attributes
+}
+
+/// CRG `defined_names` for Rust: struct/enum/trait/fn names that are direct children of the
+/// file root.
+fn defined_names(root: Node, content: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut cursor = root.walk();
+    for item in root.named_children(&mut cursor) {
+        if !matches!(
+            item.kind(),
+            "struct_item"
+                | "enum_item"
+                | "trait_item"
+                | "function_item"
+                | "function_signature_item"
+        ) {
+            continue;
+        }
+        if let Some(name) = item.child_by_field_name("name") {
+            names.insert(name.utf8_text(content.as_bytes()).unwrap_or("").to_string());
+        }
+    }
+    names
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -955,4 +1009,118 @@ fn child_text_by_kinds(node: Node, content: &str, kinds: &[&str]) -> Option<Stri
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use codegraph_core::{EdgeType, ExtractionResult, Language, NodeType};
+    use std::collections::BTreeSet;
+
+    fn extract_rust(source: &str, path: &str) -> ExtractionResult {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        crate::languages::extract_for_language_at(
+            &Language::Rust,
+            &tree,
+            source,
+            path,
+            path,
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn qualified(result: &ExtractionResult, id: &codegraph_core::NodeId) -> String {
+        result
+            .nodes
+            .iter()
+            .find(|n| &n.id == id)
+            .and_then(|n| n.metadata.attributes.get("qualified_name").cloned())
+            .unwrap_or_default()
+    }
+
+    /// `(source, target)` of every edge of `kind`.
+    fn edges(result: &ExtractionResult, kind: EdgeType) -> BTreeSet<(String, String)> {
+        result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == kind)
+            .map(|e| (qualified(result, &e.from), e.to.clone()))
+            .collect()
+    }
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn impl_mod_and_macros_are_not_nodes_and_methods_hang_off_the_type() {
+        let r = extract_rust(
+            "pub trait Repo { fn find(&self); fn save(&mut self) {} }\n\
+             pub struct Mem;\nimpl Mem { pub fn new() -> Self { Mem } }\n\
+             impl Repo for Mem { fn find(&self) { println!(\"x\"); } }\n\
+             #[cfg(test)]\nmod tests { #[test] fn t() { assert!(true); } }\n",
+            "m.rs",
+        );
+        let names: BTreeSet<_> = r
+            .nodes
+            .iter()
+            .filter_map(|n| n.metadata.attributes.get("qualified_name").cloned())
+            .collect();
+        assert_eq!(
+            names,
+            set(&[
+                "m.rs",
+                "m.rs::Repo",
+                "m.rs::Repo.find",
+                "m.rs::Repo.save",
+                "m.rs::Mem",
+                "m.rs::Mem.new",
+                "m.rs::Mem.find",
+                "m.rs::t",
+            ])
+        );
+        let contains = edges(&r, EdgeType::Contains);
+        assert!(contains.contains(&("m.rs::Mem".into(), "m.rs::Mem.find".into())));
+        assert!(contains.contains(&("m.rs::Repo".into(), "m.rs::Repo.find".into())));
+        assert_eq!(
+            edges(&r, EdgeType::Implements),
+            BTreeSet::from([("m.rs::Mem".into(), "m.rs::Repo".into())])
+        );
+    }
+
+    #[test]
+    fn test_attributes_make_tests() {
+        let r = extract_rust(
+            "#[test]\nfn a() {}\n#[tokio::test]\nasync fn b() {}\n#[test]\n// gap\nfn c() {}\n\
+             #[inline]\nfn d() {}\n",
+            "src/m.rs",
+        );
+        let tests: BTreeSet<_> = r
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == Some(NodeType::Other("Test".into())))
+            .map(|n| n.name.to_string())
+            .collect();
+        assert_eq!(tests, set(&["a", "b"]));
+    }
+
+    #[test]
+    fn generic_and_path_impls_use_the_last_segment() {
+        let r = extract_rust(
+            "struct Foo<T>(T);\nimpl<T> Foo<T> { fn get(&self) {} }\n\
+             impl<T> fmt::Display for Foo<T> { fn fmt(&self) {} }\n",
+            "m.rs",
+        );
+        assert!(
+            edges(&r, EdgeType::Contains).contains(&("m.rs::Foo".into(), "m.rs::Foo.get".into()))
+        );
+        assert_eq!(
+            edges(&r, EdgeType::Implements),
+            BTreeSet::from([("m.rs::Foo".into(), "fmt::Display".into())])
+        );
+    }
 }
