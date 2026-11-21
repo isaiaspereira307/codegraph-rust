@@ -14,6 +14,12 @@ python3 scripts/parity/parity.py corpus --work $TMPDIR/parity --md docs/parity/b
 # Python probe (nested classes, receivers, dead guards, references, submodule imports)
 python3 scripts/parity/parity.py run scripts/parity/probes/python --work $TMPDIR/pyprobe --md $TMPDIR/pyprobe.md
 
+# Python import probe (package/namespace/plain-module imports, ambiguous nested leaf).
+# Result: nodes 1.000, CONTAINS 1.000, IMPORTS_FROM 1.000; CALLS 0.684 (resolved 0.786) and
+# REFERENCES 0 are the documented gaps (dotted module path `q.lib.f()`, `mod.Thing().go()`,
+# `fast` tier drops References).
+python3 scripts/parity/parity.py run scripts/parity/probes/python-imports --work $TMPDIR/pyimports --md $TMPDIR/pyimports.md
+
 # One arbitrary directory
 python3 scripts/parity/parity.py run <src_dir> --work $TMPDIR/parity-run --md out.md --json out.json
 

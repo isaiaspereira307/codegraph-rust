@@ -41,6 +41,11 @@ nos, CALLS, IMPORTS_FROM, INHERITS e TESTED_BY 1.000; CONTAINS 0.958 (metodo de 
 aninhada: o CRG grava a origem como texto `F::Inner`, sem no). As outras linguagens nao
 mudaram (`is_test` em todo no de arquivo de teste nao gerou divergencia).
 
+Sonda `scripts/parity/probes/python-imports` (imports de pacote/namespace/modulo solto, folha
+aninhada ambigua): nos 1.000 (26/26), CONTAINS e IMPORTS_FROM 1.000; CALLS 0.684 (resolvido
+0.786) e REFERENCES 0 no tier padrao (caminho pontuado `q.lib.f()` e `mod.Thing().go()` ainda
+nao portados).
+
 "Depois" abaixo e o relatorio regerado apos o plano Python.
 
 # Depois

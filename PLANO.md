@@ -217,7 +217,7 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    arquivo; `IMPLEMENTS` e CONTAINS de `impl` cujo tipo não está no arquivo (o CRG grava origem
    `F::Tipo` sem nó); receptor tipado (`let r = Repo::new(); r.save()`).
 5. ✅ **Python** (plano `docs/superpowers/plans/2026-11-20-fase2-python.md`, commits
-   `d1c56ba..HEAD`): extrator reescrito no molde Go/Java/Rust (pré-passe de nomes de topo,
+   `d637b61..11cbcb5`): extrator reescrito no molde Go/Java/Rust (pré-passe de nomes de topo,
    imports `from`/`import` e `TYPE_CHECKING`; chamador por pilha, corpo de classe e decorators
    saem do `File`), nome de chamada e receptor do CRG (`self`/`cls`/classe local → `Classe.m`;
    nome importado leva `crg_py_import` "módulo|símbolo", resolvido pelo `ModuleIndex`; resto
@@ -239,7 +239,11 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    shims `sys.modules`; reescrita pós-build por sufixo (`python_resolver.py`); `line` das
    arestas; escopo-folha de classe aninhada em C++. A lista da stdlib é a do CPython 3.15; o CRG
    usa `sys.stdlib_module_names` do interpretador que o roda (3.13 no harness: difere em
-   `annotationlib`, `compression`, `profiling`, `sre_*` e módulos `_privados`).
+   `annotationlib`, `compression`, `profiling`, `sre_*` e módulos `_privados`). Dois custos da paridade: (a) o CALLS resolvido do corpus caiu de
+   1.000 para 0.833, porque `crg_unbound` impede que receptor tipado por anotação
+   (`service.authenticate()`) seja ligado lexicalmente; "quem chama `authenticate`" perde essas
+   arestas até o receptor tipado ser portado; (b) os `References` antigos de dica de tipo do
+   tier `full` (`parameter_type`/`return_type`) foram removidos.
 6. Demais linguagens (C#, C/C++, Ruby, PHP, Kotlin, Swift, Dart): nenhuma resolve imports
    ainda; corpus e fixtures a criar.
 
