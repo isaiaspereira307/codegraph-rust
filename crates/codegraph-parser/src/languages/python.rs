@@ -74,7 +74,7 @@ pub struct FileScope {
     pub classes: HashSet<String>,
     /// `from M import X [as Y]`: local name -> (module as written, dots included; `X`).
     pub from_imports: HashMap<String, (String, String)>,
-    /// `import a.b as c`: `c` -> `a.b`.
+    /// `import a.b as c`: `c` -> `a.b`; plain `import a.b`: `a` -> `a`.
     pub module_aliases: HashMap<String, String>,
     /// Unshadowed local names of `typing.TYPE_CHECKING`.
     pub type_checking: HashSet<String>,
@@ -109,6 +109,16 @@ impl FileScope {
                 }
                 "import_statement" => {
                     for name in field_children(&target, "name") {
+                        if name.kind() == "dotted_name" {
+                            // `import a.b` binds only `a`, to the module `a`.
+                            let root = text(&name)
+                                .split('.')
+                                .next()
+                                .unwrap_or_default()
+                                .to_string();
+                            scope.module_aliases.insert(root.clone(), root);
+                            continue;
+                        }
                         if name.kind() != "aliased_import" {
                             continue;
                         }
@@ -1083,6 +1093,37 @@ mod tests {
         .collect();
         expected.sort();
         assert_eq!(calls, expected);
+    }
+
+    /// CRG `_python_plain_import_bindings`: `import a.b` binds `a` to module `a`, so
+    /// `a.f()` names that module (the indexer binds it only when `a` is a file).
+    #[test]
+    fn plain_imports_bind_their_first_segment() {
+        let r = extract_py(
+            "import mod2\nimport nsp.inner\n\ndef f():\n    mod2.f()\n    mod2.Thing()\n    nsp.g()\n    inner.h()\n",
+            "plain.py",
+        );
+        let calls: Vec<(String, Option<String>, bool)> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .map(|e| {
+                (
+                    e.to.clone(),
+                    e.metadata.get(crg_shape::PY_IMPORT_ATTR).cloned(),
+                    e.metadata.contains_key(crg_shape::UNBOUND_ATTR),
+                )
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("f".to_string(), Some("mod2|".to_string()), false),
+                ("Thing".to_string(), Some("mod2|".to_string()), false),
+                ("g".to_string(), Some("nsp|".to_string()), false),
+                ("h".to_string(), None, true),
+            ]
+        );
     }
 
     #[test]
