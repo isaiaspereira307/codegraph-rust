@@ -326,6 +326,10 @@ impl SymbolCatalog {
             (false, false) => format!("{module}.{symbol}"),
         };
         if let Some(file) = self.modules.resolve(importer, &dotted) {
+            if !symbol.is_empty() && !edge.metadata.contains_key("receiver") {
+                // `from M import sub; sub()` / `run(sub)` names the module itself.
+                return self.file_nodes.get(file).copied();
+            }
             return self.qualified_symbol(&format!("{file}::{}", edge.to), true);
         }
         if symbol.is_empty() {
@@ -694,6 +698,27 @@ mod tests {
         // Unresolvable modules bind nothing.
         assert_eq!(target("loads", "json|", true), None);
         assert_eq!(target("go", "pkg.b|Other", true), None);
+    }
+
+    /// CRG `_PY_MODULE_BINDING_KEY`: `from pkg import b; b()` / `run(b)` names the module
+    /// itself, so the bare name binds to the file node of `pkg/b.py`.
+    #[test]
+    fn python_bare_module_name_binds_to_its_file() {
+        let caller = py("a.py", "f", None);
+        let b_file = file("pkg/b.py");
+        let catalog = SymbolCatalog::new(&[
+            file("a.py"),
+            file("pkg/__init__.py"),
+            b_file.clone(),
+            caller.clone(),
+        ]);
+        let target = |to, import, receiver| {
+            catalog.py_import_target(&py_edge(caller.id, to, import, receiver))
+        };
+        assert_eq!(target("b", "pkg|b", false), Some(b_file.id));
+        assert_eq!(target("bee", "pkg|b", false), Some(b_file.id));
+        // A receiver call still names a symbol inside the module.
+        assert_eq!(target("b", "pkg|b", true), None);
     }
 
     #[test]
