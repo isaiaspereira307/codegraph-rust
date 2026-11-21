@@ -146,8 +146,12 @@ impl ModuleIndex {
             }
             return candidates(&dir);
         }
+        // A package folder is not on `sys.path`: `pkg/typing.py` never answers `import typing`.
+        let stdlib =
+            crate::python_stdlib::is_stdlib_module(module.split('.').next().unwrap_or_default());
         loop {
-            if let Some(file) = candidates(&dir) {
+            let hidden = stdlib && self.file(&dir.join("__init__.py")).is_some();
+            if !hidden && let Some(file) = candidates(&dir) {
                 return Some(file);
             }
             dir.segments.pop()?;
@@ -322,6 +326,25 @@ mod tests {
             None
         );
         assert_eq!(index.resolve("app/caller.py", "os"), None);
+    }
+
+    #[test]
+    fn a_package_folder_never_answers_a_standard_library_import() {
+        let index = ModuleIndex::new([
+            "pkg/__init__.py",
+            "pkg/typing.py",
+            "pkg/b.py",
+            "loose/typing.py",
+        ]);
+        assert_eq!(index.resolve("pkg/a.py", "typing"), None);
+        assert_eq!(index.resolve("pkg/a.py", "typing.x"), None);
+        assert_eq!(index.resolve("pkg/a.py", "b"), Some("pkg/b.py"));
+        // Relative imports and folders without `__init__.py` still find it.
+        assert_eq!(index.resolve("pkg/a.py", ".typing"), Some("pkg/typing.py"));
+        assert_eq!(
+            index.resolve("loose/a.py", "typing"),
+            Some("loose/typing.py")
+        );
     }
 
     #[test]

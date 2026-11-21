@@ -5,6 +5,7 @@ pub mod heartbeat;
 pub mod indexer;
 mod module_index;
 pub mod policy;
+mod python_stdlib;
 mod reconciliation;
 mod resolution;
 #[cfg(test)]

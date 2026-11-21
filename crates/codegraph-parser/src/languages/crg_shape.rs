@@ -41,6 +41,11 @@ pub const UNBOUND_ATTR: &str = "crg_unbound";
 /// module with its `ModuleIndex`.
 pub const PY_IMPORT_ATTR: &str = "crg_py_import";
 
+/// Set by the Python extractor on the `M.x` candidate of `from M import x`: the indexer keeps
+/// it only when it resolves to a file (`x` is a submodule, not a symbol), like
+/// code-review-graph's `_python_from_import_targets`.
+pub const PY_SUBMODULE_ATTR: &str = "crg_py_submodule";
+
 /// The node kind (`{:?}` of its `NodeType`) a node had before this pass turned it into a test.
 pub const PRE_SHAPE_KIND_ATTR: &str = "pre_shape_kind";
 

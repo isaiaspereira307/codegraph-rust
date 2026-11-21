@@ -239,7 +239,9 @@ async fn index_files(
     }
     let dir = tempfile::tempdir()?;
     for (path, source) in files {
-        std::fs::write(dir.path().join(path), source)?;
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().expect("file in a directory"))?;
+        std::fs::write(path, source)?;
     }
     let config = IndexerConfig {
         project_root: dir.path().to_path_buf(),
@@ -386,6 +388,61 @@ async fn imported_module_lets_a_bare_call_cross_files() -> Result<()> {
             "CALLS|a.py::f|b.py::helper",
             "CALLS|a.py::f|other",
             "IMPORTS_FROM|a.py|b.py",
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn python_submodule_imports_and_import_bound_calls_follow_crg() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(
+            module_path!(),
+            "::python_submodule_imports_and_import_bound_calls_follow_crg"
+        ),
+        &[
+            (
+                "a.py",
+                "from pkg import b, missing\nfrom pkg.b import Thing, helper as hh\n\
+                 import pkg.b as bm\nimport json as js\nfrom ns import c\n\n\
+                 def f(x):\n    b.helper()\n    bm.helper()\n    hh()\n    Thing.go()\n    \
+                 js.loads('1')\n    x.go()\n    c.run()\n",
+            ),
+            ("pkg/__init__.py", ""),
+            (
+                "pkg/b.py",
+                "def helper():\n    return 1\n\nclass Thing:\n    def go(self):\n        pass\n",
+            ),
+            ("pkg/typing.py", "def cast():\n    pass\n"),
+            ("pkg/m.py", "import typing\n\ndef go():\n    pass\n"),
+            ("ns/c.py", "def run():\n    pass\n"),
+        ],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    assert_eq!(
+        edges_of(
+            &indexer.graph_store(),
+            dir.path(),
+            "'CALLS', 'IMPORTS_FROM'"
+        )?,
+        [
+            "CALLS|a.py::f|go",
+            "CALLS|a.py::f|loads",
+            "CALLS|a.py::f|ns/c.py::run",
+            "CALLS|a.py::f|pkg/b.py::Thing.go",
+            "CALLS|a.py::f|pkg/b.py::helper",
+            "CALLS|a.py::f|pkg/b.py::helper",
+            "CALLS|a.py::f|pkg/b.py::helper",
+            "IMPORTS_FROM|a.py|json",
+            "IMPORTS_FROM|a.py|ns/c.py",
+            "IMPORTS_FROM|a.py|pkg/__init__.py",
+            "IMPORTS_FROM|a.py|pkg/b.py",
+            "IMPORTS_FROM|a.py|pkg/b.py",
+            "IMPORTS_FROM|a.py|pkg/b.py",
+            "IMPORTS_FROM|pkg/m.py|typing",
         ]
     );
     Ok(())

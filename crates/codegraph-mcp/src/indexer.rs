@@ -1169,6 +1169,8 @@ impl ProjectIndexer {
                 info!("   🌱 Spring DI calls resolved: {spring_resolved}");
             }
             let mut catalog = crate::resolution::SymbolCatalog::new(&nodes);
+            // Python `from M import x` candidates that name no file leave, without text.
+            catalog.retain_python_imports(&mut edges);
             catalog.link_imports(&edges);
             let symbol_map = catalog.unique_aliases();
             let mut normalized = HashMap::new();
@@ -2101,6 +2103,15 @@ impl ProjectIndexer {
         normalized: &mut HashMap<String, Vec<String>>,
         lexical_cache: &mut HashMap<(NodeId, String), Option<(NodeId, f64)>>,
     ) -> (Option<NodeId>, (&'static str, f64)) {
+        use codegraph_parser::languages::crg_shape::{PY_IMPORT_ATTR, UNBOUND_ATTR};
+        // A Python receiver of unknown kind never binds; an import-bound name binds only
+        // through its import (code-review-graph keeps either as the plain text).
+        if edge.metadata.contains_key(UNBOUND_ATTR) {
+            return (None, ("unbound", 1.0));
+        }
+        if edge.metadata.contains_key(PY_IMPORT_ATTR) {
+            return (catalog.py_import_target(edge), ("import", 1.0));
+        }
         if edge
             .metadata
             .contains_key(codegraph_parser::languages::crg_shape::UNTYPED_RECEIVER_ATTR)
@@ -2758,6 +2769,70 @@ mod tests {
         assert_eq!(resolve(&call("a")), None);
         assert_eq!(resolve(&call("aa")), None);
         assert_eq!(resolve(&call("b")), Some(free.id));
+    }
+
+    #[test]
+    fn python_unbound_and_import_bound_calls_never_search() {
+        use codegraph_parser::languages::crg_shape::{PY_IMPORT_ATTR, UNBOUND_ATTR};
+        let node = |file: &str, name: &str, kind: NodeType| {
+            let mut node = CodeNode::new(
+                name.to_string(),
+                Some(kind),
+                Some(codegraph_core::Language::Python),
+                codegraph_core::Location {
+                    file_path: file.into(),
+                    line: 1,
+                    column: 1,
+                    end_line: None,
+                    end_column: None,
+                },
+            );
+            node.metadata
+                .attributes
+                .insert("qualified_name".into(), format!("{file}::{name}"));
+            node.set_deterministic_id(name);
+            node
+        };
+        let caller = node("a.py", "f", NodeType::Function);
+        let local = node("a.py", "loads", NodeType::Function);
+        let helper = node("b.py", "helper", NodeType::Function);
+        let catalog = crate::resolution::SymbolCatalog::new(&[
+            node("a.py", "a.py", NodeType::Other("File".into())),
+            node("b.py", "b.py", NodeType::Other("File".into())),
+            caller.clone(),
+            local,
+            helper.clone(),
+        ]);
+        let call = |to: &str, attr: &str, value: &str| EdgeRelationship {
+            from: caller.id,
+            to: to.into(),
+            edge_type: EdgeType::Calls,
+            metadata: std::collections::HashMap::from([
+                (attr.to_string(), value.to_string()),
+                ("receiver".to_string(), "x".to_string()),
+            ]),
+            span: None,
+        };
+        let resolve = |edge: &EdgeRelationship| {
+            ProjectIndexer::resolve_target(
+                &catalog,
+                edge,
+                &mut std::collections::HashMap::new(),
+                &mut std::collections::HashMap::new(),
+            )
+        };
+        // `x.loads()`: never binds, not even to the same-file `loads`.
+        assert_eq!(
+            resolve(&call("loads", UNBOUND_ATTR, "true")),
+            (None, ("unbound", 1.0))
+        );
+        // `import json as js; js.loads()`: `json` is no file, so `loads` stays text.
+        assert_eq!(resolve(&call("loads", PY_IMPORT_ATTR, "json|")).0, None);
+        assert_eq!(resolve(&call("helpr", PY_IMPORT_ATTR, "b|")).0, None);
+        assert_eq!(
+            resolve(&call("helper", PY_IMPORT_ATTR, "b|")).0,
+            Some(helper.id)
+        );
     }
 
     #[test]

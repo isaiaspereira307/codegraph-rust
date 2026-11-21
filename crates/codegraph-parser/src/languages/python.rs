@@ -229,7 +229,7 @@ impl<'a> PythonCollector<'a> {
             "argument_list" => self.argument_references(&node),
             "list" => self.list_references(&node),
             "pair" => self.pair_reference(&node),
-            "assignment" => self.assignment_reference(&node),
+            "assignment" | "augmented_assignment" => self.assignment_reference(&node),
             _ => {}
         }
         self.walk_children(node);
@@ -475,13 +475,35 @@ impl<'a> PythonCollector<'a> {
         }
     }
 
+    /// CRG `_extract_import`: `import a.b, c as d` imports each module; `from M import x, y`
+    /// imports `M` plus the candidates `M.x`, `M.y` (marked `PY_SUBMODULE_ATTR`), which the
+    /// indexer keeps only when they name a file; `from M import *` imports `M`.
     fn import(&mut self, node: &Node) {
-        let name = if node.kind() == "import_statement" {
-            self.child_text_by_kinds(*node, &["dotted_name", "identifier"])
+        // (target, is a submodule candidate)
+        let targets: Vec<(String, bool)> = if node.kind() == "import_statement" {
+            imported_names(node, self.content)
+                .into_iter()
+                .map(|(module, _)| (module, false))
+                .collect()
         } else {
-            self.child_text_by_kinds(*node, &["dotted_name", "relative_import"])
+            let Some(module) = node.child_by_field_name("module_name") else {
+                return;
+            };
+            let module = self.text(&module);
+            let prefix = if module.ends_with('.') {
+                module.clone()
+            } else {
+                format!("{module}.")
+            };
+            std::iter::once((module, false))
+                .chain(
+                    imported_names(node, self.content)
+                        .into_iter()
+                        .map(|(name, _)| (format!("{prefix}{name}"), true)),
+                )
+                .collect()
         };
-        let Some(name) = name else {
+        let Some((name, _)) = targets.first() else {
             return;
         };
         let mut code = CodeNode::new(
@@ -492,16 +514,22 @@ impl<'a> PythonCollector<'a> {
         )
         .with_content(self.text(node));
         code.span = Some(self.span_for(node));
-        self.edges.push(EdgeRelationship {
-            from: code.id,
-            to: name,
-            edge_type: EdgeType::Imports,
-            metadata: HashMap::from([
+        for (target, submodule) in targets {
+            let mut metadata = HashMap::from([
                 ("import_type".to_string(), "python_import".to_string()),
                 ("source_file".to_string(), self.file_path.to_string()),
-            ]),
-            span: Some(self.span_for(node)),
-        });
+            ]);
+            if submodule {
+                metadata.insert(crg_shape::PY_SUBMODULE_ATTR.to_string(), "true".to_string());
+            }
+            self.edges.push(EdgeRelationship {
+                from: code.id,
+                to: target,
+                edge_type: EdgeType::Imports,
+                metadata,
+                span: Some(self.span_for(node)),
+            });
+        }
         self.nodes.push(code);
     }
 
@@ -608,7 +636,7 @@ impl<'a> PythonCollector<'a> {
         }
     }
 
-    /// `obj.attr = f` and `obj[k] = f`; plain `h = f` is not a reference.
+    /// `obj.attr = f`, `obj[k] = f` and `obj.attr += f`; plain `h = f` is not a reference.
     fn assignment_reference(&mut self, node: &Node) {
         let is_member = node
             .child_by_field_name("left")
@@ -716,14 +744,6 @@ impl<'a> PythonCollector<'a> {
         node.child_by_field_name(field)
             .map(|n| self.text(&n))
             .filter(|text| !text.is_empty())
-    }
-
-    fn child_text_by_kinds(&self, node: Node, kinds: &[&str]) -> Option<String> {
-        let mut cursor = node.walk();
-        let found = node
-            .children(&mut cursor)
-            .find(|n| kinds.contains(&n.kind()));
-        found.map(|n| self.text(&n))
     }
 }
 
@@ -1129,6 +1149,22 @@ mod tests {
     }
 
     #[test]
+    fn augmented_member_assignments_reference_their_value() {
+        let r = extract_py(
+            "def work():\n    pass\n\ndef use(obj, n):\n    obj.x += work\n    obj['k'] |= work\n    n += work\n",
+            "m.py",
+        );
+        let refs: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::References)
+            .map(|e| (qualified(&r, &e.from), e.to.clone()))
+            .collect();
+        let pair = ("m.py::use".to_string(), "m.py::work".to_string());
+        assert_eq!(refs, vec![pair.clone(), pair]);
+    }
+
+    #[test]
     fn references_policy_off_drops_them() {
         let mut parser = tree_sitter::Parser::new();
         parser
@@ -1242,7 +1278,45 @@ mod tests {
         );
         assert_eq!(
             edges(&r, EdgeType::Imports),
-            set(&[("m.py", "os"), ("m.py", "pkg")])
+            set(&[("m.py", "os"), ("m.py", "pkg"), ("m.py", "pkg.b")])
+        );
+    }
+
+    #[test]
+    fn imports_name_every_module_and_mark_submodule_candidates() {
+        let r = extract_py(
+            "import json as js, os\nimport a.b\nfrom app import util, x as y\nfrom . import z\n\
+             from .. import w\nfrom .m import (p, q)\nfrom star import *\n",
+            "m.py",
+        );
+        assert_eq!(
+            edges(&r, EdgeType::Imports),
+            set(&[
+                ("m.py", "json"),
+                ("m.py", "os"),
+                ("m.py", "a.b"),
+                ("m.py", "app"),
+                ("m.py", "app.util"),
+                ("m.py", "app.x"),
+                ("m.py", "."),
+                ("m.py", ".z"),
+                ("m.py", ".."),
+                ("m.py", "..w"),
+                ("m.py", ".m"),
+                ("m.py", ".m.p"),
+                ("m.py", ".m.q"),
+                ("m.py", "star"),
+            ])
+        );
+        let submodules: BTreeSet<String> = r
+            .edges
+            .iter()
+            .filter(|e| e.metadata.contains_key(crg_shape::PY_SUBMODULE_ATTR))
+            .map(|e| e.to.clone())
+            .collect();
+        assert_eq!(
+            submodules,
+            names(&["app.util", "app.x", ".z", "..w", ".m.p", ".m.q"])
         );
     }
 }

@@ -280,6 +280,75 @@ impl SymbolCatalog {
         self.file_nodes.get(file).copied()
     }
 
+    /// Like code-review-graph's `_python_from_import_targets`, drops the `M.x` candidates of
+    /// `from M import x` (`PY_SUBMODULE_ATTR`) that name no file, and drops `M` itself when
+    /// it names no file but one of its statement's candidates does (a namespace package).
+    /// A statement is its importer plus its span.
+    pub(crate) fn retain_python_imports(&self, edges: &mut Vec<EdgeRelationship>) {
+        type Statement = (NodeId, Option<(u32, u32)>);
+        let statement = |e: &EdgeRelationship| -> Statement {
+            (e.from, e.span.as_ref().map(|s| (s.start_byte, s.end_byte)))
+        };
+        let candidate = |e: &EdgeRelationship| {
+            e.edge_type == EdgeType::Imports
+                && e.metadata
+                    .contains_key(codegraph_parser::languages::crg_shape::PY_SUBMODULE_ATTR)
+        };
+        // Statements with candidates -> whether any candidate names a file.
+        let mut any_file: HashMap<Statement, bool> = HashMap::new();
+        for edge in edges.iter().filter(|e| candidate(e)) {
+            *any_file.entry(statement(edge)).or_default() |= self.import_target(edge).is_some();
+        }
+        if any_file.is_empty() {
+            return;
+        }
+        edges.retain(|edge| {
+            let checked = candidate(edge)
+                || (edge.edge_type == EdgeType::Imports
+                    && any_file.get(&statement(edge)) == Some(&true));
+            !checked || self.import_target(edge).is_some()
+        });
+    }
+
+    /// Binds a Python call or reference carrying `PY_IMPORT_ATTR` (`"M|X"`): when `M.X` (or
+    /// `M` for an empty `X`) is a module file, its top-level `<file>::<to>`; otherwise, in the
+    /// file of `M`, `<file>::X.<to>` for a call on a receiver or `<file>::X` for a bare name
+    /// (`to` is then the local alias). Never searches beyond those names.
+    pub(crate) fn py_import_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        let binding = edge
+            .metadata
+            .get(codegraph_parser::languages::crg_shape::PY_IMPORT_ATTR)?;
+        let (module, symbol) = binding.split_once('|')?;
+        let importer = &self.symbols.get(&edge.from)?.file;
+        let dotted = match (symbol.is_empty(), module.ends_with('.')) {
+            (true, _) => module.to_string(),
+            (false, true) => format!("{module}{symbol}"),
+            (false, false) => format!("{module}.{symbol}"),
+        };
+        if let Some(file) = self.modules.resolve(importer, &dotted) {
+            return self.qualified_symbol(&format!("{file}::{}", edge.to), true);
+        }
+        if symbol.is_empty() {
+            return None;
+        }
+        let file = self.modules.resolve(importer, module)?;
+        let qualified = if edge.metadata.contains_key("receiver") {
+            format!("{file}::{symbol}.{}", edge.to)
+        } else {
+            format!("{file}::{symbol}")
+        };
+        self.qualified_symbol(&qualified, false)
+    }
+
+    /// The symbol whose qualified name is exactly `qualified` (a top-level one if asked).
+    fn qualified_symbol(&self, qualified: &str, top_level: bool) -> Option<NodeId> {
+        self.aliases.get(qualified)?.iter().copied().find(|id| {
+            self.symbols
+                .get(id)
+                .is_some_and(|s| s.qualified == qualified && !(top_level && s.has_parent))
+        })
+    }
+
     /// Candidates `alias` may bind from `from` for the edge target `target`. Like
     /// code-review-graph, a bare name (no `::`, `.` or `/` in the target or the alias that
     /// matched it) binds only within the caller's file or a file it imports; qualified
@@ -510,6 +579,121 @@ mod tests {
             Some(helper.id)
         );
         assert_eq!(catalog.exact(&edge(caller.id, "other"), &[]), None);
+    }
+
+    fn file(path: &str) -> CodeNode {
+        let mut file = node(path, path);
+        file.node_type = Some(NodeType::Other("File".into()));
+        file.set_deterministic_id(path);
+        file
+    }
+
+    #[test]
+    fn python_submodule_candidates_stay_only_when_they_name_a_file() {
+        let a = file("a.py");
+        let catalog = SymbolCatalog::new(&[
+            a.clone(),
+            file("pkg/__init__.py"),
+            file("pkg/b.py"),
+            file("ns/c.py"),
+        ]);
+        let import = |to: &str, statement: u32, submodule: bool| {
+            let mut import = edge(a.id, to);
+            import.edge_type = EdgeType::Imports;
+            import.span = Some(codegraph_core::Span {
+                start_byte: statement,
+                end_byte: statement + 1,
+            });
+            if submodule {
+                import.metadata.insert(
+                    codegraph_parser::languages::crg_shape::PY_SUBMODULE_ATTR.into(),
+                    "true".into(),
+                );
+            }
+            import
+        };
+        let mut edges = vec![
+            import("pkg", 1, false),
+            import("pkg.b", 1, true),
+            import("pkg.helper", 1, true),
+            // Namespace package: `ns` has no file, its submodule does.
+            import("ns", 2, false),
+            import("ns.c", 2, true),
+            import("json", 3, false),
+            import("other", 4, false),
+            import("other.q", 4, true),
+            edge(a.id, "pkg.missing"),
+        ];
+        catalog.retain_python_imports(&mut edges);
+        let kept: Vec<_> = edges.iter().map(|e| e.to.as_str()).collect();
+        assert_eq!(
+            kept,
+            ["pkg", "pkg.b", "ns.c", "json", "other", "pkg.missing"]
+        );
+    }
+
+    fn py(path: &str, qualified: &str, parent: Option<&str>) -> CodeNode {
+        let name = qualified.rsplit(['.', ':']).next().unwrap();
+        let mut node = node(path, name);
+        node.metadata
+            .attributes
+            .insert("qualified_name".into(), format!("{path}::{qualified}"));
+        if let Some(parent) = parent {
+            node.metadata
+                .attributes
+                .insert("parent_name".into(), parent.into());
+        }
+        node.set_deterministic_id(qualified);
+        node
+    }
+
+    fn py_edge(from: NodeId, to: &str, import: &str, receiver: bool) -> EdgeRelationship {
+        let mut edge = edge(from, to);
+        edge.metadata.insert(
+            codegraph_parser::languages::crg_shape::PY_IMPORT_ATTR.into(),
+            import.into(),
+        );
+        if receiver {
+            edge.metadata.insert("receiver".into(), "x".into());
+        }
+        edge
+    }
+
+    #[test]
+    fn python_import_bound_calls_reach_the_imported_definition() {
+        let caller = py("a.py", "f", None);
+        let helper = py("pkg/b.py", "helper", None);
+        let thing = py("pkg/b.py", "Thing", None);
+        let go = py("pkg/b.py", "Thing.go", Some("Thing"));
+        let method_helper = py("pkg/c.py", "C.helper", Some("C"));
+        let catalog = SymbolCatalog::new(&[
+            file("a.py"),
+            file("pkg/__init__.py"),
+            file("pkg/b.py"),
+            file("pkg/c.py"),
+            caller.clone(),
+            helper.clone(),
+            thing.clone(),
+            go.clone(),
+            method_helper,
+        ]);
+        let target = |to, import, receiver| {
+            catalog.py_import_target(&py_edge(caller.id, to, import, receiver))
+        };
+        // `from pkg import b; b.helper()`: `pkg.b` is a module, `helper` its top-level def.
+        assert_eq!(target("helper", "pkg|b", true), Some(helper.id));
+        // `from pkg.b import Thing; Thing.go()`: `pkg.b.Thing` is no module; `pkg.b` is.
+        assert_eq!(target("go", "pkg.b|Thing", true), Some(go.id));
+        // `import pkg.b as bm; bm.helper()`.
+        assert_eq!(target("helper", "pkg.b|", true), Some(helper.id));
+        // `from pkg.b import helper as hh; hh()`: no receiver, the symbol is `helper`.
+        assert_eq!(target("hh", "pkg.b|helper", false), Some(helper.id));
+        assert_eq!(target("Thing", "pkg.b|Thing", false), Some(thing.id));
+        // A same-named method is not a top-level function.
+        assert_eq!(target("helper", "pkg|c", true), None);
+        // Unresolvable modules bind nothing.
+        assert_eq!(target("loads", "json|", true), None);
+        assert_eq!(target("go", "pkg.b|Other", true), None);
     }
 
     #[test]
