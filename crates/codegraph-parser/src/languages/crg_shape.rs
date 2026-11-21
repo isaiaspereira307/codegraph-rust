@@ -32,6 +32,15 @@ pub const VERBATIM_TARGET_ATTR: &str = "crg_verbatim_target";
 /// like code-review-graph, the indexer never binds it to a method, only to a free function.
 pub const UNTYPED_RECEIVER_ATTR: &str = "crg_untyped_receiver";
 
+/// Set by an extractor on a call whose receiver it cannot bind (Python `x.m()`, `self.repo.m()`):
+/// like code-review-graph, the indexer never binds it, not even to a free function.
+pub const UNBOUND_ATTR: &str = "crg_unbound";
+
+/// Set by an extractor on a Python call bound through an import, as `"<module>|<symbol>"`
+/// (`from M import X` -> `"M|X"`, `import a.b as c` -> `"a.b|"`); the indexer resolves the
+/// module with its `ModuleIndex`.
+pub const PY_IMPORT_ATTR: &str = "crg_py_import";
+
 /// The node kind (`{:?}` of its `NodeType`) a node had before this pass turned it into a test.
 pub const PRE_SHAPE_KIND_ATTR: &str = "pre_shape_kind";
 
