@@ -104,7 +104,7 @@ pub fn extract_for_language_at(
     rel_path: &str,
     policy: ExtractionPolicy,
 ) -> Option<ExtractionResult> {
-    let mut result = extract_unshaped(language, tree, content, file_path, policy)?;
+    let mut result = extract_unshaped(language, tree, content, file_path, rel_path, policy)?;
     let line_count = crg_shape::line_count(content);
     crg_shape::shape_for_crg(
         &mut result,
@@ -121,24 +121,21 @@ fn extract_unshaped(
     tree: &Tree,
     content: &str,
     file_path: &str,
+    rel_path: &str,
     policy: ExtractionPolicy,
 ) -> Option<ExtractionResult> {
     match language {
         Language::Rust => Some(RustExtractor::extract_with_policy(
             tree, content, file_path, policy,
         )),
-        Language::TypeScript => Some(
-            <TypeScriptExtractor as LanguageExtractor>::extract_with_edges(
-                tree, content, file_path,
-            ),
-        ),
-        Language::JavaScript => {
-            // JavaScript uses TypeScript extractor with JS-specific handling
+        // JavaScript uses the TypeScript extractor.
+        Language::TypeScript | Language::JavaScript => {
             Some(TypeScriptExtractor::extract_with_edges(
                 tree,
                 content,
                 file_path,
-                Language::JavaScript,
+                language.clone(),
+                test_detection::is_test_file(rel_path),
             ))
         }
         Language::Python => Some(PythonExtractor::extract_with_policy(
