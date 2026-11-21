@@ -158,7 +158,7 @@ Jaccard depois do plano 1 (antes → depois, nós / CALLS / IMPORTS_FROM):
 | python | 0.51 → 1.00 | 0.12 → 0.55 | 0 → 1.00 |
 | typescript | 0.20 → 0.44 → **1.00** | 0 → 0.13 → **1.00** | 0 → 1.00 |
 | go | 0.30 → 1.00 | 0.16 → 0.13 → **1.00** | 0 → 1.00 |
-| rust | 0.38 → 0.74 | 0.17 → 0.50 | 0 → 0.50 |
+| rust | 0.38 → 0.74 → **1.00** | 0.17 → 0.50 → **1.00** | 0 → 0.50 → **1.00** |
 | java | 0.17 → 0.95 → **1.00** | 0 → 0.35 → **1.00** | 0 → 1.00 |
 
 ### Próximos planos por linguagem
@@ -187,7 +187,7 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    liga ao de `b.go`). Fica para depois: `IMPORTS_FROM` para o diretório do pacote via
    `go.mod`/`replace`/`vendor` (alvo do CRG é um diretório, não um `File`), `is_test=1` em todo
    nó de `_test.go`, e o ramo do CRG que liga nome solto ambíguo ao primeiro símbolo do arquivo.
-   A guarda morta só existe no extrator Go; TS e Rust ainda não a aplicam.
+   A guarda morta só existe nos extratores Go e Rust; TS ainda não a aplica.
 3. ✅ **Java** (plano `docs/superpowers/plans/2026-11-20-fase2-java.md`): sem nó `package`
    (vira `java_package`), enum como `Class`, `java_kind`, chamador por pilha (inicializador de
    campo sai do `File`), `new X()`/`X::m` como chamadas, receptor tipado por campo/parâmetro/
@@ -198,12 +198,21 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    CALLS, CONTAINS, IMPORTS_FROM, INHERITS e INJECTS. Fica para depois: receptor tipado com tipo
    de outro arquivo (import resolvido, `_java_same_package_file`, tipo `com.x.Cart`), WebFlux/
    rotas/Kafka/Temporal/eventos/`@Value`, `receiver_form=expression` em testes, `record`.
-4. **Rust** (CALLS 0.50, IMPORTS_FROM 0.50 — o único score de import abaixo de 1.0, TESTED_BY 0): nós `impl` duplicados (CONTAINS
-   pode ligar ao `impl` e não à struct; qual dos dois ganha o sufixo `@L` varia entre execuções,
-   então o corpus rust não é determinístico); `#[test]` precisa de decorators; `use m::f` com
-   primeiro segmento solto (CRG percorre a raiz do crate); raiz do crate por `lib.rs`/
-   `main.rs`, não por `Cargo.toml`; grupos `use` aninhados; busca não limitada à raiz do
-   repositório.
+4. ✅ **Rust** (plano `docs/superpowers/plans/2026-11-20-fase2-rust.md`): `impl`, `mod` e macros
+   não viram nó (o `impl` só põe os métodos no tipo, em qualquer profundidade), assinaturas e
+   métodos de trait em `Trait.m`, `#[test]`/`#[tokio::test]` como `decorators` → `Test`,
+   `IMPLEMENTS` (traço do arquivo resolvido, senão texto), chamador por pilha (const de `impl` sai
+   do `File`), nomes de chamada pelo caminho (`HashMap::new`, `Vec::<u8>::new` → `Vec::new`),
+   `receiver`, `self.m()`/`Self::m` → `Tipo.m`, `X::m`/`mod::f` resolvidos no arquivo, macros como
+   chamadas, guarda morta `if false` (para no `impl`), `use` achatado pela árvore (glob no topo
+   não gera import). Caminhos não resolvidos ficam como texto com `crg_verbatim_target`: o indexer
+   só os liga por alias exato (sem normalizar nem busca léxica). Corpus: 1.00 em nós, CALLS,
+   CONTAINS, IMPLEMENTS, IMPORTS_FROM e TESTED_BY, e determinístico. Fica para depois: resolução
+   de módulos entre arquivos (`_resolve_rust_module_file`: raiz do crate por `lib.rs`/`main.rs`,
+   `crate::`/`super::`/dependências do `Cargo.toml`, `use m::f` com primeiro segmento solto,
+   busca limitada à raiz do repositório) e, com ela, `IMPLEMENTS`/`X::m` para itens de outro
+   arquivo; `IMPLEMENTS` e CONTAINS de `impl` cujo tipo não está no arquivo (o CRG grava origem
+   `F::Tipo` sem nó); receptor tipado (`let r = Repo::new(); r.save()`).
 5. **Python** (CALLS 0.55, TESTED_BY 0.50): `_python_folder_hides_module`; `pkg/m.py` vs
    `pkg/m/__init__.py` (CRG escolhe o pacote); `INHERITS`, `REFERENCES`.
 6. Demais linguagens (C#, C/C++, Ruby, PHP, Kotlin, Swift, Dart): nenhuma resolve imports

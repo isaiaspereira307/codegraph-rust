@@ -26,8 +26,12 @@ sufixo `@L` varia); ja acontecia antes deste plano.
 Plano Java (`docs/superpowers/plans/2026-11-20-fase2-java.md`): java passou a 1.000 em nos,
 CALLS, INHERITS e INJECTS (de 0.947 / 0.350 / 0 / 0); CONTAINS e IMPORTS_FROM seguem 1.000. As
 outras linguagens nao mudaram.
+Plano Rust (`docs/superpowers/plans/2026-11-20-fase2-rust.md`): rust passou a 1.000 em nos,
+CALLS, CONTAINS, IMPLEMENTS, IMPORTS_FROM e TESTED_BY (de 0.737 / 0.500 / 0.677 / 0 / 0.500 /
+0); sem nos `impl`, o corpus rust ficou deterministico (duas execucoes iguais). As outras
+linguagens nao mudaram.
 
-"Depois" abaixo e o relatorio regerado apos o plano Java.
+"Depois" abaixo e o relatorio regerado apos o plano Rust.
 
 # Depois
 
@@ -52,7 +56,7 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 | REFERENCES | 5 | 0 | 0 | 0.000 | 0.000 |
 | TESTED_BY | 6 | 6 | 4 | 0.500 | 0.500 |
 
-##### CALLS: edges only in CRG
+#### CALLS: edges only in CRG
 
 - `multi_call_example.py::process_document` -> `get`
 - `sample_callback_refs.py::register_keyword_callback` -> `set_defaults`
@@ -62,7 +66,7 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 - `test_sample.py::test_authenticate_invalid` -> `authenticate`
 - `test_sample.py::test_authenticate_valid` -> `authenticate`
 
-##### CALLS: edges only in Rust
+#### CALLS: edges only in Rust
 
 - `multi_call_example.py::process_document` -> `first.get`
 - `multi_call_example.py::process_document` -> `second.get`
@@ -73,11 +77,11 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 - `test_sample.py::test_authenticate_invalid` -> `service.authenticate`
 - `test_sample.py::test_authenticate_valid` -> `service.authenticate`
 
-##### INHERITS: edges only in CRG
+#### INHERITS: edges only in CRG
 
 - `sample_python.py::AuthService` -> `BaseService`
 
-##### REFERENCES: edges only in CRG
+#### REFERENCES: edges only in CRG
 
 - `sample_callback_refs.py::register_keyword_callback` -> `sample_callback_refs.py::keyword_callback`
 - `sample_callback_refs.py::trigger_executor` -> `sample_callback_refs.py::executor_callback`
@@ -85,12 +89,12 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 - `sample_callback_refs.py::trigger_map` -> `sample_callback_refs.py::map_callback`
 - `sample_python.py` -> `sample_python.py::BaseService`
 
-##### TESTED_BY: edges only in CRG
+#### TESTED_BY: edges only in CRG
 
 - `authenticate` -> `test_sample.py::test_authenticate_invalid`
 - `authenticate` -> `test_sample.py::test_authenticate_valid`
 
-##### TESTED_BY: edges only in Rust
+#### TESTED_BY: edges only in Rust
 
 - `service.authenticate` -> `test_sample.py::test_authenticate_invalid`
 - `service.authenticate` -> `test_sample.py::test_authenticate_valid`
@@ -114,7 +118,7 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 | REFERENCES | 7 | 0 | 0 | 0.000 | 0.000 |
 | TESTED_BY | 1 | 1 | 1 | 1.000 | 1.000 |
 
-##### REFERENCES: edges only in CRG
+#### REFERENCES: edges only in CRG
 
 - `sample_typescript.ts::UserRepository` -> `sample_typescript.ts::UserData`
 - `sample_typescript.ts::UserRepository.findById` -> `sample_typescript.ts::UserData`
@@ -146,93 +150,17 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
-| rust | 30 | 36 | 28 | 0.737 | 9 |
+| rust | 30 | 30 | 30 | 1.000 | 0 |
 
 #### Edges by kind
 
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
-| CALLS | 20 | 19 | 13 | 0.500 | 0.562 |
-| CONTAINS | 27 | 25 | 23 | 0.793 | 0.793 |
-| IMPLEMENTS | 1 | 0 | 0 | 0.000 | 0.000 |
-| IMPORTS_FROM | 1 | 2 | 1 | 0.500 | 1.000 |
-| TESTED_BY | 6 | 0 | 0 | 0.000 | 0.000 |
-
-##### rust: nodes only in CRG
-
-- `sample_rust.rs::Repository.find_by_id`
-- `sample_rust.rs::Repository.save`
-
-##### rust: nodes only in Rust
-
-- `sample_dead_guard_impl.rs::S@L5`
-- `sample_rust.rs::InMemoryRepo@L19`
-- `sample_rust.rs::InMemoryRepo@L27`
-- `sample_rust.rs::println`
-- `sample_rust.rs::tests`
-- `sample_rust.rs::tests::assert`
-- `sample_rust.rs::tests::assert@L55`
-- `sample_rust.rs::tests::assert_eq`
-
-##### rust: divergent nodes
-
-- `sample_dead_guard_impl.rs::S` kind: crg=Class rust=impl
-- `sample_dead_guard_impl.rs::S` line_start: crg=5 rust=11
-- `sample_dead_guard_impl.rs::S` line_end: crg=5 rust=15
-- `sample_rust.rs::async_test_is_detected` kind: crg=Test rust=Function
-- `sample_rust.rs::async_test_is_detected` is_test: crg=1 rust=0
-- `sample_rust.rs::create_user_saves_to_repo` kind: crg=Test rust=Function
-- `sample_rust.rs::create_user_saves_to_repo` is_test: crg=1 rust=0
-- `sample_rust.rs::new_repo_is_empty` kind: crg=Test rust=Function
-- `sample_rust.rs::new_repo_is_empty` is_test: crg=1 rust=0
-
-##### CALLS: edges only in CRG
-
-- `sample_dead_guard_impl.rs::main` -> `sample_dead_guard_impl.rs::S.run`
-- `sample_rust.rs::InMemoryRepo.new` -> `HashMap::new`
-- `sample_rust.rs::InMemoryRepo.save` -> `println`
-- `sample_rust.rs::async_test_is_detected` -> `assert`
-- `sample_rust.rs::create_user` -> `save`
-- `sample_rust.rs::create_user_saves_to_repo` -> `assert_eq`
-- `sample_rust.rs::new_repo_is_empty` -> `assert`
-
-##### CALLS: edges only in Rust
-
-- `sample_dead_guard.rs::caller` -> `sample_dead_guard.rs::dead_false_call`
-- `sample_dead_guard.rs::elif_chain` -> `sample_dead_guard.rs::dead_in_consequence`
-- `sample_dead_guard.rs::else_branch` -> `sample_dead_guard.rs::dead_in_consequence`
-- `sample_dead_guard_impl.rs::S.run` -> `sample_dead_guard_impl.rs::S.run`
-- `sample_rust.rs::InMemoryRepo.new` -> `sample_rust.rs::InMemoryRepo.new`
-- `sample_rust.rs::create_user` -> `sample_rust.rs::InMemoryRepo.save`
-
-##### CONTAINS: edges only in CRG
-
-- `sample_dead_guard_impl.rs` -> `sample_dead_guard_impl.rs::S`
-- `sample_dead_guard_impl.rs::S` -> `sample_dead_guard_impl.rs::S.run`
-- `sample_rust.rs::Repository` -> `sample_rust.rs::Repository.find_by_id`
-- `sample_rust.rs::Repository` -> `sample_rust.rs::Repository.save`
-
-##### CONTAINS: edges only in Rust
-
-- `sample_dead_guard_impl.rs` -> `sample_dead_guard_impl.rs::S@L5`
-- `sample_dead_guard_impl.rs::S@L5` -> `sample_dead_guard_impl.rs::S.run`
-
-##### IMPLEMENTS: edges only in CRG
-
-- `sample_rust.rs::InMemoryRepo` -> `sample_rust.rs::Repository`
-
-##### IMPORTS_FROM: edges only in Rust
-
-- `sample_rust.rs` -> `super::*`
-
-##### TESTED_BY: edges only in CRG
-
-- `assert` -> `sample_rust.rs::async_test_is_detected`
-- `assert` -> `sample_rust.rs::new_repo_is_empty`
-- `assert_eq` -> `sample_rust.rs::create_user_saves_to_repo`
-- `sample_rust.rs::InMemoryRepo.new` -> `sample_rust.rs::create_user_saves_to_repo`
-- `sample_rust.rs::InMemoryRepo.new` -> `sample_rust.rs::new_repo_is_empty`
-- `sample_rust.rs::create_user` -> `sample_rust.rs::create_user_saves_to_repo`
+| CALLS | 20 | 20 | 20 | 1.000 | 1.000 |
+| CONTAINS | 27 | 27 | 27 | 1.000 | 1.000 |
+| IMPLEMENTS | 1 | 1 | 1 | 1.000 | 1.000 |
+| IMPORTS_FROM | 1 | 1 | 1 | 1.000 | 1.000 |
+| TESTED_BY | 6 | 6 | 6 | 1.000 | 1.000 |
 
 ### Language corpus: java
 
