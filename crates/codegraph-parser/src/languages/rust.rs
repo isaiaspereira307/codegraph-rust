@@ -9,11 +9,12 @@ use tree_sitter::{Node, Tree, TreeCursor};
 
 /// Advanced Rust AST extractor using tree-sitter-rust.
 ///
-/// Extracts:
-/// - structs, traits, impls, functions, enums, modules
-/// - tracks trait implementations, generic parameters, lifetimes
-/// - builds dependency info for `use` statements (stored in node metadata)
-/// - handles macros, async functions, unsafe blocks
+/// Extracts, in code-review-graph's shape:
+/// - structs, enums and traits as types; functions, methods and trait signatures as functions
+///   (an `impl` or `mod` is a scope, not a node)
+/// - `IMPLEMENTS` for `impl Trait for Type`, `use` trees as imports
+/// - calls (including macros) from the enclosing function, generic parameters, lifetimes,
+///   async and unsafe markers
 ///
 /// Notes:
 /// - We encode rich details in `CodeNode.metadata.attributes` to avoid API changes.
@@ -336,8 +337,6 @@ impl<'a> Collector<'a> {
             // Like code-review-graph, an impl is not a node: it only scopes its methods to the
             // type it names, wherever it is written.
             "impl_item" => {
-                let impl_info = parse_impl_signature(&node, self.content)
-                    .unwrap_or_else(|| parse_impl_signature_text(&self.node_text(&node)));
                 let type_name = node
                     .child_by_field_name("type")
                     .map(|t| rust_path_segments(t, self.content))
@@ -356,8 +355,11 @@ impl<'a> Collector<'a> {
                 }
 
                 let mut next_ctx = ctx.clone();
-                next_ctx.current_impl_for = impl_info.for_type;
-                next_ctx.current_impl_trait = impl_info.trait_name;
+                next_ctx.current_impl_for =
+                    node.child_by_field_name("type").map(|t| self.node_text(&t));
+                next_ctx.current_impl_trait = node
+                    .child_by_field_name("trait")
+                    .map(|t| self.node_text(&t));
                 next_ctx.current_trait = None;
                 next_ctx.class_name = type_name;
                 self.function_stack.push(None);
@@ -982,112 +984,6 @@ fn flatten_use(node: Node, content: &str, prefix: &[String]) -> Vec<(String, Str
     }
 }
 
-#[derive(Default, Debug)]
-struct ImplInfo {
-    trait_name: Option<String>,
-    for_type: Option<String>,
-    generics: Vec<String>,
-    lifetimes: Vec<String>,
-}
-
-fn parse_impl_signature(node: &Node, content: &str) -> Option<ImplInfo> {
-    // Prefer AST-based extraction using fields when available
-    let mut info = ImplInfo::default();
-    if let Some(tp) = node.child_by_field_name("type_parameters") {
-        // Collect generics and lifetimes
-        let mut c = tp.walk();
-        if c.goto_first_child() {
-            loop {
-                let n = c.node();
-                match n.kind() {
-                    "type_parameter" => {
-                        if let Some(t) = child_text_by_kinds(n, content, &["type_identifier"]) {
-                            info.generics.push(t);
-                        }
-                    }
-                    "lifetime_parameter" => {
-                        if let Some(lf) = child_text_by_kinds(n, content, &["lifetime"]) {
-                            info.lifetimes.push(lf);
-                        }
-                    }
-                    _ => {}
-                }
-                if !c.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-    }
-    if let Some(tr) = node.child_by_field_name("trait") {
-        info.trait_name = Some(tr.utf8_text(content.as_bytes()).ok()?.to_string());
-    }
-    if let Some(ty) = node.child_by_field_name("type") {
-        info.for_type = Some(ty.utf8_text(content.as_bytes()).ok()?.to_string());
-    }
-    Some(info)
-}
-
-fn parse_impl_signature_text(text: &str) -> ImplInfo {
-    // Fallback robust text-based parse
-    // Matches forms like: impl<T> Trait for Type { ... } and impl<T> Type { ... }
-    let mut info = ImplInfo::default();
-    // generics
-    if let Some(start) = text.find('<') {
-        if let Some(end) = matching_angle(text, start) {
-            let inside = &text[start + 1..end];
-            for tok in inside.split(',') {
-                let t = tok.trim();
-                if t.is_empty() {
-                    continue;
-                }
-                if t.starts_with('\'') {
-                    info.lifetimes.push(t.to_string());
-                } else if t.starts_with("const ") {
-                    info.generics.push(t.to_string());
-                } else {
-                    // remove bounds (after ':') for a clean name
-                    let name = t.split(':').next().unwrap_or(t).trim().to_string();
-                    info.generics.push(name);
-                }
-            }
-        }
-    }
-    let s = text.replace('\n', " ");
-    if let Some(idx) = s.find(" for ") {
-        // trait impl
-        let head = s.trim_start_matches("impl").trim();
-        let trait_part = head[..idx - 0].trim();
-        let after_for = &s[idx + 5..];
-        let ty = after_for.split('{').next().unwrap_or(after_for).trim();
-        info.trait_name = Some(trait_part.to_string());
-        info.for_type = Some(ty.trim_end().to_string());
-    } else {
-        // inherent impl: impl Type { ... }
-        if let Some(after_impl) = s.strip_prefix("impl ") {
-            let ty = after_impl.split('{').next().unwrap_or(after_impl).trim();
-            info.for_type = Some(ty.to_string());
-        }
-    }
-    info
-}
-
-fn matching_angle(text: &str, open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (i, ch) in text.chars().enumerate().skip(open) {
-        match ch {
-            '<' => depth += 1,
-            '>' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 fn has_child_kind(node: Node, kind: &str) -> bool {
     let mut c = node.walk();
     if c.goto_first_child() {
@@ -1121,22 +1017,6 @@ fn subtree_contains_kind(node: &Node, kind: &str) -> bool {
         }
     }
     false
-}
-
-fn child_text_by_kinds(node: Node, content: &str, kinds: &[&str]) -> Option<String> {
-    let mut c = node.walk();
-    if c.goto_first_child() {
-        loop {
-            let n = c.node();
-            if kinds.iter().any(|k| n.kind() == *k) {
-                return n.utf8_text(content.as_bytes()).ok().map(|s| s.to_string());
-            }
-            if !c.goto_next_sibling() {
-                break;
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
