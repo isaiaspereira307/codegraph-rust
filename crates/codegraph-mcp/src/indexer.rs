@@ -570,7 +570,7 @@ impl ProjectIndexer {
             // Clone files for parsing (we need them again for metadata persistence)
             let ast_cache = codegraph_core::artifact_cache::ArtifactCache::new(
                 self.project_root.join(".codegraph/index-cache"),
-                "unified-ast-v7",
+                &crate::estimation::ast_cache_namespace(),
             );
             let parse_start = std::time::Instant::now();
             let (mut nodes, mut edges, pstats) = crate::estimation::parse_snapshots_with_cache(

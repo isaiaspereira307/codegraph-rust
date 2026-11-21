@@ -171,7 +171,13 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    nome final da chamada, chamadas no módulo saem do `File`, nós `Test` de
    `describe`/`it`/`test`, `INHERITS` como texto. Corpus: 1.00 em nós, CALLS, CONTAINS,
    IMPORTS_FROM, INHERITS e TESTED_BY. Fica para depois: `REFERENCES` (comum com Python),
-   TSX/JSX, aliases npm e workspaces, guardas mortas (`if (false)`).
+   TSX/JSX e wrappers de componente (`memo`/`forwardRef`), aliases npm e workspaces, guardas
+   mortas (`if (false)`), CommonJS (`require(...)`, `import(...)` como IMPORTS_FROM) e funções
+   atribuídas a membro (`exports.f = function…`, `Foo.prototype.bar = …`, CRG
+   `_extract_js_member_functions`), valores `function*` e campos privados `#x`.
+   `INHERITS` fica como texto só para TS/JS (único extrator que gera `Extends` hoje); o
+   `GraphQuery` ignora alvos de texto, então as ferramentas não seguem herança até ele
+   resolver `INHERITS` por nome.
 2. **Go** (CALLS 0.13): o extrator grava texto de chamada multi-linha / literais de closure
    como alvo; `IMPORTS_FROM` no CRG aponta para o diretório do pacote; ligação no mesmo
    pacote (vários arquivos).

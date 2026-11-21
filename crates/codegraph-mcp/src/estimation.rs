@@ -17,6 +17,12 @@ use tracing::{debug, info, warn};
 
 use crate::indexer::{IndexerConfig, extraction_policy_for_tier, filter_edges_for_tier};
 
+/// Namespace (and key prefix) of cached per-file extractions. Cached extractions are already
+/// shaped for code-review-graph, so a new graph shape must not reuse them.
+pub(crate) fn ast_cache_namespace() -> String {
+    format!("unified-ast-v7-{}", crate::indexer::GRAPH_SHAPE_VERSION)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RepositoryCounts {
     pub total_files: usize,
@@ -166,7 +172,7 @@ pub(crate) async fn parse_snapshots_with_cache(
                 .and_then(|root| file_path.strip_prefix(root).ok())
                 .map(|rel| rel.to_string_lossy().into_owned());
             let cache_key = codegraph_core::artifact_cache::fingerprint(&(
-                "unified-ast-v7",
+                ast_cache_namespace(),
                 parser_ref.project_root(),
                 &file_path,
                 &rel_path,
@@ -428,5 +434,16 @@ mod tests {
             );
         }
         assert_eq!(orders[0], orders[1]);
+    }
+}
+
+#[cfg(test)]
+mod ast_cache_tests {
+    use super::*;
+
+    #[test]
+    fn ast_cache_namespace_changes_with_the_graph_shape() {
+        // Cached extractions are already shaped; a new shape must not reuse them.
+        assert!(ast_cache_namespace().ends_with(crate::indexer::GRAPH_SHAPE_VERSION));
     }
 }
