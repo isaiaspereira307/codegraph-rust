@@ -31,7 +31,17 @@ CALLS, CONTAINS, IMPLEMENTS, IMPORTS_FROM e TESTED_BY (de 0.737 / 0.500 / 0.677 
 0); sem nos `impl`, o corpus rust ficou deterministico (duas execucoes iguais). As outras
 linguagens nao mudaram.
 
-"Depois" abaixo e o relatorio regerado apos o plano Rust.
+Plano Python (`docs/superpowers/plans/2026-11-20-fase2-python.md`): python passou a 1.000 em
+nos (sem divergentes), CONTAINS, IMPORTS_FROM, INHERITS e TESTED_BY (de 1.000 / 1.000 / 1.000 /
+0 / 0.500), e CALLS de 0.545 para 0.923 (resolved 0.833); a unica chamada que falta e
+`process_request` -> `AuthService.authenticate`, receptor tipado por anotacao (fora do escopo).
+REFERENCES segue 0 no tier padrao (`fast` descarta `References`); com `--index-tier full` e
+`CODEGRAPH_ANALYZERS=0` fica 1.000 no corpus e na sonda. Sonda `scripts/parity/probes/python`:
+nos, CALLS, IMPORTS_FROM, INHERITS e TESTED_BY 1.000; CONTAINS 0.958 (metodo de classe
+aninhada: o CRG grava a origem como texto `F::Inner`, sem no). As outras linguagens nao
+mudaram (`is_test` em todo no de arquivo de teste nao gerou divergencia).
+
+"Depois" abaixo e o relatorio regerado apos o plano Python.
 
 # Depois
 
@@ -49,55 +59,28 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
-| CALLS | 25 | 26 | 18 | 0.545 | 1.000 |
+| CALLS | 25 | 25 | 24 | 0.923 | 0.833 |
 | CONTAINS | 26 | 26 | 26 | 1.000 | 1.000 |
 | IMPORTS_FROM | 5 | 5 | 5 | 1.000 | 1.000 |
-| INHERITS | 1 | 0 | 0 | 0.000 | 1.000 |
+| INHERITS | 1 | 1 | 1 | 1.000 | 1.000 |
 | REFERENCES | 5 | 0 | 0 | 0.000 | 0.000 |
-| TESTED_BY | 6 | 6 | 4 | 0.500 | 0.500 |
+| TESTED_BY | 6 | 6 | 6 | 1.000 | 1.000 |
 
-#### CALLS: edges only in CRG
+##### CALLS: edges only in CRG
 
-- `multi_call_example.py::process_document` -> `get`
-- `sample_callback_refs.py::register_keyword_callback` -> `set_defaults`
-- `sample_callback_refs.py::trigger_executor` -> `submit`
-- `sample_python.py::AuthService.__init__` -> `__init__`
-- `sample_python.py::create_auth_service` -> `get`
-- `test_sample.py::test_authenticate_invalid` -> `authenticate`
-- `test_sample.py::test_authenticate_valid` -> `authenticate`
+- `sample_python.py::process_request` -> `sample_python.py::AuthService.authenticate`
 
-#### CALLS: edges only in Rust
+##### CALLS: edges only in Rust
 
-- `multi_call_example.py::process_document` -> `first.get`
-- `multi_call_example.py::process_document` -> `second.get`
-- `sample_callback_refs.py::register_keyword_callback` -> `parser.set_defaults`
-- `sample_callback_refs.py::trigger_executor` -> `executor.submit`
-- `sample_python.py::AuthService.__init__` -> `super().__init__`
-- `sample_python.py::create_auth_service` -> `os.environ.get`
-- `test_sample.py::test_authenticate_invalid` -> `service.authenticate`
-- `test_sample.py::test_authenticate_valid` -> `service.authenticate`
+- `sample_python.py::process_request` -> `authenticate`
 
-#### INHERITS: edges only in CRG
-
-- `sample_python.py::AuthService` -> `BaseService`
-
-#### REFERENCES: edges only in CRG
+##### REFERENCES: edges only in CRG
 
 - `sample_callback_refs.py::register_keyword_callback` -> `sample_callback_refs.py::keyword_callback`
 - `sample_callback_refs.py::trigger_executor` -> `sample_callback_refs.py::executor_callback`
 - `sample_callback_refs.py::trigger_filter` -> `sample_callback_refs.py::filter_callback`
 - `sample_callback_refs.py::trigger_map` -> `sample_callback_refs.py::map_callback`
 - `sample_python.py` -> `sample_python.py::BaseService`
-
-#### TESTED_BY: edges only in CRG
-
-- `authenticate` -> `test_sample.py::test_authenticate_invalid`
-- `authenticate` -> `test_sample.py::test_authenticate_valid`
-
-#### TESTED_BY: edges only in Rust
-
-- `service.authenticate` -> `test_sample.py::test_authenticate_invalid`
-- `service.authenticate` -> `test_sample.py::test_authenticate_valid`
 
 ### Language corpus: typescript
 
@@ -118,7 +101,7 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 | REFERENCES | 7 | 0 | 0 | 0.000 | 0.000 |
 | TESTED_BY | 1 | 1 | 1 | 1.000 | 1.000 |
 
-#### REFERENCES: edges only in CRG
+##### REFERENCES: edges only in CRG
 
 - `sample_typescript.ts::UserRepository` -> `sample_typescript.ts::UserData`
 - `sample_typescript.ts::UserRepository.findById` -> `sample_typescript.ts::UserData`

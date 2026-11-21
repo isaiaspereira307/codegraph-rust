@@ -155,7 +155,7 @@ Jaccard depois do plano 1 (antes → depois, nós / CALLS / IMPORTS_FROM):
 
 | linguagem | nós | CALLS | IMPORTS_FROM |
 |---|---|---|---|
-| python | 0.51 → 1.00 | 0.12 → 0.55 | 0 → 1.00 |
+| python | 0.51 → 1.00 | 0.12 → 0.55 → **0.92** | 0 → 1.00 |
 | typescript | 0.20 → 0.44 → **1.00** | 0 → 0.13 → **1.00** | 0 → 1.00 |
 | go | 0.30 → 1.00 | 0.16 → 0.13 → **1.00** | 0 → 1.00 |
 | rust | 0.38 → 0.74 → **1.00** | 0.17 → 0.50 → **1.00** | 0 → 0.50 → **1.00** |
@@ -216,8 +216,30 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    busca limitada à raiz do repositório) e, com ela, `IMPLEMENTS`/`X::m` para itens de outro
    arquivo; `IMPLEMENTS` e CONTAINS de `impl` cujo tipo não está no arquivo (o CRG grava origem
    `F::Tipo` sem nó); receptor tipado (`let r = Repo::new(); r.save()`).
-5. **Python** (CALLS 0.55, TESTED_BY 0.50): `_python_folder_hides_module`; `pkg/m.py` vs
-   `pkg/m/__init__.py` (CRG escolhe o pacote); `INHERITS`, `REFERENCES`.
+5. ✅ **Python** (plano `docs/superpowers/plans/2026-11-20-fase2-python.md`, commits
+   `d1c56ba..HEAD`): extrator reescrito no molde Go/Java/Rust (pré-passe de nomes de topo,
+   imports `from`/`import` e `TYPE_CHECKING`; chamador por pilha, corpo de classe e decorators
+   saem do `File`), nome de chamada e receptor do CRG (`self`/`cls`/classe local → `Classe.m`;
+   nome importado leva `crg_py_import` "módulo|símbolo", resolvido pelo `ModuleIndex`; resto
+   `crg_unbound`), guarda morta estática (`if False`, `TYPE_CHECKING`), `INHERITS` texto,
+   `REFERENCES` de valores, `is_test` em todo nó de arquivo de teste (todas as linguagens),
+   classe aninhada com escopo-folha (cadeia completa quando a folha é ambígua), candidatos de
+   submódulo em `from M import x`, `_python_folder_hides_module`, `import a.b` liga `a` e nome
+   de módulo solto (`from pkg import b; b()`) liga ao `File`. Corpus: 1.00 em nós (sem
+   divergentes), CONTAINS, IMPORTS_FROM, INHERITS e TESTED_BY; CALLS 0.92 (falta só
+   `process_request(service: AuthService)` → `AuthService.authenticate`, receptor por
+   anotação). Sonda `scripts/parity/probes/python`: 1.00 em nós, CALLS, IMPORTS_FROM, INHERITS e
+   TESTED_BY; CONTAINS 0.96. Fica para depois: `REFERENCES` no tier padrão (o `fast` descarta
+   `References`; com `--index-tier full` o corpus e a sonda dão 1.00 — decidir se as referências
+   de valor no formato do CRG passam a valer no `fast`); CONTAINS de membro de classe aninhada
+   (o CRG grava a origem como texto `F::Inner`, sem nó; o writer só grava origem por nó);
+   evidência de receptor do CRG (`_apply_python_receiver_evidence`): receptor tipado por
+   anotação/atribuição, caminho de módulo pontuado (`import q; q.lib.f()`) e construtor de
+   classe de módulo (`mod.Thing().go()`); reexportação de pacote (`_python_reexport_origin`) e
+   shims `sys.modules`; reescrita pós-build por sufixo (`python_resolver.py`); `line` das
+   arestas; escopo-folha de classe aninhada em C++. A lista da stdlib é a do CPython 3.15; o CRG
+   usa `sys.stdlib_module_names` do interpretador que o roda (3.13 no harness: difere em
+   `annotationlib`, `compression`, `profiling`, `sre_*` e módulos `_privados`).
 6. Demais linguagens (C#, C/C++, Ruby, PHP, Kotlin, Swift, Dart): nenhuma resolve imports
    ainda; corpus e fixtures a criar.
 
