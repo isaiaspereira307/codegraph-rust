@@ -131,10 +131,7 @@ impl GraphToolExecutor {
     /// Create a new tool executor with explicit context window for result size limiting
     /// max_result_bytes = context_window * 2 (about half the window at 4 bytes/token), capped at
     /// `MAX_RESULT_BYTES_CEILING`
-    pub fn with_context_window(
-        graph_query: Arc<GraphQuery>,
-        context_window: usize,
-    ) -> Self {
+    pub fn with_context_window(graph_query: Arc<GraphQuery>, context_window: usize) -> Self {
         // Calculate max result bytes: use ~50% of context window, assuming ~4 chars per token
         // This leaves room for system prompt, conversation history, and response
         let max_result_bytes = context_window

@@ -210,11 +210,21 @@ fn tool_run_reads_the_sqlite_graph() {
     let (main_id, helper_id) = seed_graph(project.path());
 
     let output = run(
-        &["tool", "run", "find_nodes_by_name", "--params", r#"{"name":"helper"}"#],
+        &[
+            "tool",
+            "run",
+            "find_nodes_by_name",
+            "--params",
+            r#"{"name":"helper"}"#,
+        ],
         None,
         project.path(),
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     let found = &response["result"][0];
     assert_eq!(found["name"], "helper");
@@ -222,11 +232,21 @@ fn tool_run_reads_the_sqlite_graph() {
 
     let params = json!({ "node_id": helper_id, "edge_type": "calls" }).to_string();
     let output = run(
-        &["tool", "run", "get_reverse_dependencies", "--params", &params],
+        &[
+            "tool",
+            "run",
+            "get_reverse_dependencies",
+            "--params",
+            &params,
+        ],
         None,
         project.path(),
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["result"][0]["id"], main_id);
     assert_eq!(response["result"][0]["dependent_depth"], 1);
@@ -237,7 +257,11 @@ fn db_check_reports_the_sqlite_graph() {
     let project = tempfile::tempdir().unwrap();
     seed_graph(project.path());
     let output = run(&["db-check"], None, project.path());
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains(".code-review-graph/graph.db"), "{stdout}");
     assert!(stdout.contains("schema 15"), "{stdout}");
