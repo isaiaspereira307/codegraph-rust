@@ -1237,9 +1237,15 @@ impl ProjectIndexer {
                     }
                     // Like code-review-graph, keep an unresolved CRG-kind target as its text.
                     None if Self::keeps_unresolved_target(edge) => {
+                        let text = Self::unbound_target(&catalog, edge);
                         let mut record =
-                            CodeEdge::unresolved(edge.from, &edge.to, edge.edge_type.clone());
+                            CodeEdge::unresolved(edge.from, &text, edge.edge_type.clone());
                         record.metadata.extend(edge.metadata.clone());
+                        if text != edge.to {
+                            record
+                                .metadata
+                                .insert("claimed_endpoint".into(), edge.to.clone());
+                        }
                         record
                     }
                     None => continue,
@@ -2095,6 +2101,12 @@ impl ProjectIndexer {
         normalized: &mut HashMap<String, Vec<String>>,
         lexical_cache: &mut HashMap<(NodeId, String), Option<(NodeId, f64)>>,
     ) -> (Option<NodeId>, (&'static str, f64)) {
+        if edge
+            .metadata
+            .contains_key(codegraph_parser::languages::crg_shape::UNTYPED_RECEIVER_ATTR)
+        {
+            return (catalog.exact_free_function(edge), ("exact", 1.0));
+        }
         let mut target = catalog.exact(edge, &[]);
         let mut provenance = (
             if target.is_some_and(|id| edge.metadata.get("target_node_id") == Some(&id.to_string()))
@@ -2105,10 +2117,13 @@ impl ProjectIndexer {
             },
             1.0f64,
         );
+        // A path-qualified target names one symbol of one file: no other spelling or
+        // look-alike is that symbol (code-review-graph settles it to the plain name instead).
         if target.is_some()
             || edge
                 .metadata
                 .contains_key(codegraph_parser::languages::crg_shape::VERBATIM_TARGET_ATTR)
+            || catalog.is_path_qualified(&edge.to)
         {
             return (target, provenance);
         }
@@ -2133,6 +2148,25 @@ impl ProjectIndexer {
             }
         }
         (target, provenance)
+    }
+
+    /// The text an unresolved edge keeps. Like code-review-graph's `_settle_unbound_endpoints`,
+    /// a CALLS/REFERENCES target written `<file>::<Owner>.<name>` that names no node falls back
+    /// to the name the source wrote (`./m.rs::Foo.clone` -> `clone`).
+    pub(crate) fn unbound_target(
+        catalog: &crate::resolution::SymbolCatalog,
+        edge: &EdgeRelationship,
+    ) -> String {
+        if matches!(edge.edge_type, EdgeType::Calls | EdgeType::References)
+            && catalog.is_path_qualified(&edge.to)
+            && let Some(plain) = edge
+                .to
+                .split_once("::")
+                .and_then(|(_, symbol)| symbol.rsplit(['.', ':']).find(|part| !part.is_empty()))
+        {
+            return plain.to_string();
+        }
+        edge.to.clone()
     }
 
     /// Whether an unresolved edge is stored with its target text, as code-review-graph does.
@@ -2621,6 +2655,109 @@ mod tests {
             "true".into(),
         );
         assert_eq!(resolve(&edge).0, None);
+    }
+
+    #[test]
+    fn unbound_path_qualified_calls_fall_back_to_the_plain_name() {
+        let node = |name: &str, kind: codegraph_core::NodeType| {
+            let mut node = CodeNode::new(
+                name.to_string(),
+                Some(kind),
+                Some(codegraph_core::Language::Rust),
+                codegraph_core::Location {
+                    file_path: "./m.rs".into(),
+                    line: 1,
+                    column: 0,
+                    end_line: None,
+                    end_column: None,
+                },
+            );
+            node.set_deterministic_id("test");
+            node
+        };
+        let file = node("./m.rs", codegraph_core::NodeType::Other("File".into()));
+        let mut sig = node("sig", codegraph_core::NodeType::Function);
+        sig.metadata
+            .attributes
+            .insert("qualified_name".into(), "./m.rs::String.sig".into());
+        let catalog = crate::resolution::SymbolCatalog::new(&[file, sig.clone()]);
+        let edge = EdgeRelationship {
+            from: sig.id,
+            to: "./m.rs::String.len".into(),
+            edge_type: EdgeType::Calls,
+            metadata: std::collections::HashMap::new(),
+            span: None,
+        };
+        let resolved = ProjectIndexer::resolve_target(
+            &catalog,
+            &edge,
+            &mut std::collections::HashMap::new(),
+            &mut std::collections::HashMap::new(),
+        );
+        assert_eq!(resolved.0, None);
+        assert_eq!(ProjectIndexer::unbound_target(&catalog, &edge), "len");
+        let bare = EdgeRelationship {
+            to: "HashMap::new".into(),
+            ..edge.clone()
+        };
+        assert_eq!(
+            ProjectIndexer::unbound_target(&catalog, &bare),
+            "HashMap::new"
+        );
+    }
+
+    #[test]
+    fn untyped_receiver_calls_bind_only_free_functions() {
+        let node = |name: &str, qualified: &str| {
+            let mut node = CodeNode::new(
+                name.to_string(),
+                Some(codegraph_core::NodeType::Function),
+                Some(codegraph_core::Language::Rust),
+                codegraph_core::Location {
+                    file_path: "./m.rs".into(),
+                    line: 1,
+                    column: 0,
+                    end_line: None,
+                    end_column: None,
+                },
+            );
+            node.metadata
+                .attributes
+                .insert("qualified_name".into(), qualified.into());
+            node.set_deterministic_id("test");
+            node
+        };
+        let mut method = node("a", "./m.rs::Foo.a");
+        method
+            .metadata
+            .attributes
+            .insert("parent_name".into(), "Foo".into());
+        let free = node("b", "./m.rs::b");
+        let caller = node("main", "./m.rs::main");
+        let catalog =
+            crate::resolution::SymbolCatalog::new(&[method, free.clone(), caller.clone()]);
+        let call = |to: &str| EdgeRelationship {
+            from: caller.id,
+            to: to.into(),
+            edge_type: EdgeType::Calls,
+            metadata: std::collections::HashMap::from([(
+                codegraph_parser::languages::crg_shape::UNTYPED_RECEIVER_ATTR.to_string(),
+                "true".to_string(),
+            )]),
+            span: None,
+        };
+        let resolve = |edge: &EdgeRelationship| {
+            ProjectIndexer::resolve_target(
+                &catalog,
+                edge,
+                &mut std::collections::HashMap::new(),
+                &mut std::collections::HashMap::new(),
+            )
+            .0
+        };
+        assert_eq!(resolve(&call("a")), None);
+        assert_eq!(resolve(&call("aa")), None);
+        assert_eq!(resolve(&call("b")), Some(free.id));
     }
 
     #[test]

@@ -10,6 +10,8 @@ struct Symbol {
     id: NodeId,
     file: String,
     qualified: String,
+    /// Declared in a class or type (`parent_name`): a method, not a free function.
+    has_parent: bool,
 }
 
 struct LexicalCandidate {
@@ -104,6 +106,7 @@ impl SymbolCatalog {
                         .get("qualified_name")
                         .cloned()
                         .unwrap_or_else(|| node.name.to_string()),
+                    has_parent: node.metadata.attributes.contains_key("parent_name"),
                 },
             );
             for alias in aliases(node) {
@@ -146,6 +149,14 @@ impl SymbolCatalog {
             .filter(|(_, ids)| ids.len() == 1)
             .map(|(alias, ids)| (alias.clone(), ids[0]))
             .collect()
+    }
+
+    /// Whether `target` is spelled `<indexed file>::<symbol>`, as extractors name a symbol of
+    /// a file they know (code-review-graph's path-qualified endpoint).
+    pub(crate) fn is_path_qualified(&self, target: &str) -> bool {
+        target
+            .split_once("::")
+            .is_some_and(|(head, _)| self.file_nodes.contains_key(head))
     }
 
     pub(crate) fn ambiguous(&self, alias: &str) -> bool {
@@ -198,11 +209,26 @@ impl SymbolCatalog {
     }
 
     pub(crate) fn exact(&self, edge: &EdgeRelationship, variants: &[String]) -> Option<NodeId> {
+        self.exact_where(edge, variants, |_| true)
+    }
+
+    /// `exact` without variants, skipping methods: what a call on a receiver of unknown type
+    /// can still mean (code-review-graph `_receiver_is_untyped`).
+    pub(crate) fn exact_free_function(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        self.exact_where(edge, &[], |symbol| !symbol.has_parent)
+    }
+
+    fn exact_where(
+        &self,
+        edge: &EdgeRelationship,
+        variants: &[String],
+        keep: impl Fn(&Symbol) -> bool,
+    ) -> Option<NodeId> {
         if let Some(id) = edge
             .metadata
             .get("target_node_id")
             .and_then(|id| NodeId::parse_str(id).ok())
-            && self.symbols.contains_key(&id)
+            && self.symbols.get(&id).is_some_and(&keep)
         {
             return Some(id);
         }
@@ -210,7 +236,8 @@ impl SymbolCatalog {
             let Some(ids) = self.aliases.get(alias) else {
                 continue;
             };
-            let reachable = self.reachable(&edge.to, alias, ids, edge.from);
+            let mut reachable = self.reachable(&edge.to, alias, ids, edge.from);
+            reachable.retain(|id| self.symbols.get(id).is_some_and(&keep));
             // A target spelled as a symbol's exact qualified name (`f.java::User`) names that
             // symbol, not a member that merely shares the `file::name` alias (`User.User`).
             let named: Vec<_> = reachable

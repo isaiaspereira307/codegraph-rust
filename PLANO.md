@@ -206,7 +206,10 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    `receiver`, `self.m()`/`Self::m` → `Tipo.m`, `X::m`/`mod::f` resolvidos no arquivo, macros como
    chamadas, guarda morta `if false` (para no `impl`), `use` achatado pela árvore (glob no topo
    não gera import). Caminhos não resolvidos ficam como texto com `crg_verbatim_target`: o indexer
-   só os liga por alias exato (sem normalizar nem busca léxica). Corpus: 1.00 em nós, CALLS,
+   só os liga por alias exato (sem normalizar nem busca léxica). `enum` vira `Class`. Como o
+   `_settle_unbound_endpoints` do CRG (vale para toda linguagem), CALLS/REFERENCES para
+   `<arquivo>::Dono.m` sem nó viram `m` (`self.clone()` derivado), sem busca léxica; chamada com
+   receptor sem tipo (`x.m()`, não `self`) só liga a função livre, nunca a método. Corpus: 1.00 em nós, CALLS,
    CONTAINS, IMPLEMENTS, IMPORTS_FROM e TESTED_BY, e determinístico. Fica para depois: resolução
    de módulos entre arquivos (`_resolve_rust_module_file`: raiz do crate por `lib.rs`/`main.rs`,
    `crate::`/`super::`/dependências do `Cargo.toml`, `use m::f` com primeiro segmento solto,

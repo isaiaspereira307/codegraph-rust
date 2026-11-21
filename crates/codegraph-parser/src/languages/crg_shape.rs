@@ -28,6 +28,10 @@ pub const DECORATORS_ATTR: &str = "decorators";
 /// only binds it to a symbol with that exact alias.
 pub const VERBATIM_TARGET_ATTR: &str = "crg_verbatim_target";
 
+/// Set by an extractor on a method call whose receiver's type it cannot know (Rust `v.map()`):
+/// like code-review-graph, the indexer never binds it to a method, only to a free function.
+pub const UNTYPED_RECEIVER_ATTR: &str = "crg_untyped_receiver";
+
 /// The node kind (`{:?}` of its `NodeType`) a node had before this pass turned it into a test.
 pub const PRE_SHAPE_KIND_ATTR: &str = "pre_shape_kind";
 

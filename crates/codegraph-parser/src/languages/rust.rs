@@ -129,7 +129,7 @@ impl<'a> Collector<'a> {
                     n.name.as_str() == type_name
                         && matches!(
                             n.node_type,
-                            Some(NodeType::Struct | NodeType::Enum | NodeType::Trait)
+                            Some(NodeType::Struct | NodeType::Class | NodeType::Trait)
                         )
                 })
                 .map(|n| n.id)
@@ -310,9 +310,10 @@ impl<'a> Collector<'a> {
             "enum_item" => {
                 if let Some(name) = self.child_text_by_kinds(node, &["type_identifier"]) {
                     let loc = self.location(&node);
+                    // code-review-graph stores a Rust enum as a Class.
                     let mut code = CodeNode::new(
                         name.clone(),
-                        Some(NodeType::Enum),
+                        Some(NodeType::Class),
                         Some(Language::Rust),
                         loc,
                     )
@@ -656,6 +657,9 @@ impl<'a> Collector<'a> {
             ("source_file".to_string(), self.file_path.to_string()),
         ]);
         if let Some(receiver) = receiver {
+            if receiver != "self" && receiver != "super" {
+                metadata.insert(crg_shape::UNTYPED_RECEIVER_ATTR.into(), "true".into());
+            }
             metadata.insert("receiver".into(), receiver);
         }
         if verbatim {
@@ -1345,5 +1349,37 @@ mod tests {
             ])
         );
         assert!(imports.iter().all(|(from, _)| from == "m.rs"));
+    }
+
+    #[test]
+    fn enums_are_classes() {
+        let r = extract_rust("pub enum E { X }\nimpl E { fn run() {} }\n", "m.rs");
+        let e = r.nodes.iter().find(|n| n.name.as_str() == "E").unwrap();
+        assert_eq!(e.node_type, Some(NodeType::Class));
+        assert!(edges(&r, EdgeType::Contains).contains(&("m.rs::E".into(), "m.rs::E.run".into())));
+    }
+
+    #[test]
+    fn calls_on_other_receivers_are_marked_untyped() {
+        let r = extract_rust(
+            "struct T;\nimpl T { fn m(&self) { self.m(); self.v.get(); } }\nfn f(x: T) { x.m(); }\n",
+            "m.rs",
+        );
+        let untyped: BTreeSet<_> = r
+            .edges
+            .iter()
+            .filter(|e| {
+                e.metadata
+                    .contains_key(crate::languages::crg_shape::UNTYPED_RECEIVER_ATTR)
+            })
+            .map(|e| (qualified(&r, &e.from), e.to.clone()))
+            .collect();
+        assert_eq!(
+            untyped,
+            BTreeSet::from([
+                ("m.rs::T.m".to_string(), "get".to_string()),
+                ("m.rs::f".to_string(), "m".to_string()),
+            ])
+        );
     }
 }
