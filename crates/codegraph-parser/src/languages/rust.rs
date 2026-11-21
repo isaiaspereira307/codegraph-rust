@@ -27,6 +27,8 @@ struct WalkContext {
     current_impl_trait: Option<String>,
     /// The trait whose body is being walked: its signatures and default methods belong to it.
     current_trait: Option<String>,
+    /// Bare name of the impl target or trait being walked (CRG `enclosing_class`).
+    class_name: Option<String>,
 }
 
 impl RustExtractor {
@@ -49,6 +51,7 @@ impl RustExtractor {
         let mut collector = Collector::new(content, file_path);
         collector.references = policy.references;
         collector.defined_names = defined_names(tree.root_node(), content);
+        collector.inline_module_items = inline_module_items(tree.root_node(), content);
         let mut cursor = tree.walk();
         collector.walk(&mut cursor, WalkContext::default());
         collector.into_result()
@@ -79,10 +82,14 @@ struct Collector<'a> {
     file_path: &'a str,
     nodes: Vec<CodeNode>,
     edges: Vec<EdgeRelationship>,
-    current_node_id: Option<NodeId>, // Track current context for edge relationships
+    /// Callers in scope, innermost last: a function, or `None` for an impl/trait body, whose
+    /// calls outside a function belong to the file (CRG `enclosing_func`).
+    function_stack: Vec<Option<NodeId>>,
     references: bool,
     /// CRG `defined_names`: struct/enum/trait/fn names declared at the top of the file.
     defined_names: HashSet<String>,
+    /// `m::item` for each struct/enum/trait/fn directly inside a top-level inline `mod m { }`.
+    inline_module_items: HashSet<String>,
     /// `impl Trait for Type` blocks, as (type name, trait path segments), turned into
     /// `IMPLEMENTS` edges once every type node of the file exists.
     pending_implements: Vec<(String, Vec<String>, Span)>,
@@ -95,9 +102,10 @@ impl<'a> Collector<'a> {
             file_path,
             nodes: Vec::new(),
             edges: Vec::new(),
-            current_node_id: None,
+            function_stack: Vec::new(),
             references: true,
             defined_names: HashSet::new(),
+            inline_module_items: HashSet::new(),
             pending_implements: Vec::new(),
         }
     }
@@ -256,10 +264,13 @@ impl<'a> Collector<'a> {
                     self.nodes.push(code);
 
                     let mut next_ctx = ctx.clone();
-                    next_ctx.current_trait = Some(name);
+                    next_ctx.current_trait = Some(name.clone());
                     next_ctx.current_impl_for = None;
                     next_ctx.current_impl_trait = None;
+                    next_ctx.class_name = Some(name);
+                    self.function_stack.push(None);
                     self.walk_children(cursor, &next_ctx);
+                    self.function_stack.pop();
                     return;
                 }
             }
@@ -347,7 +358,10 @@ impl<'a> Collector<'a> {
                 next_ctx.current_impl_for = impl_info.for_type;
                 next_ctx.current_impl_trait = impl_info.trait_name;
                 next_ctx.current_trait = None;
+                next_ctx.class_name = type_name;
+                self.function_stack.push(None);
                 self.walk_children(cursor, &next_ctx);
+                self.function_stack.pop();
                 return;
             }
 
@@ -417,56 +431,17 @@ impl<'a> Collector<'a> {
                         .attributes
                         .insert("qualified_name".into(), self.qname_with_impl(&ctx, &name));
 
-                    // REVOLUTIONARY: Set function context for edge extraction during AST traversal
                     let function_node_id = code.id;
-                    self.current_node_id = Some(function_node_id);
-
                     self.nodes.push(code);
+
+                    self.function_stack.push(Some(function_node_id));
+                    self.walk_children(cursor, &ctx);
+                    self.function_stack.pop();
+                    return;
                 }
             }
 
-            // Function calls (extract edges during AST traversal for MAXIMUM SPEED)
-            "call_expression" => {
-                if let Some(current_fn) = self.current_node_id {
-                    if let Some(function_name) = self.extract_call_target(&node) {
-                        let edge = EdgeRelationship {
-                            from: current_fn,
-                            to: function_name.clone(),
-                            edge_type: EdgeType::Calls,
-                            metadata: {
-                                let mut meta = HashMap::new();
-                                meta.insert("call_type".to_string(), "function_call".to_string());
-                                meta.insert("source_file".to_string(), self.file_path.to_string());
-                                meta
-                            },
-                            span: Some(self.span_for(&node)), // Attach span for LSP resolution
-                        };
-                        self.edges.push(edge);
-                    }
-                }
-            }
-
-            // Method calls (method.function() syntax)
-            "method_call_expression" => {
-                if let Some(current_fn) = self.current_node_id {
-                    if let Some(method_name) = self.child_text_by_kinds(node, &["field_identifier"])
-                    {
-                        let edge = EdgeRelationship {
-                            from: current_fn,
-                            to: method_name.clone(),
-                            edge_type: EdgeType::Calls,
-                            metadata: {
-                                let mut meta = HashMap::new();
-                                meta.insert("call_type".to_string(), "method_call".to_string());
-                                meta.insert("source_file".to_string(), self.file_path.to_string());
-                                meta
-                            },
-                            span: Some(self.span_for(&node)), // Attach span for LSP resolution
-                        };
-                        self.edges.push(edge);
-                    }
-                }
-            }
+            "call_expression" | "macro_invocation" => self.emit_call(node, &ctx),
 
             _ => {}
         }
@@ -607,31 +582,120 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Extract function call target for edge relationships (FASTEST edge extraction)
-    fn extract_call_target(&self, node: &Node) -> Option<String> {
-        // Try different patterns for function calls
-        if let Some(function_node) = node.child_by_field_name("function") {
-            // Direct function call: func_name()
-            if function_node.kind() == "identifier" {
-                return Some(self.node_text(&function_node));
-            }
-            // Scoped call: mod::func_name()
-            if function_node.kind() == "scoped_identifier" {
-                return Some(self.node_text(&function_node));
-            }
-            // Field access: obj.method()
-            if function_node.kind() == "field_expression" {
-                if let Some(field) = function_node.child_by_field_name("field") {
-                    return Some(self.node_text(&field));
-                }
-            }
+    /// A CALLS edge as code-review-graph records it: path name (`HashMap::new`), method name
+    /// with its `receiver`, or macro name; `self`/`Self::` and paths through the file's own
+    /// types or inline modules resolved here, other paths kept as verbatim text.
+    fn emit_call(&mut self, node: Node, ctx: &WalkContext) {
+        if is_in_rust_dead_guard(node, self.content) {
+            return;
         }
+        let (name, receiver) = if node.kind() == "macro_invocation" {
+            let Some(path) = node.child_by_field_name("macro") else {
+                return;
+            };
+            let segments = rust_path_segments(path, self.content);
+            if segments.is_empty() {
+                (self.node_text(&path), None)
+            } else {
+                (segments.join("::"), None)
+            }
+        } else {
+            let Some(mut callee) = node.child_by_field_name("function") else {
+                return;
+            };
+            let segments = rust_path_segments(callee, self.content);
+            if !segments.is_empty() {
+                (segments.join("::"), None)
+            } else {
+                while callee.kind() == "generic_function" {
+                    match callee.child_by_field_name("function") {
+                        Some(inner) => callee = inner,
+                        None => return,
+                    }
+                }
+                let (Some(value), Some(field)) = (
+                    callee.child_by_field_name("value"),
+                    callee.child_by_field_name("field"),
+                ) else {
+                    return;
+                };
+                if callee.kind() != "field_expression" {
+                    return;
+                }
+                (self.node_text(&field), Some(self.node_text(&value)))
+            }
+        };
 
-        // Fallback: extract any identifier from the call
-        self.child_text_by_kinds(
-            *node,
-            &["identifier", "scoped_identifier", "field_identifier"],
-        )
+        let mut verbatim = false;
+        let target = match (&receiver, &ctx.class_name) {
+            (Some(r), Some(class)) if r == "self" => format!("{}::{class}.{name}", self.file_path),
+            (None, Some(class)) if name.starts_with("Self::") => {
+                let method = name.rsplit("::").next().unwrap_or(&name);
+                format!("{}::{class}.{method}", self.file_path)
+            }
+            (Some(_), _) => name.clone(),
+            (None, _) if name.contains("::") => {
+                self.resolve_scoped_call(&name).unwrap_or_else(|| {
+                    verbatim = true;
+                    name.clone()
+                })
+            }
+            (None, _) => name.clone(),
+        };
+
+        let mut metadata = HashMap::from([
+            (
+                "call_type".to_string(),
+                if node.kind() == "macro_invocation" {
+                    "macro"
+                } else {
+                    "function_call"
+                }
+                .to_string(),
+            ),
+            ("source_file".to_string(), self.file_path.to_string()),
+        ]);
+        if let Some(receiver) = receiver {
+            metadata.insert("receiver".into(), receiver);
+        }
+        if verbatim {
+            metadata.insert(crg_shape::VERBATIM_TARGET_ATTR.into(), "true".into());
+        }
+        let from = match self.function_stack.last() {
+            Some(Some(id)) => *id,
+            _ => {
+                metadata.insert(crg_shape::FILE_SCOPE_ATTR.into(), "true".into());
+                NodeId::nil()
+            }
+        };
+        self.edges.push(EdgeRelationship {
+            from,
+            to: target,
+            edge_type: EdgeType::Calls,
+            metadata,
+            span: Some(self.span_for(&node)), // Attach span for LSP resolution
+        });
+    }
+
+    /// CRG `_resolve_rust_scoped_call`, within this file: `Type::m` for a top-level type or
+    /// function of the file, `m::item` for an item of an inline module.
+    fn resolve_scoped_call(&self, name: &str) -> Option<String> {
+        let parts: Vec<&str> = name.split("::").filter(|p| !p.is_empty()).collect();
+        let (method, prefix) = parts.split_last()?;
+        match prefix {
+            [] | ["Self"] => None,
+            [owner] if self.defined_names.contains(*owner) => {
+                Some(format!("{}::{owner}.{method}", self.file_path))
+            }
+            [module]
+                if self
+                    .inline_module_items
+                    .contains(&format!("{module}::{method}")) =>
+            {
+                Some(format!("{}::{method}", self.file_path))
+            }
+            _ => None,
+        }
     }
 
     /// REVOLUTIONARY: Extract references to types in function parameters and return type
@@ -785,6 +849,72 @@ fn defined_names(root: Node, content: &str) -> HashSet<String> {
         }
     }
     names
+}
+
+/// CRG `_RUST_INLINE_MODULE_KEY` entries: `m::item` for each struct/enum/trait/fn directly in
+/// the body of an inline `mod m { }` at the file root.
+fn inline_module_items(root: Node, content: &str) -> HashSet<String> {
+    let text = |n: Node| n.utf8_text(content.as_bytes()).unwrap_or("").to_string();
+    let mut items = HashSet::new();
+    let mut cursor = root.walk();
+    for module in root.named_children(&mut cursor) {
+        let (Some(name), Some(body)) = (
+            module.child_by_field_name("name"),
+            module.child_by_field_name("body"),
+        ) else {
+            continue;
+        };
+        if module.kind() != "mod_item" {
+            continue;
+        }
+        let mut body_cursor = body.walk();
+        for item in body.named_children(&mut body_cursor) {
+            if !matches!(
+                item.kind(),
+                "struct_item"
+                    | "enum_item"
+                    | "trait_item"
+                    | "function_item"
+                    | "function_signature_item"
+            ) {
+                continue;
+            }
+            if let Some(item_name) = item.child_by_field_name("name") {
+                items.insert(format!("{}::{}", text(name), text(item_name)));
+            }
+        }
+    }
+    items
+}
+
+/// CRG `_is_in_rust_dead_guard`: inside the consequence of an `if false` (parentheses
+/// unwrapped). The walk stops at an `impl_item`: an impl written in a dead branch still
+/// applies to its type, so its methods stay live.
+fn is_in_rust_dead_guard(node: Node, content: &str) -> bool {
+    let mut cursor = node.parent();
+    while let Some(current) = cursor {
+        if current.kind() == "impl_item" {
+            return false;
+        }
+        if current.kind() == "if_expression" {
+            let mut condition = current.child_by_field_name("condition");
+            while let Some(paren) = condition.filter(|c| c.kind() == "parenthesized_expression") {
+                let mut walk = paren.walk();
+                condition = paren.named_children(&mut walk).next();
+            }
+            if let (Some(condition), Some(consequence)) =
+                (condition, current.child_by_field_name("consequence"))
+                && condition.kind() == "boolean_literal"
+                && condition.utf8_text(content.as_bytes()) == Ok("false")
+                && consequence.start_byte() <= node.start_byte()
+                && node.end_byte() <= consequence.end_byte()
+            {
+                return true;
+            }
+        }
+        cursor = current.parent();
+    }
+    false
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1052,6 +1182,14 @@ mod tests {
             .collect()
     }
 
+    fn calls_from(result: &ExtractionResult, source: &str) -> BTreeSet<String> {
+        edges(result, EdgeType::Calls)
+            .into_iter()
+            .filter(|(from, _)| from == source)
+            .map(|(_, to)| to)
+            .collect()
+    }
+
     fn set(items: &[&str]) -> BTreeSet<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
@@ -1122,5 +1260,70 @@ mod tests {
             edges(&r, EdgeType::Implements),
             BTreeSet::from([("m.rs::Foo".into(), "fmt::Display".into())])
         );
+    }
+
+    #[test]
+    fn call_names_callers_and_targets_follow_crg() {
+        let r = extract_rust(
+            "mod util { pub fn h() {} }\nstruct T;\n\
+             impl T { fn m(&self) { self.m(); Self::m(self); self.v.get(); } const C: u8 = mk(); }\n\
+             fn mk() -> u8 { util::h(); tokio::select!{}; println!(\"x\"); crate::x::y();\n\
+               Vec::<u8>::new(); g::<u8>(); T::m(&T); HashMap::new(); (f)(); 1 }\nfn g<X>() {}\n",
+            "m.rs",
+        );
+        assert_eq!(calls_from(&r, "m.rs::T.m"), set(&["m.rs::T.m", "get"]));
+        assert_eq!(calls_from(&r, "m.rs"), set(&["mk"]));
+        assert_eq!(
+            calls_from(&r, "m.rs::mk"),
+            set(&[
+                "m.rs::h",
+                "tokio::select",
+                "println",
+                "crate::x::y",
+                "Vec::new",
+                "g",
+                "m.rs::T.m",
+                "HashMap::new",
+            ])
+        );
+        let verbatim: BTreeSet<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .filter(|e| {
+                e.metadata
+                    .contains_key(crate::languages::crg_shape::VERBATIM_TARGET_ATTR)
+            })
+            .map(|e| e.to.clone())
+            .collect();
+        assert_eq!(
+            verbatim,
+            set(&["tokio::select", "crate::x::y", "Vec::new", "HashMap::new"])
+        );
+        let get = r.edges.iter().find(|e| e.to == "get").unwrap();
+        assert_eq!(
+            get.metadata.get("receiver").map(String::as_str),
+            Some("self.v")
+        );
+    }
+
+    #[test]
+    fn call_after_nested_impl_leaves_the_outer_fn() {
+        let r = extract_rust(
+            "struct S;\nfn live() {}\nfn main() {\n if false { impl S { fn run() { live(); } } }\n S::run();\n}\n",
+            "m.rs",
+        );
+        assert_eq!(calls_from(&r, "m.rs::main"), set(&["m.rs::S.run"]));
+        assert_eq!(calls_from(&r, "m.rs::S.run"), set(&["live"]));
+    }
+
+    #[test]
+    fn calls_under_if_false_are_dead() {
+        let r = extract_rust(
+            "fn a(){} fn b(){} fn c(){} fn d(){}\n\
+             fn f() { if false { a(); x!(); } else { b(); } if true { c(); } if false && false { d(); } }\n",
+            "m.rs",
+        );
+        assert_eq!(calls_from(&r, "m.rs::f"), set(&["b", "c", "d"]));
     }
 }

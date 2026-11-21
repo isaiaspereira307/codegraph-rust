@@ -1201,44 +1201,13 @@ impl ProjectIndexer {
                     resolution_provenance.push(("inherits", 1.0f64));
                     continue;
                 }
-                let mut target = catalog.exact(edge, &[]);
-                let mut provenance = (
-                    if target.is_some_and(|id| {
-                        edge.metadata.get("target_node_id") == Some(&id.to_string())
-                    }) {
-                        "definition"
-                    } else {
-                        "exact"
-                    },
-                    1.0f64,
-                );
-                if target.is_none() {
-                    let variants = normalized.entry(edge.to.clone()).or_insert_with(|| {
-                        let mut variants = Self::normalize_symbol_target(&edge.to);
-                        if edge.to.starts_with("_R")
-                            || edge.to.starts_with("_ZN")
-                            || edge.to.contains('<')
-                        {
-                            variants.extend(Self::normalize_rust_symbol(&edge.to));
-                            variants.sort();
-                            variants.dedup();
-                        }
-                        variants
-                    });
-                    target = catalog.exact(edge, variants);
-                    provenance.0 = "normalized";
-                }
+                let (target, provenance) =
+                    Self::resolve_target(&catalog, edge, &mut normalized, &mut lexical_cache);
                 if target.is_some() {
-                    exact_count += 1;
-                }
-                if target.is_none() && !catalog.ambiguous(&edge.to) {
-                    let lexical = *lexical_cache
-                        .entry((edge.from, edge.to.clone()))
-                        .or_insert_with(|| catalog.fuzzy(edge));
-                    if let Some((id, score)) = lexical {
-                        target = Some(id);
-                        provenance = ("lexical", score);
+                    if provenance.0 == "lexical" {
                         lexical_count += 1;
+                    } else {
+                        exact_count += 1;
                     }
                 }
                 targets.push(target);
@@ -2117,6 +2086,55 @@ impl ProjectIndexer {
         symbol.trim().to_lowercase()
     }
 
+    /// Binds a call-like edge to a symbol: exact alias, then normalized variants, then a
+    /// lexical candidate. An edge marked `VERBATIM_TARGET_ATTR` keeps the text code-review-graph
+    /// keeps unless a symbol has exactly that alias.
+    pub(crate) fn resolve_target(
+        catalog: &crate::resolution::SymbolCatalog,
+        edge: &EdgeRelationship,
+        normalized: &mut HashMap<String, Vec<String>>,
+        lexical_cache: &mut HashMap<(NodeId, String), Option<(NodeId, f64)>>,
+    ) -> (Option<NodeId>, (&'static str, f64)) {
+        let mut target = catalog.exact(edge, &[]);
+        let mut provenance = (
+            if target.is_some_and(|id| edge.metadata.get("target_node_id") == Some(&id.to_string()))
+            {
+                "definition"
+            } else {
+                "exact"
+            },
+            1.0f64,
+        );
+        if target.is_some()
+            || edge
+                .metadata
+                .contains_key(codegraph_parser::languages::crg_shape::VERBATIM_TARGET_ATTR)
+        {
+            return (target, provenance);
+        }
+        let variants = normalized.entry(edge.to.clone()).or_insert_with(|| {
+            let mut variants = Self::normalize_symbol_target(&edge.to);
+            if edge.to.starts_with("_R") || edge.to.starts_with("_ZN") || edge.to.contains('<') {
+                variants.extend(Self::normalize_rust_symbol(&edge.to));
+                variants.sort();
+                variants.dedup();
+            }
+            variants
+        });
+        target = catalog.exact(edge, variants);
+        provenance.0 = "normalized";
+        if target.is_none() && !catalog.ambiguous(&edge.to) {
+            let lexical = *lexical_cache
+                .entry((edge.from, edge.to.clone()))
+                .or_insert_with(|| catalog.fuzzy(edge));
+            if let Some((id, score)) = lexical {
+                target = Some(id);
+                provenance = ("lexical", score);
+            }
+        }
+        (target, provenance)
+    }
+
     /// Whether an unresolved edge is stored with its target text, as code-review-graph does.
     /// Only CRG edge kinds from source extraction qualify: Rust-only analyzer kinds (uses,
     /// defines, ...) and FastML edges, whose targets are pattern labels such as
@@ -2556,6 +2574,53 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn verbatim_targets_skip_normalized_and_lexical_resolution() {
+        let node = |name: &str| {
+            let mut node = CodeNode::new(
+                name.to_string(),
+                Some(codegraph_core::NodeType::Function),
+                Some(codegraph_core::Language::Rust),
+                codegraph_core::Location {
+                    file_path: "m.rs".into(),
+                    line: 1,
+                    column: 0,
+                    end_line: None,
+                    end_column: None,
+                },
+            );
+            node.set_deterministic_id("test");
+            node
+        };
+        let mut new = node("new");
+        new.metadata
+            .attributes
+            .insert("method_of".into(), "Foo".into());
+        let caller = node("main");
+        let catalog = crate::resolution::SymbolCatalog::new(&[new.clone(), caller.clone()]);
+        let mut edge = EdgeRelationship {
+            from: caller.id,
+            to: "HashMap::new".into(),
+            edge_type: EdgeType::Calls,
+            metadata: std::collections::HashMap::new(),
+            span: None,
+        };
+        let resolve = |edge: &EdgeRelationship| {
+            ProjectIndexer::resolve_target(
+                &catalog,
+                edge,
+                &mut std::collections::HashMap::new(),
+                &mut std::collections::HashMap::new(),
+            )
+        };
+        assert_eq!(resolve(&edge), (Some(new.id), ("normalized", 1.0)));
+        edge.metadata.insert(
+            codegraph_parser::languages::crg_shape::VERBATIM_TARGET_ATTR.into(),
+            "true".into(),
+        );
+        assert_eq!(resolve(&edge).0, None);
     }
 
     #[test]
