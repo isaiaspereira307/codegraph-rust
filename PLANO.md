@@ -157,7 +157,7 @@ Jaccard depois do plano 1 (antes → depois, nós / CALLS / IMPORTS_FROM):
 |---|---|---|---|
 | python | 0.51 → 1.00 | 0.12 → 0.55 | 0 → 1.00 |
 | typescript | 0.20 → 0.44 → **1.00** | 0 → 0.13 → **1.00** | 0 → 1.00 |
-| go | 0.30 → 1.00 | 0.16 → 0.13 | 0 → 1.00 |
+| go | 0.30 → 1.00 | 0.16 → 0.13 → **1.00** | 0 → 1.00 |
 | rust | 0.38 → 0.74 | 0.17 → 0.50 | 0 → 0.50 |
 | java | 0.17 → 0.95 | 0 → 0.35 | 0 → 1.00 |
 
@@ -178,13 +178,21 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    `INHERITS` fica como texto só para TS/JS (único extrator que gera `Extends` hoje); o
    `GraphQuery` ignora alvos de texto, então as ferramentas não seguem herança até ele
    resolver `INHERITS` por nome.
-2. **Go** (CALLS 0.13): o extrator grava texto de chamada multi-linha / literais de closure
-   como alvo; `IMPORTS_FROM` no CRG aponta para o diretório do pacote; ligação no mesmo
-   pacote (vários arquivos).
+2. ✅ **Go** (plano `docs/superpowers/plans/2026-11-20-fase2-go.md`): todo `type_spec` vira
+   `Class` (alias `type A = B` não vira nó), nome final da chamada, chamador = função nomeada
+   (func literals não contam; fora de função sai do `File`), guarda morta `if false`, `recv.M()`
+   no receptor não sombreado resolvido para `Tipo.M` (port do `_go_receiver_binding_index`),
+   embedding como `INHERITS` texto. Corpus: 1.00 em nós, CALLS, CONTAINS e IMPORTS_FROM.
+   Medido no CRG: não há ligação no mesmo pacote entre arquivos (um `helper()` em `a.go` não
+   liga ao de `b.go`). Fica para depois: `IMPORTS_FROM` para o diretório do pacote via
+   `go.mod`/`replace`/`vendor` (alvo do CRG é um diretório, não um `File`), `is_test=1` em todo
+   nó de `_test.go`, e o ramo do CRG que liga nome solto ambíguo ao primeiro símbolo do arquivo.
+   A guarda morta só existe no extrator Go; TS e Rust ainda não a aplicam.
 3. **Java** (CALLS 0.35): `@Test` por anotações (decorators não são gravados pelos
    extratores); construtor/estático do mesmo pacote; `INHERITS`/`IMPLEMENTS`.
 4. **Rust** (CALLS 0.50, IMPORTS_FROM 0.50 — o único score de import abaixo de 1.0, TESTED_BY 0): nós `impl` duplicados (CONTAINS
-   pode ligar ao `impl` e não à struct); `#[test]` precisa de decorators; `use m::f` com
+   pode ligar ao `impl` e não à struct; qual dos dois ganha o sufixo `@L` varia entre execuções,
+   então o corpus rust não é determinístico); `#[test]` precisa de decorators; `use m::f` com
    primeiro segmento solto (CRG percorre a raiz do crate); raiz do crate por `lib.rs`/
    `main.rs`, não por `Cargo.toml`; grupos `use` aninhados; busca não limitada à raiz do
    repositório.

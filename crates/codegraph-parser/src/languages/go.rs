@@ -1,50 +1,39 @@
 // ABOUTME: Go language AST extractor for code intelligence
-// ABOUTME: Extracts packages, functions, methods, types, imports, and call edges
+// ABOUTME: Extracts packages, functions, methods, types, imports, embedding and call edges
 
+use super::crg_shape;
 use codegraph_core::{
     CodeNode, EdgeRelationship, EdgeType, ExtractionResult, Language, Location, NodeId, NodeType,
     Span,
 };
-use std::collections::HashMap;
-use tree_sitter::{Node, Tree, TreeCursor};
+use std::collections::{HashMap, HashSet};
+use tree_sitter::{Node, Tree};
 
-/// Advanced Go AST extractor for backend development intelligence.
+/// Go AST extractor in code-review-graph's shape.
 ///
 /// Extracts:
-/// - packages, functions, methods, types (struct, interface)
+/// - packages, functions, methods, types (every `type_spec`; aliases are not nodes)
 /// - imports (single and grouped)
-/// - function/method calls
-/// - struct embeddings and interface implementations
-/// - goroutines and channels patterns
-/// - error handling patterns
-///
-/// Notes:
-/// - Optimized for Go backend patterns
-/// - Captures composition over inheritance patterns
-/// - Handles Go's unique interface satisfaction model
+/// - calls by their final name (`fmt.Printf` -> `Printf`), leaving the enclosing named
+///   function, or the file outside every function; calls under `if false` are dropped
+/// - `recv.M()` on the method's own, unshadowed receiver as `<file>::Type.M`
+/// - struct and interface embedding as `Extends` text
 pub struct GoExtractor;
-
-#[derive(Default, Clone)]
-struct GoContext {
-    package_name: Option<String>,
-    current_type: Option<String>,
-    current_receiver: Option<String>,
-}
 
 impl GoExtractor {
     pub fn extract(tree: &Tree, content: &str, file_path: &str) -> Vec<CodeNode> {
-        let mut collector = GoCollector::new(content, file_path);
-        let mut cursor = tree.walk();
-        collector.walk(&mut cursor, GoContext::default());
-        collector.into_nodes()
+        Self::extract_with_edges(tree, content, file_path).nodes
     }
 
     /// Unified extraction of nodes AND edges in single AST traversal
     pub fn extract_with_edges(tree: &Tree, content: &str, file_path: &str) -> ExtractionResult {
         let mut collector = GoCollector::new(content, file_path);
-        let mut cursor = tree.walk();
-        collector.walk(&mut cursor, GoContext::default());
-        collector.into_result()
+        collector.count_methods(tree.root_node());
+        collector.walk(tree.root_node());
+        ExtractionResult {
+            nodes: collector.nodes,
+            edges: collector.edges,
+        }
     }
 }
 
@@ -54,7 +43,7 @@ impl super::LanguageExtractor for GoExtractor {
     }
 
     fn supported_edge_types() -> &'static [EdgeType] {
-        &[EdgeType::Imports, EdgeType::Calls]
+        &[EdgeType::Imports, EdgeType::Calls, EdgeType::Extends]
     }
 
     fn language() -> Language {
@@ -62,13 +51,36 @@ impl super::LanguageExtractor for GoExtractor {
     }
 }
 
+/// Lexical scopes of CRG's `_go_receiver_binding_index`.
+const SCOPE_KINDS: &[&str] = &[
+    "block",
+    "communication_case",
+    "default_case",
+    "expression_case",
+    "type_case",
+];
+
+/// The receiver of the method being walked.
+struct Receiver {
+    name: String,
+    /// The receiver's type (`*List[T]` -> `List`).
+    owner: String,
+    /// Merged byte ranges `[start, end)` where a local binding hides the receiver.
+    shadows: Vec<(usize, usize)>,
+}
+
 struct GoCollector<'a> {
     content: &'a str,
     file_path: &'a str,
     nodes: Vec<CodeNode>,
     edges: Vec<EdgeRelationship>,
-    current_function_id: Option<NodeId>,
-    current_type_id: Option<NodeId>,
+    /// Named functions around the walk position, innermost last.
+    functions: Vec<NodeId>,
+    receiver: Option<Receiver>,
+    /// Methods per `(receiver type, name)` in this file.
+    methods: HashMap<(String, String), usize>,
+    /// Depth of `if false` consequences around the walk position.
+    dead: usize,
 }
 
 impl<'a> GoCollector<'a> {
@@ -78,19 +90,25 @@ impl<'a> GoCollector<'a> {
             file_path,
             nodes: Vec::new(),
             edges: Vec::new(),
-            current_function_id: None,
-            current_type_id: None,
+            functions: Vec::new(),
+            receiver: None,
+            methods: HashMap::new(),
+            dead: 0,
         }
     }
 
-    fn into_nodes(self) -> Vec<CodeNode> {
-        self.nodes
-    }
-
-    fn into_result(self) -> ExtractionResult {
-        ExtractionResult {
-            nodes: self.nodes,
-            edges: self.edges,
+    fn count_methods(&mut self, root: Node) {
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() != "method_declaration" {
+                continue;
+            }
+            if let (Some(owner), Some(name)) = (
+                receiver_type(&child).map(|t| self.node_text(&t)),
+                self.field_text(&child, "name"),
+            ) {
+                *self.methods.entry((owner, name)).or_default() += 1;
+            }
         }
     }
 
@@ -101,296 +119,457 @@ impl<'a> GoCollector<'a> {
         }
     }
 
-    fn walk(&mut self, cursor: &mut TreeCursor, mut ctx: GoContext) {
-        let node = cursor.node();
-
+    fn walk(&mut self, node: Node) {
         match node.kind() {
-            // Go Package declaration
-            "package_clause" => {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    let name = self.node_text(&name_node);
-                    let loc = self.location(&node);
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Module),
-                        Some(Language::Go),
-                        loc,
-                    )
-                    .with_content(self.node_text(&node));
-                    code.span = Some(self.span_for(&node));
-
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "package".into());
-                    self.nodes.push(code);
-                    ctx.package_name = Some(name);
-                }
-            }
-
-            // Go Import declarations
-            "import_declaration" => {
-                // Handle both single imports and import blocks
-                for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i) {
-                        if child.kind() == "import_spec" || child.kind() == "import_spec_list" {
-                            self.extract_import_spec(&child, &ctx);
-                        }
-                    }
-                }
-            }
-
-            // Individual import spec
-            "import_spec" => {
-                self.extract_import_spec(&node, &ctx);
-            }
-
-            // Go Function declarations
-            "function_declaration" => {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    let name = self.node_text(&name_node);
-                    let loc = self.location(&node);
-                    let content_text = self.node_text(&node);
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Function),
-                        Some(Language::Go),
-                        loc,
-                    )
-                    .with_content(content_text.clone())
-                    .with_complexity(
-                        crate::complexity::calculate_cyclomatic_complexity(&node, self.content),
-                    );
-                    code.span = Some(self.span_for(&node));
-
-                    // Detect main function
-                    if name == "main" {
-                        code.metadata
-                            .attributes
-                            .insert("entry_point".into(), "true".into());
-                    }
-
-                    // Detect init function
-                    if name == "init" {
-                        code.metadata
-                            .attributes
-                            .insert("init_function".into(), "true".into());
-                    }
-
-                    // Detect exported functions (capitalized)
-                    if name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                        code.metadata
-                            .attributes
-                            .insert("exported".into(), "true".into());
-                    }
-
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "function".into());
-
-                    // Track current function for call edge attribution
-                    self.current_function_id = Some(code.id);
-                    self.nodes.push(code);
-                }
-            }
-
-            // Go Method declarations (functions with receivers)
-            "method_declaration" => {
-                if let Some(name_node) = node.child_by_field_name("name") {
-                    let name = self.node_text(&name_node);
-                    let loc = self.location(&node);
-                    let content_text = self.node_text(&node);
-
-                    // Extract receiver type
-                    let receiver = node
-                        .child_by_field_name("receiver")
-                        .map(|r| self.node_text(&r));
-
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Function),
-                        Some(Language::Go),
-                        loc,
-                    )
-                    .with_content(content_text.clone())
-                    .with_complexity(
-                        crate::complexity::calculate_cyclomatic_complexity(&node, self.content),
-                    );
-                    code.span = Some(self.span_for(&node));
-
-                    if let Some(ref recv) = receiver {
-                        code.metadata
-                            .attributes
-                            .insert("receiver".into(), recv.clone());
-                        ctx.current_receiver = Some(recv.clone());
-                    }
-
-                    // Detect exported methods
-                    if name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                        code.metadata
-                            .attributes
-                            .insert("exported".into(), "true".into());
-                    }
-
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "method".into());
-
-                    // Track current function for call edge attribution
-                    self.current_function_id = Some(code.id);
-                    self.nodes.push(code);
-                }
-            }
-
-            // Go Type declarations (struct, interface)
-            "type_declaration" => {
-                for i in 0..node.child_count() {
-                    if let Some(spec) = node.child(i) {
-                        if spec.kind() == "type_spec" {
-                            self.extract_type_spec(&spec, &mut ctx);
-                        }
-                    }
-                }
-            }
-
-            // Type spec (struct or interface)
-            "type_spec" => {
-                self.extract_type_spec(&node, &mut ctx);
-            }
-
-            // Go Call expressions - extract call edges
-            "call_expression" => {
-                if let Some(current_fn) = self.current_function_id {
-                    if let Some(func) = node.child_by_field_name("function") {
-                        let callee_name = self.node_text(&func);
-                        if !callee_name.is_empty() {
-                            let edge = EdgeRelationship {
-                                from: current_fn,
-                                to: callee_name,
-                                edge_type: EdgeType::Calls,
-                                metadata: {
-                                    let mut meta = HashMap::new();
-                                    meta.insert("call_type".to_string(), "go_call".to_string());
-                                    meta
-                                },
-                                span: Some(self.span_for(&node)),
-                            };
-                            self.edges.push(edge);
-                        }
-                    }
-                }
-            }
-
+            "package_clause" => self.package(&node),
+            "import_spec" => self.import_spec(&node),
+            "function_declaration" | "method_declaration" => return self.function(node),
+            "type_spec" => self.type_spec(&node),
+            "if_statement" => return self.if_statement(node),
+            "call_expression" => self.call(&node),
             _ => {}
         }
+        self.walk_children(node);
+    }
 
-        // Recursively walk children
-        if cursor.goto_first_child() {
-            loop {
-                self.walk(cursor, ctx.clone());
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-            cursor.goto_parent();
+    fn walk_children(&mut self, node: Node) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.walk(child);
         }
     }
 
-    fn extract_import_spec(&mut self, node: &Node, _ctx: &GoContext) {
-        // Extract the import path from the import spec
-        if let Some(path_node) = node.child_by_field_name("path") {
-            let path = self.node_text(&path_node);
-            // Remove quotes from path
-            let clean_path = path.trim_matches('"').to_string();
+    /// Calls in the consequence of `if false` (or `if (false)`) are dead, like CRG's
+    /// `_is_in_static_dead_guard`; `else` branches stay live.
+    fn if_statement(&mut self, node: Node) {
+        let dead_branch = node
+            .child_by_field_name("condition")
+            .filter(is_statically_false)
+            .and_then(|_| node.child_by_field_name("consequence"));
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            let dead = dead_branch.is_some_and(|branch| branch.id() == child.id());
+            self.dead += usize::from(dead);
+            self.walk(child);
+            self.dead -= usize::from(dead);
+        }
+    }
 
-            if clean_path.is_empty() {
-                return;
-            }
+    fn package(&mut self, node: &Node) {
+        let Some(name) = self.field_text(node, "name") else {
+            return;
+        };
+        let mut code = CodeNode::new(
+            name,
+            Some(NodeType::Module),
+            Some(Language::Go),
+            self.location(node),
+        )
+        .with_content(self.node_text(node));
+        code.span = Some(self.span_for(node));
+        code.metadata
+            .attributes
+            .insert("kind".into(), "package".into());
+        self.nodes.push(code);
+    }
 
-            let loc = self.location(node);
-            let mut code = CodeNode::new(
-                format!("import {}", clean_path),
-                Some(NodeType::Import),
-                Some(Language::Go),
-                loc,
-            )
-            .with_content(self.node_text(node));
-            code.span = Some(self.span_for(node));
+    fn function(&mut self, node: Node) {
+        let Some(name) = self.field_text(&node, "name") else {
+            return self.walk_children(node);
+        };
+        let is_method = node.kind() == "method_declaration";
+        let mut code = CodeNode::new(
+            name.clone(),
+            Some(NodeType::Function),
+            Some(Language::Go),
+            self.location(&node),
+        )
+        .with_content(self.node_text(&node))
+        .with_complexity(crate::complexity::calculate_cyclomatic_complexity(
+            &node,
+            self.content,
+        ));
+        code.span = Some(self.span_for(&node));
+        let attributes = &mut code.metadata.attributes;
+        if !is_method && name == "main" {
+            attributes.insert("entry_point".into(), "true".into());
+        }
+        if !is_method && name == "init" {
+            attributes.insert("init_function".into(), "true".into());
+        }
+        if name.chars().next().is_some_and(char::is_uppercase) {
+            attributes.insert("exported".into(), "true".into());
+        }
+        let kind = if is_method { "method" } else { "function" };
+        attributes.insert("kind".into(), kind.into());
+        if let Some(receiver) = node.child_by_field_name("receiver") {
+            attributes.insert("receiver".into(), self.node_text(&receiver));
+        }
 
-            // Detect alias if present
-            if let Some(alias_node) = node.child_by_field_name("name") {
-                let alias = self.node_text(&alias_node);
-                code.metadata.attributes.insert("alias".into(), alias);
-            }
+        let receiver = if is_method {
+            self.receiver_of(&node)
+        } else {
+            None
+        };
+        let outer = std::mem::replace(&mut self.receiver, receiver);
+        self.functions.push(code.id);
+        self.nodes.push(code);
+        self.walk_children(node);
+        self.functions.pop();
+        self.receiver = outer;
+    }
 
-            // Detect standard library imports
-            let is_stdlib = !clean_path.contains('.');
-            if is_stdlib {
-                code.metadata
-                    .attributes
-                    .insert("stdlib".into(), "true".into());
-            }
+    /// The method's named receiver and where the body hides it.
+    fn receiver_of(&self, method: &Node) -> Option<Receiver> {
+        let owner = self.node_text(&receiver_type(method)?);
+        let parameter = method
+            .child_by_field_name("receiver")
+            .and_then(|r| named_children(&r).find(|c| c.kind() == "parameter_declaration"))?;
+        let name = children(&parameter).find(|c| c.kind() == "identifier")?;
+        let name = self.node_text(&name);
+        let shadows = method
+            .child_by_field_name("body")
+            .map(|body| self.shadow_intervals(body, &name))
+            .unwrap_or_default();
+        Some(Receiver {
+            name,
+            owner,
+            shadows,
+        })
+    }
 
-            code.metadata
-                .attributes
-                .insert("kind".into(), "import".into());
-            code.metadata
-                .attributes
-                .insert("path".into(), clean_path.clone());
-
-            // Create import edge
-            let edge = EdgeRelationship {
-                from: code.id,
-                to: clean_path,
-                edge_type: EdgeType::Imports,
-                metadata: {
-                    let mut meta = HashMap::new();
-                    meta.insert("import_type".to_string(), "go_import".to_string());
-                    meta.insert("source_file".to_string(), self.file_path.to_string());
-                    if is_stdlib {
-                        meta.insert("stdlib".to_string(), "true".to_string());
-                    }
-                    meta
-                },
-                span: Some(self.span_for(node)),
+    /// CRG's `_go_receiver_binding_index`: byte ranges where a local declaration of `name`
+    /// hides the receiver, merged.
+    fn shadow_intervals(&self, body: Node, name: &str) -> Vec<(usize, usize)> {
+        let mut intervals = Vec::new();
+        let mut scopes = HashSet::from([scope_key(&body)]);
+        let mut stack = vec![(body, body)];
+        while let Some((node, scope)) = stack.pop() {
+            let scope = if SCOPE_KINDS.contains(&node.kind()) {
+                node
+            } else {
+                scope
             };
-            self.edges.push(edge);
-            self.nodes.push(code);
+            match node.kind() {
+                "func_literal" => {
+                    if let Some(literal_body) = node.child_by_field_name("body")
+                        && self.parameters_bind(&node, name)
+                    {
+                        intervals.push((literal_body.start_byte(), literal_body.end_byte()));
+                        scopes.insert(scope_key(&literal_body));
+                    }
+                }
+                "type_switch_statement" if self.field_binds(&node, "alias", name) => {
+                    for case in named_children(&node)
+                        .filter(|c| matches!(c.kind(), "default_case" | "type_case"))
+                    {
+                        if let Some(statements) =
+                            named_children(&case).find(|c| c.kind() == "statement_list")
+                        {
+                            intervals.push((statements.start_byte(), case.end_byte()));
+                        }
+                        scopes.insert(scope_key(&case));
+                    }
+                }
+                "const_spec" | "var_spec" | "type_spec" | "type_alias"
+                    if self.field_binds(&node, "name", name) =>
+                {
+                    intervals.push((node.end_byte(), scope.end_byte()));
+                    scopes.insert(scope_key(&scope));
+                }
+                "short_var_declaration" if self.field_binds(&node, "left", name) => {
+                    let binding_scope = match node.parent() {
+                        Some(parent) if parent.kind() == "for_clause" => parent.parent(),
+                        Some(parent)
+                            if matches!(
+                                parent.kind(),
+                                "expression_switch_statement"
+                                    | "if_statement"
+                                    | "type_switch_statement"
+                            ) =>
+                        {
+                            Some(parent)
+                        }
+                        _ => Some(scope),
+                    };
+                    if let Some(binding_scope) = binding_scope
+                        && scopes.insert(scope_key(&binding_scope))
+                    {
+                        intervals.push((node.end_byte(), binding_scope.end_byte()));
+                    }
+                }
+                "range_clause"
+                    if has_child(&node, ":=") && self.field_binds(&node, "left", name) =>
+                {
+                    if let Some(loop_body) =
+                        node.parent().and_then(|l| l.child_by_field_name("body"))
+                    {
+                        intervals.push((loop_body.start_byte(), loop_body.end_byte()));
+                        scopes.insert(scope_key(&loop_body));
+                    }
+                }
+                "receive_statement"
+                    if has_child(&node, ":=") && self.field_binds(&node, "left", name) =>
+                {
+                    if let Some(case) = node.parent() {
+                        intervals.push((node.end_byte(), case.end_byte()));
+                        scopes.insert(scope_key(&case));
+                    }
+                }
+                _ => {}
+            }
+            let children: Vec<_> = named_children(&node).collect();
+            stack.extend(children.into_iter().rev().map(|child| (child, scope)));
+        }
+
+        intervals.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (start, end) in intervals {
+            if start >= end {
+                continue;
+            }
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        merged
+    }
+
+    /// Whether a grammar field of `node` declares `name` (CRG `_go_field_binds_name`).
+    fn field_binds(&self, node: &Node, field: &str, name: &str) -> bool {
+        let mut cursor = node.walk();
+        node.children_by_field_name(field, &mut cursor)
+            .any(|field_node| {
+                let candidates: Vec<Node> = if field_node.kind() == "expression_list" {
+                    named_children(&field_node).collect()
+                } else {
+                    vec![field_node]
+                };
+                candidates.iter().any(|c| {
+                    matches!(c.kind(), "identifier" | "type_identifier")
+                        && self.node_text(c) == name
+                })
+            })
+    }
+
+    /// Whether a func literal's parameters or named results declare `name`.
+    fn parameters_bind(&self, function: &Node, name: &str) -> bool {
+        ["parameters", "result"].iter().any(|field| {
+            let mut cursor = function.walk();
+            function
+                .children_by_field_name(field, &mut cursor)
+                .any(|list| {
+                    named_children(&list).any(|parameter| {
+                        matches!(
+                            parameter.kind(),
+                            "parameter_declaration" | "variadic_parameter_declaration"
+                        ) && self.field_binds(&parameter, "name", name)
+                    })
+                })
+        })
+    }
+
+    fn import_spec(&mut self, node: &Node) {
+        let Some(path_node) = node.child_by_field_name("path") else {
+            return;
+        };
+        let clean_path = self.node_text(&path_node).trim_matches('"').to_string();
+        if clean_path.is_empty() {
+            return;
+        }
+
+        let mut code = CodeNode::new(
+            format!("import {}", clean_path),
+            Some(NodeType::Import),
+            Some(Language::Go),
+            self.location(node),
+        )
+        .with_content(self.node_text(node));
+        code.span = Some(self.span_for(node));
+
+        if let Some(alias) = self.field_text(node, "name") {
+            code.metadata.attributes.insert("alias".into(), alias);
+        }
+        let is_stdlib = !clean_path.contains('.');
+        if is_stdlib {
+            code.metadata
+                .attributes
+                .insert("stdlib".into(), "true".into());
+        }
+        code.metadata
+            .attributes
+            .insert("kind".into(), "import".into());
+        code.metadata
+            .attributes
+            .insert("path".into(), clean_path.clone());
+
+        let mut metadata = HashMap::from([
+            ("import_type".to_string(), "go_import".to_string()),
+            ("source_file".to_string(), self.file_path.to_string()),
+        ]);
+        if is_stdlib {
+            metadata.insert("stdlib".to_string(), "true".to_string());
+        }
+        self.edges.push(EdgeRelationship {
+            from: code.id,
+            to: clean_path,
+            edge_type: EdgeType::Imports,
+            metadata,
+            span: Some(self.span_for(node)),
+        });
+        self.nodes.push(code);
+    }
+
+    /// Every `type_spec` is a class in CRG: structs, interfaces and defined types
+    /// (`type C int`). `type A = B` is a `type_alias` and makes no node.
+    fn type_spec(&mut self, node: &Node) {
+        let Some(name) = self.field_text(node, "name") else {
+            return;
+        };
+        let body = node.child_by_field_name("type");
+        let (node_type, kind) = match body.map(|b| b.kind()) {
+            Some("interface_type") => (NodeType::Interface, "interface"),
+            Some("struct_type") => (NodeType::Struct, "struct"),
+            _ => (NodeType::Class, "defined_type"),
+        };
+
+        let mut code = CodeNode::new(
+            name.clone(),
+            Some(node_type),
+            Some(Language::Go),
+            self.location(node),
+        )
+        .with_content(self.node_text(node));
+        code.span = Some(self.span_for(node));
+        if name.chars().next().is_some_and(char::is_uppercase) {
+            code.metadata
+                .attributes
+                .insert("exported".into(), "true".into());
+        }
+        code.metadata.attributes.insert("kind".into(), kind.into());
+
+        for base in body.map(|b| self.embedded(&b)).unwrap_or_default() {
+            self.edges.push(EdgeRelationship {
+                from: code.id,
+                to: base,
+                edge_type: EdgeType::Extends,
+                metadata: HashMap::from([("source_file".to_string(), self.file_path.to_string())]),
+                span: Some(self.span_for(node)),
+            });
+        }
+        self.nodes.push(code);
+    }
+
+    /// Embedded struct fields and single-type interface elements, as CRG's `_get_bases`.
+    fn embedded(&self, body: &Node) -> Vec<String> {
+        let embedded: Vec<Node> = match body.kind() {
+            "struct_type" => named_children(body)
+                .filter(|c| c.kind() == "field_declaration_list")
+                .flat_map(|list| named_children(&list).collect::<Vec<_>>())
+                .filter(|f| {
+                    f.kind() == "field_declaration" && f.child_by_field_name("name").is_none()
+                })
+                .filter_map(|f| f.child_by_field_name("type"))
+                .collect(),
+            "interface_type" => named_children(body)
+                .filter(|c| c.kind() == "type_elem")
+                .filter_map(|element| {
+                    let types: Vec<Node> = named_children(&element)
+                        .filter(|c| c.kind() != "comment")
+                        .collect();
+                    (types.len() == 1).then(|| types[0])
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        embedded
+            .into_iter()
+            .filter_map(|t| {
+                if t.kind() == "generic_type" {
+                    t.child_by_field_name("type")
+                } else {
+                    Some(t)
+                }
+            })
+            .filter(|t| matches!(t.kind(), "type_identifier" | "qualified_type"))
+            .map(|t| self.node_text(&t))
+            .collect()
+    }
+
+    fn call(&mut self, node: &Node) {
+        if self.dead > 0 {
+            return;
+        }
+        let Some(callee) = node.child_by_field_name("function") else {
+            return;
+        };
+        let target = match callee.kind() {
+            "identifier" => self.node_text(&callee),
+            "selector_expression" => match callee.child_by_field_name("field") {
+                Some(field) => self.resolve_on_receiver(node, &callee, self.node_text(&field)),
+                None => return,
+            },
+            // Func literals, parenthesized and index callees, calls of calls: no edge.
+            _ => return,
+        };
+
+        let mut metadata = HashMap::from([
+            ("call_type".to_string(), "go_call".to_string()),
+            ("source_file".to_string(), self.file_path.to_string()),
+        ]);
+        let from = match self.functions.last() {
+            Some(&id) => id,
+            None => {
+                metadata.insert(crg_shape::FILE_SCOPE_ATTR.to_string(), "true".to_string());
+                NodeId::nil()
+            }
+        };
+        self.edges.push(EdgeRelationship {
+            from,
+            to: target,
+            edge_type: EdgeType::Calls,
+            metadata,
+            span: Some(self.span_for(node)),
+        });
+    }
+
+    /// `recv.M()` on the method's own receiver, outside every shadowing binding, names
+    /// `<file>::Type.M` when the receiver type has exactly one `M` in this file; any other
+    /// selector call keeps the bare method name.
+    fn resolve_on_receiver(&self, call: &Node, callee: &Node, method: String) -> String {
+        let Some(receiver) = &self.receiver else {
+            return method;
+        };
+        let Some(mut operand) = callee.child_by_field_name("operand") else {
+            return method;
+        };
+        while operand.kind() == "parenthesized_expression" && operand.named_child_count() == 1 {
+            operand = operand.named_child(0).unwrap();
+        }
+        if operand.kind() == "unary_expression"
+            && operand.child(0).is_some_and(|c| c.kind() == "*")
+            && let Some(inner) = operand.child_by_field_name("operand")
+        {
+            operand = inner;
+        }
+        let start = call.start_byte();
+        let shadowed = receiver
+            .shadows
+            .iter()
+            .any(|&(s, e)| s <= start && start < e);
+        let unique = self.methods.get(&(receiver.owner.clone(), method.clone())) == Some(&1);
+        if self.node_text(&operand) == receiver.name && !shadowed && unique {
+            format!("{}::{}.{method}", self.file_path, receiver.owner)
+        } else {
+            method
         }
     }
 
-    fn extract_type_spec(&mut self, node: &Node, ctx: &mut GoContext) {
-        if let Some(name_node) = node.child_by_field_name("name") {
-            let name = self.node_text(&name_node);
-            let loc = self.location(node);
-            let content_text = self.node_text(node);
-
-            // Determine if struct or interface
-            let (node_type, kind) =
-                if content_text.contains("interface {") || content_text.contains("interface{") {
-                    (NodeType::Interface, "interface")
-                } else if content_text.contains("struct {") || content_text.contains("struct{") {
-                    (NodeType::Struct, "struct")
-                } else {
-                    (NodeType::Variable, "type_alias")
-                };
-
-            let mut code = CodeNode::new(name.clone(), Some(node_type), Some(Language::Go), loc)
-                .with_content(content_text);
-            code.span = Some(self.span_for(node));
-
-            // Detect exported types
-            if name.chars().next().map_or(false, |c| c.is_uppercase()) {
-                code.metadata
-                    .attributes
-                    .insert("exported".into(), "true".into());
-            }
-
-            code.metadata.attributes.insert("kind".into(), kind.into());
-
-            self.current_type_id = Some(code.id);
-            ctx.current_type = Some(name);
-            self.nodes.push(code);
-        }
+    fn field_text(&self, node: &Node, field: &str) -> Option<String> {
+        node.child_by_field_name(field)
+            .map(|n| self.node_text(&n))
+            .filter(|text| !text.is_empty())
     }
 
     fn node_text(&self, node: &Node) -> String {
@@ -407,5 +586,197 @@ impl<'a> GoCollector<'a> {
             end_line: Some((node.end_position().row + 1) as u32),
             end_column: Some((node.end_position().column + 1) as u32),
         }
+    }
+}
+
+/// The `type_identifier` a method's receiver names, through `*`, parentheses and type
+/// arguments (CRG `_get_go_receiver_type`).
+fn receiver_type<'t>(method: &Node<'t>) -> Option<Node<'t>> {
+    let parameter = method
+        .child_by_field_name("receiver")
+        .and_then(|r| named_children(&r).find(|c| c.kind() == "parameter_declaration"))?;
+    let mut ty = parameter.child_by_field_name("type");
+    while let Some(t) = ty
+        && matches!(
+            t.kind(),
+            "generic_type" | "pointer_type" | "parenthesized_type"
+        )
+    {
+        ty = named_children(&t).find(|c| c.kind() != "comment");
+    }
+    ty.filter(|t| t.kind() == "type_identifier")
+}
+
+/// `false`, possibly parenthesized (CRG `_is_statically_false_condition`).
+fn is_statically_false(condition: &Node) -> bool {
+    match condition.kind() {
+        "parenthesized_expression" => condition
+            .named_child(0)
+            .is_some_and(|inner| is_statically_false(&inner)),
+        "false" => true,
+        _ => false,
+    }
+}
+
+fn scope_key(node: &Node) -> (u16, usize, usize) {
+    (node.kind_id(), node.start_byte(), node.end_byte())
+}
+
+fn has_child(node: &Node, kind: &str) -> bool {
+    children(node).any(|c| c.kind() == kind)
+}
+
+fn children<'t>(node: &Node<'t>) -> impl Iterator<Item = Node<'t>> {
+    let node = *node;
+    (0..node.child_count()).filter_map(move |i| node.child(i))
+}
+
+fn named_children<'t>(node: &Node<'t>) -> impl Iterator<Item = Node<'t>> {
+    let node = *node;
+    (0..node.named_child_count() as u32).filter_map(move |i| node.named_child(i))
+}
+
+#[cfg(test)]
+mod tests {
+    use codegraph_core::{EdgeType, ExtractionResult, Language, NodeType};
+    use std::collections::BTreeSet;
+
+    fn extract_go(source: &str, path: &str) -> ExtractionResult {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        crate::languages::extract_for_language_at(
+            &Language::Go,
+            &tree,
+            source,
+            path,
+            path,
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn qualified(result: &ExtractionResult, id: &codegraph_core::NodeId) -> String {
+        result
+            .nodes
+            .iter()
+            .find(|n| &n.id == id)
+            .and_then(|n| n.metadata.attributes.get("qualified_name").cloned())
+            .unwrap_or_default()
+    }
+
+    /// `(source, target)` of every edge of `kind`.
+    fn edges(result: &ExtractionResult, kind: EdgeType) -> BTreeSet<(String, String)> {
+        result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == kind)
+            .map(|e| (qualified(result, &e.from), e.to.clone()))
+            .collect()
+    }
+
+    fn calls_from(result: &ExtractionResult, source: &str) -> BTreeSet<String> {
+        edges(result, EdgeType::Calls)
+            .into_iter()
+            .filter(|(from, _)| from == source)
+            .map(|(_, to)| to)
+            .collect()
+    }
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn every_type_spec_is_a_class_and_aliases_are_not_nodes() {
+        let r = extract_go(
+            "package p\ntype C int\ntype A = C\ntype S struct{}\ntype I interface{}\n\
+             func (c C) M() {}\n",
+            "m.go",
+        );
+        let kinds: Vec<_> = r
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                let q = n.metadata.attributes.get("qualified_name")?;
+                Some((q.clone(), n.node_type.clone()))
+            })
+            .collect();
+        assert!(kinds.contains(&("m.go::C".to_string(), Some(NodeType::Class))));
+        assert!(kinds.contains(&("m.go::S".to_string(), Some(NodeType::Struct))));
+        assert!(kinds.contains(&("m.go::I".to_string(), Some(NodeType::Interface))));
+        assert!(!kinds.iter().any(|(q, _)| q == "m.go::A"), "{kinds:?}");
+        assert!(edges(&r, EdgeType::Contains).contains(&("m.go::C".into(), "m.go::C.M".into())));
+    }
+
+    #[test]
+    fn call_names_and_callers_follow_crg() {
+        let r = extract_go(
+            "package p\nvar x = mk()\nfunc f(r *T) {\n  fmt.Printf(\"\")\n  (*r).Save()\n\
+             func() { inner() }()\n  fs[0]()\n  (g)()\n  h()()\n  Generic[int](1)\n}\n",
+            "m.go",
+        );
+        assert_eq!(
+            calls_from(&r, "m.go::f"),
+            set(&["Printf", "Save", "h", "inner"])
+        );
+        assert_eq!(calls_from(&r, "m.go"), set(&["mk"]));
+    }
+
+    #[test]
+    fn calls_under_if_false_are_dead() {
+        let r = extract_go(
+            "package p\nfunc f() {\n  if false {\n    dead()\n  } else {\n    live()\n  }\n\
+             if (false) { dead2() }\n  if true { live2() }\n  if !true { live3() }\n}\n",
+            "m.go",
+        );
+        assert_eq!(calls_from(&r, "m.go::f"), set(&["live", "live2", "live3"]));
+    }
+
+    #[test]
+    fn receiver_calls_resolve_unless_shadowed() {
+        let r = extract_go(
+            "package p\ntype A struct{}\ntype B struct{}\nfunc (a *A) Save() {}\n\
+             func (b *B) Save() {}\nfunc (a *A) Run() {}\nfunc (a *A) Run2() {}\n\
+             func (a *A) Direct() {\n  a.Save()\n  (*a).Run()\n}\n\
+             func (a *A) Shadowed() {\n  {\n    var a *B\n    a.Save()\n  }\n  a.Save()\n}\n\
+             func (a *A) Literal() {\n  func(a *B) { a.Save() }(nil)\n}\n\
+             func (a *A) Redeclared() {\n  a, n := a, 1\n  _ = n\n  a.Save()\n}\n\
+             func (a *A) Range() {\n  for a := range []int{1} { a.Save() }\n}\n",
+            "m.go",
+        );
+        assert_eq!(
+            calls_from(&r, "m.go::A.Direct"),
+            set(&["m.go::A.Run", "m.go::A.Save"])
+        );
+        assert_eq!(
+            calls_from(&r, "m.go::A.Shadowed"),
+            set(&["Save", "m.go::A.Save"])
+        );
+        assert_eq!(calls_from(&r, "m.go::A.Literal"), set(&["Save"]));
+        assert_eq!(calls_from(&r, "m.go::A.Redeclared"), set(&["m.go::A.Save"]));
+        assert_eq!(calls_from(&r, "m.go::A.Range"), set(&["Save"]));
+    }
+
+    #[test]
+    fn embedding_is_inherits_text() {
+        let r = extract_go(
+            "package p\ntype D struct {\n  Base\n  *Ptr\n  pkg.Remote\n  G[int]\n  name Named\n}\n\
+             type I interface {\n  io.Reader\n  int | string\n  M()\n}\n",
+            "m.go",
+        );
+        let expected: BTreeSet<(String, String)> = [
+            ("m.go::D", "Base"),
+            ("m.go::D", "Ptr"),
+            ("m.go::D", "pkg.Remote"),
+            ("m.go::D", "G"),
+            ("m.go::I", "io.Reader"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        assert_eq!(edges(&r, EdgeType::Extends), expected);
     }
 }

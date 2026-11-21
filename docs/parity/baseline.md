@@ -18,7 +18,13 @@ e o extrator Go grava textos de chamada/closures como alvo (plano de Go).
 Plano TypeScript (`docs/superpowers/plans/2026-11-20-fase2-typescript.md`): typescript passou a
 1.000 em nos, CALLS, CONTAINS, IMPORTS_FROM, INHERITS e TESTED_BY (de 0.438 / 0.133 / 0.308 /
 1.000 / 0 / 0); REFERENCES continua 0 (fora do escopo). As outras linguagens nao mudaram.
-"Depois" abaixo e o relatorio regerado apos esse plano.
+Plano Go (`docs/superpowers/plans/2026-11-20-fase2-go.md`): go passou a 1.000 em nos (sem
+divergencia de kind), CALLS e CONTAINS (de 0.129 / 0.932); IMPORTS_FROM segue 1.000. As outras
+linguagens nao mudaram. O corpus rust e nao deterministico (divergentes 6/9/12 e CONTAINS
+0.576/0.677 entre execucoes iguais: qual dos nos `S` duplicados, struct ou `impl`, ganha o
+sufixo `@L` varia); ja acontecia antes deste plano.
+
+"Depois" abaixo e o relatorio regerado apos o plano Go.
 
 # Depois
 
@@ -121,100 +127,15 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
-| go | 45 | 45 | 45 | 1.000 | 1 |
+| go | 45 | 45 | 45 | 1.000 | 0 |
 
 #### Edges by kind
 
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
-| CALLS | 34 | 36 | 8 | 0.129 | 0.353 |
-| CONTAINS | 43 | 42 | 41 | 0.932 | 0.932 |
+| CALLS | 34 | 34 | 34 | 1.000 | 1.000 |
+| CONTAINS | 43 | 43 | 43 | 1.000 | 1.000 |
 | IMPORTS_FROM | 2 | 2 | 2 | 1.000 | 1.000 |
-
-##### go: divergent nodes
-
-- `sample_go.go::ShadowC` kind: crg=Class rust=Variable
-
-##### CALLS: edges only in CRG
-
-- `sample_go.go::CreateUser` -> `Save`
-- `sample_go.go::InMemoryRepo.FindByID` -> `New`
-- `sample_go.go::InMemoryRepo.Save` -> `Printf`
-- `sample_go.go::InMemoryRepo.SaveAndReturn` -> `sample_go.go::InMemoryRepo.Save`
-- `sample_go.go::ShadowA.CallsAfterShadowScope` -> `Save`
-- `sample_go.go::ShadowA.CallsAfterShadowScope` -> `sample_go.go::ShadowA.Save`
-- `sample_go.go::ShadowA.CallsBlockShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsConstShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsConstShadowedReceiver` -> `sample_go.go::ShadowA.Save`
-- `sample_go.go::ShadowA.CallsExpressionCaseShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsForClauseShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsInitializerScope` -> `Save`
-- `sample_go.go::ShadowA.CallsInitializerScope` -> `sample_go.go::ShadowA.Save`
-- `sample_go.go::ShadowA.CallsNamedResultShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsRangeShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsSameScopeRedeclaration` -> `sample_go.go::ShadowA.Save`
-- `sample_go.go::ShadowA.CallsSelectCaseShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsSelectReceiveShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsSelectReceiveShadowedReceiver` -> `sample_go.go::ShadowA.Save`
-- `sample_go.go::ShadowA.CallsShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsTypeShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsTypeShadowedReceiver` -> `sample_go.go::ShadowA.Save`
-- `sample_go.go::ShadowA.CallsTypeSwitchInitShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsTypeSwitchInitShadowedReceiver` -> `sample_go.go::ShadowA.Save`
-- `sample_go.go::ShadowA.CallsTypeSwitchShadowedReceiver` -> `Save`
-- `sample_go.go::ShadowA.CallsVarShadowedReceiver` -> `Save`
-
-##### CALLS: edges only in Rust
-
-- `sample_dead_guard.go::caller` -> `sample_dead_guard.go::dead_false_call`
-- `sample_dead_guard.go::elif_chain` -> `sample_dead_guard.go::dead_in_consequence`
-- `sample_dead_guard.go::else_branch` -> `sample_dead_guard.go::dead_in_consequence`
-- `sample_go.go::CreateUser` -> `repo.Save`
-- `sample_go.go::InMemoryRepo.FindByID` -> `errors.New`
-- `sample_go.go::InMemoryRepo.Save` -> `fmt.Printf`
-- `sample_go.go::InMemoryRepo.SaveAndReturn` -> `(*r).Save`
-- `sample_go.go::ShadowA.CallsAfterShadowScope` -> `a.Save`
-- `sample_go.go::ShadowA.CallsBlockShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsConstShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsExpressionCaseShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsForClauseShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsInitializerScope` -> `a.Save`
-- `sample_go.go::ShadowA.CallsInitializerScope` -> `func() *ShadowB {
-		a.Save()
-		return nil
-	}`
-- `sample_go.go::ShadowA.CallsNamedResultShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsNamedResultShadowedReceiver` -> `func() (a *ShadowB) {
-		a.Save()
-		return nil
-	}`
-- `sample_go.go::ShadowA.CallsRangeShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsSameScopeRedeclaration` -> `a.Save`
-- `sample_go.go::ShadowA.CallsSelectCaseShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsSelectReceiveShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsSelectReceiveShadowedReceiver` -> `func() <-chan *ShadowB {
-		a.Save()
-		return ch
-	}`
-- `sample_go.go::ShadowA.CallsShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsShadowedReceiver` -> `func(a *ShadowB) { a.Save() }`
-- `sample_go.go::ShadowA.CallsTypeShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsTypeSwitchInitShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsTypeSwitchInitShadowedReceiver` -> `func() *ShadowB {
-		a.Save()
-		return value.(*ShadowB)
-	}`
-- `sample_go.go::ShadowA.CallsTypeSwitchShadowedReceiver` -> `a.Save`
-- `sample_go.go::ShadowA.CallsVarShadowedReceiver` -> `a.Save`
-
-##### CONTAINS: edges only in CRG
-
-- `sample_go.go` -> `sample_go.go::ShadowC`
-- `sample_go.go::ShadowC` -> `sample_go.go::ShadowC.Save`
-
-##### CONTAINS: edges only in Rust
-
-- `sample_go.go` -> `sample_go.go::ShadowC.Save`
 
 ### Language corpus: rust
 
@@ -247,7 +168,7 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 - `sample_rust.rs::println`
 - `sample_rust.rs::tests`
 - `sample_rust.rs::tests::assert`
-- `sample_rust.rs::tests::assert@L67`
+- `sample_rust.rs::tests::assert@L55`
 - `sample_rust.rs::tests::assert_eq`
 
 ##### rust: divergent nodes
