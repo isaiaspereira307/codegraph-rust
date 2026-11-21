@@ -156,7 +156,7 @@ Jaccard depois do plano 1 (antes → depois, nós / CALLS / IMPORTS_FROM):
 | linguagem | nós | CALLS | IMPORTS_FROM |
 |---|---|---|---|
 | python | 0.51 → 1.00 | 0.12 → 0.55 | 0 → 1.00 |
-| typescript | 0.20 → 0.44 | 0 → 0.13 | 0 → 1.00 |
+| typescript | 0.20 → 0.44 → **1.00** | 0 → 0.13 → **1.00** | 0 → 1.00 |
 | go | 0.30 → 1.00 | 0.16 → 0.13 | 0 → 1.00 |
 | rust | 0.38 → 0.74 | 0.17 → 0.50 | 0 → 0.50 |
 | java | 0.17 → 0.95 | 0 → 0.35 | 0 → 1.00 |
@@ -166,10 +166,12 @@ Jaccard depois do plano 1 (antes → depois, nós / CALLS / IMPORTS_FROM):
 Ordem pela pior concordância de CALLS/IMPORTS_FROM (TESTED_BY junto). TS e Go empatam em
 CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS e TESTED_BY:
 
-1. **TypeScript/JS** (CALLS 0.13, nós 0.44, TESTED_BY 0): o extrator descarta métodos de
-   classe (CONTAINS 0.31); `INHERITS`; `TESTED_BY`; especificadores `.`/`..`; stems com
-   ponto (`./outlet.entity`) já tratados, revisar aliases npm e workspaces.
-   Plano: `docs/superpowers/plans/2026-11-20-fase2-typescript.md`.
+1. ✅ **TypeScript/JS** (plano `docs/superpowers/plans/2026-11-20-fase2-typescript.md`,
+   commits `c0ee8f0..HEAD`): métodos, interface/type/enum como `Class`, arrows nomeadas,
+   nome final da chamada, chamadas no módulo saem do `File`, nós `Test` de
+   `describe`/`it`/`test`, `INHERITS` como texto. Corpus: 1.00 em nós, CALLS, CONTAINS,
+   IMPORTS_FROM, INHERITS e TESTED_BY. Fica para depois: `REFERENCES` (comum com Python),
+   TSX/JSX, aliases npm e workspaces, guardas mortas (`if (false)`).
 2. **Go** (CALLS 0.13): o extrator grava texto de chamada multi-linha / literais de closure
    como alvo; `IMPORTS_FROM` no CRG aponta para o diretório do pacote; ligação no mesmo
    pacote (vários arquivos).
@@ -192,6 +194,10 @@ Dívida menor registrada: hotspots de complexidade ignoram nós `Test`; atributo
   linha da chamada; `source_span` pode preenchê-la).
 - Alvos de texto não resolvidos aumentam o banco e a carga do snapshot (igual ao CRG).
 - `resolution::reachable` aloca um vetor por alias; medir em repositórios grandes.
+- TS: chamada com receptor grava só o nome final (`this.users.get` → `get`) e pode ligar a um
+  `get` único no mesmo arquivo/importado; o CRG usa o tipo do receptor para evitar isso.
+  `this.x()` com dois métodos `x` no arquivo fica sem resolver (o CRG qualifica pela classe e
+  sobe a herança).
 - IDs de nó dependem de indexar por `.` ou pelo caminho absoluto (anterior ao plano;
   sufixos `@L` mudam em execuções mistas) — precisa de issue própria.
 

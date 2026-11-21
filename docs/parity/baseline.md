@@ -15,19 +15,24 @@ Nenhuma linguagem piorou em nos. Unica queda: CALLS de go (0.162 -> 0.129), porq
 resolvedor agora so liga nomes soltos no mesmo arquivo ou via arquivo importado (como o CRG)
 e o extrator Go grava textos de chamada/closures como alvo (plano de Go).
 
+Plano TypeScript (`docs/superpowers/plans/2026-11-20-fase2-typescript.md`): typescript passou a
+1.000 em nos, CALLS, CONTAINS, IMPORTS_FROM, INHERITS e TESTED_BY (de 0.438 / 0.133 / 0.308 /
+1.000 / 0 / 0); REFERENCES continua 0 (fora do escopo). As outras linguagens nao mudaram.
+"Depois" abaixo e o relatorio regerado apos esse plano.
+
 # Depois
 
 CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per language.
 
 ### Language corpus: python
 
-### Nodes by language
+#### Nodes by language
 
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
 | python | 31 | 31 | 31 | 1.000 | 0 |
 
-### Edges by kind
+#### Edges by kind
 
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
@@ -83,69 +88,22 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 ### Language corpus: typescript
 
-### Nodes by language
+#### Nodes by language
 
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
-| typescript | 16 | 7 | 7 | 0.438 | 0 |
+| typescript | 16 | 16 | 16 | 1.000 | 0 |
 
-### Edges by kind
+#### Edges by kind
 
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
-| CALLS | 11 | 6 | 2 | 0.133 | 0.000 |
-| CONTAINS | 13 | 4 | 4 | 0.308 | 0.308 |
+| CALLS | 11 | 11 | 11 | 1.000 | 1.000 |
+| CONTAINS | 13 | 13 | 13 | 1.000 | 1.000 |
 | IMPORTS_FROM | 4 | 4 | 4 | 1.000 | 1.000 |
-| INHERITS | 1 | 0 | 0 | 0.000 | 1.000 |
+| INHERITS | 1 | 1 | 1 | 1.000 | 1.000 |
 | REFERENCES | 7 | 0 | 0 | 0.000 | 0.000 |
-| TESTED_BY | 1 | 0 | 0 | 0.000 | 0.000 |
-
-##### typescript: nodes only in CRG
-
-- `sample_typescript.ts::UserData`
-- `sample_typescript.ts::UserRepository.findById`
-- `sample_typescript.ts::UserRepository.save`
-- `sample_typescript.ts::UserService.createUser`
-- `sample_typescript.ts::UserService.getUser`
-- `sample_vitest.test.ts::describe:UserService@L3`
-- `sample_vitest.test.ts::it:should create a user@L4`
-- `sample_vitest.test.ts::it:should find a user by id@L9`
-- `sample_vitest.test.ts::test:alternative test syntax@L15`
-
-##### CALLS: edges only in CRG
-
-- `sample_typescript.ts::UserRepository.findById` -> `get`
-- `sample_typescript.ts::UserRepository.save` -> `set`
-- `sample_typescript.ts::UserService.createUser` -> `now`
-- `sample_typescript.ts::UserService.createUser` -> `sample_typescript.ts::UserRepository.save`
-- `sample_typescript.ts::UserService.getUser` -> `sample_typescript.ts::UserRepository.findById`
-- `sample_typescript.ts::handleGetUser` -> `json`
-- `sample_typescript.ts::handleGetUser` -> `sample_typescript.ts::UserService.getUser`
-- `sample_typescript.ts::handleGetUser` -> `status`
-- `sample_vitest.test.ts::it:should find a user by id@L9` -> `sample_typescript.ts::UserRepository.findById`
-
-##### CALLS: edges only in Rust
-
-- `sample_typescript.ts::handleGetUser` -> `res.json`
-- `sample_typescript.ts::handleGetUser` -> `res.status`
-- `sample_typescript.ts::handleGetUser` -> `res.status(404).json`
-- `sample_typescript.ts::handleGetUser` -> `service.getUser`
-
-##### CONTAINS: edges only in CRG
-
-- `sample_typescript.ts` -> `sample_typescript.ts::UserData`
-- `sample_typescript.ts::UserRepository` -> `sample_typescript.ts::UserRepository.findById`
-- `sample_typescript.ts::UserRepository` -> `sample_typescript.ts::UserRepository.save`
-- `sample_typescript.ts::UserService` -> `sample_typescript.ts::UserService.createUser`
-- `sample_typescript.ts::UserService` -> `sample_typescript.ts::UserService.getUser`
-- `sample_vitest.test.ts` -> `sample_vitest.test.ts::describe:UserService@L3`
-- `sample_vitest.test.ts::describe:UserService@L3` -> `sample_vitest.test.ts::it:should create a user@L4`
-- `sample_vitest.test.ts::describe:UserService@L3` -> `sample_vitest.test.ts::it:should find a user by id@L9`
-- `sample_vitest.test.ts::describe:UserService@L3` -> `sample_vitest.test.ts::test:alternative test syntax@L15`
-
-##### INHERITS: edges only in CRG
-
-- `sample_typescript.ts::UserService` -> `UserRepository`
+| TESTED_BY | 1 | 1 | 1 | 1.000 | 1.000 |
 
 ##### REFERENCES: edges only in CRG
 
@@ -157,19 +115,15 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 - `sample_typescript.ts::handleGetUser` -> `Request`
 - `sample_typescript.ts::handleGetUser` -> `Response`
 
-##### TESTED_BY: edges only in CRG
-
-- `sample_typescript.ts::UserRepository.findById` -> `sample_vitest.test.ts::it:should find a user by id@L9`
-
 ### Language corpus: go
 
-### Nodes by language
+#### Nodes by language
 
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
 | go | 45 | 45 | 45 | 1.000 | 1 |
 
-### Edges by kind
+#### Edges by kind
 
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
@@ -264,18 +218,18 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 ### Language corpus: rust
 
-### Nodes by language
+#### Nodes by language
 
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
 | rust | 30 | 36 | 28 | 0.737 | 9 |
 
-### Edges by kind
+#### Edges by kind
 
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
 | CALLS | 20 | 19 | 13 | 0.500 | 0.562 |
-| CONTAINS | 27 | 25 | 23 | 0.793 | 0.793 |
+| CONTAINS | 27 | 25 | 21 | 0.677 | 0.677 |
 | IMPLEMENTS | 1 | 0 | 0 | 0.000 | 0.000 |
 | IMPORTS_FROM | 1 | 2 | 1 | 0.500 | 1.000 |
 | TESTED_BY | 6 | 0 | 0 | 0.000 | 0.000 |
@@ -287,20 +241,20 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 ##### rust: nodes only in Rust
 
-- `sample_dead_guard_impl.rs::S@L5`
-- `sample_rust.rs::InMemoryRepo@L19`
+- `sample_dead_guard_impl.rs::S@L11`
+- `sample_rust.rs::InMemoryRepo@L15`
 - `sample_rust.rs::InMemoryRepo@L27`
 - `sample_rust.rs::println`
 - `sample_rust.rs::tests`
 - `sample_rust.rs::tests::assert`
-- `sample_rust.rs::tests::assert@L55`
+- `sample_rust.rs::tests::assert@L67`
 - `sample_rust.rs::tests::assert_eq`
 
 ##### rust: divergent nodes
 
-- `sample_dead_guard_impl.rs::S` kind: crg=Class rust=impl
-- `sample_dead_guard_impl.rs::S` line_start: crg=5 rust=11
-- `sample_dead_guard_impl.rs::S` line_end: crg=5 rust=15
+- `sample_rust.rs::InMemoryRepo` kind: crg=Class rust=impl
+- `sample_rust.rs::InMemoryRepo` line_start: crg=15 rust=19
+- `sample_rust.rs::InMemoryRepo` line_end: crg=17 rust=25
 - `sample_rust.rs::async_test_is_detected` kind: crg=Test rust=Function
 - `sample_rust.rs::async_test_is_detected` is_test: crg=1 rust=0
 - `sample_rust.rs::create_user_saves_to_repo` kind: crg=Test rust=Function
@@ -329,15 +283,19 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 ##### CONTAINS: edges only in CRG
 
-- `sample_dead_guard_impl.rs` -> `sample_dead_guard_impl.rs::S`
-- `sample_dead_guard_impl.rs::S` -> `sample_dead_guard_impl.rs::S.run`
+- `sample_rust.rs` -> `sample_rust.rs::InMemoryRepo`
+- `sample_rust.rs::InMemoryRepo` -> `sample_rust.rs::InMemoryRepo.find_by_id`
+- `sample_rust.rs::InMemoryRepo` -> `sample_rust.rs::InMemoryRepo.new`
+- `sample_rust.rs::InMemoryRepo` -> `sample_rust.rs::InMemoryRepo.save`
 - `sample_rust.rs::Repository` -> `sample_rust.rs::Repository.find_by_id`
 - `sample_rust.rs::Repository` -> `sample_rust.rs::Repository.save`
 
 ##### CONTAINS: edges only in Rust
 
-- `sample_dead_guard_impl.rs` -> `sample_dead_guard_impl.rs::S@L5`
-- `sample_dead_guard_impl.rs::S@L5` -> `sample_dead_guard_impl.rs::S.run`
+- `sample_rust.rs` -> `sample_rust.rs::InMemoryRepo@L15`
+- `sample_rust.rs::InMemoryRepo@L15` -> `sample_rust.rs::InMemoryRepo.find_by_id`
+- `sample_rust.rs::InMemoryRepo@L15` -> `sample_rust.rs::InMemoryRepo.new`
+- `sample_rust.rs::InMemoryRepo@L15` -> `sample_rust.rs::InMemoryRepo.save`
 
 ##### IMPLEMENTS: edges only in CRG
 
@@ -358,13 +316,13 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 
 ### Language corpus: java
 
-### Nodes by language
+#### Nodes by language
 
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
 | java | 36 | 38 | 36 | 0.947 | 0 |
 
-### Edges by kind
+#### Edges by kind
 
 | kind | crg | rust | both | jaccard | resolved jaccard |
 |---|---|---|---|---|---|
