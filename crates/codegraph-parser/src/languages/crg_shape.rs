@@ -16,6 +16,10 @@ pub const PRE_SHAPE_QN_ATTR: &str = "pre_shape_qualified_name";
 /// the `File` node (the extractor records `NodeId::nil()`) and removes the key.
 pub const FILE_SCOPE_ATTR: &str = "crg_file_scope";
 
+/// Set by an extractor on a `Function` node it made from a test runner call (`it('x', ...)`).
+/// This pass turns it into a `Test` and links it from the function or runner around it.
+pub const TEST_RUNNER_ATTR: &str = "crg_test_runner";
+
 /// The node kind (`{:?}` of its `NodeType`) a node had before this pass turned it into a test.
 pub const PRE_SHAPE_KIND_ATTR: &str = "pre_shape_kind";
 
@@ -57,6 +61,10 @@ fn is_container(kind: &NodeType) -> bool {
 
 fn is_member(kind: &NodeType) -> bool {
     is_container(kind) || matches!(kind, NodeType::Function | NodeType::Type)
+}
+
+fn is_test_runner(node: &CodeNode) -> bool {
+    node.metadata.attributes.contains_key(TEST_RUNNER_ATTR)
 }
 
 /// `(start, end)` positions as `(line, column)` pairs.
@@ -221,13 +229,40 @@ pub fn shape_for_crg(
             .insert("is_test".into(), "true".into());
     }
 
+    // A test runner node hangs off the innermost function or runner around it (CRG uses the
+    // enclosing function), not off its class or file.
+    let runner_parents: HashMap<usize, NodeId> = members
+        .iter()
+        .copied()
+        .filter(|&i| is_test_runner(&result.nodes[i]))
+        .filter_map(|child| {
+            let (start, end) = extent(&result.nodes[child]);
+            members
+                .iter()
+                .copied()
+                .filter(|&f| f != child && result.nodes[f].node_type == Some(NodeType::Function))
+                .filter(|&f| {
+                    let (f_start, f_end) = extent(&result.nodes[f]);
+                    f_start <= start && end <= f_end && (f_start, f_end) != (start, end)
+                })
+                .max_by_key(|&f| {
+                    let (f_start, f_end) = extent(&result.nodes[f]);
+                    (f_start, std::cmp::Reverse(f_end))
+                })
+                .map(|f| (child, result.nodes[f].id))
+        })
+        .collect();
+
     for &i in &members {
         let qualified = format!("{file_path}::{}", paths[&i]);
-        let (parent, from) = match parent_of.get(&i) {
+        let (parent, mut from) = match parent_of.get(&i) {
             Some(Parent::Node(p)) => (Some(paths[p].clone()), result.nodes[*p].id),
             Some(Parent::Name(owner)) => (Some(owner.clone()), file_node.id),
             None => (None, file_node.id),
         };
+        if let Some(&runner_parent) = runner_parents.get(&i) {
+            from = runner_parent;
+        }
         let node = &mut result.nodes[i];
         let attributes = &mut node.metadata.attributes;
         if let Some(original) = attributes.insert("qualified_name".into(), qualified.clone()) {
@@ -255,7 +290,8 @@ pub fn shape_for_crg(
     for &i in &members {
         let node = &mut result.nodes[i];
         if node.node_type != Some(NodeType::Function)
-            || !test_detection::is_test_function(node.name.as_str(), rel_path, &[])
+            || !(is_test_runner(node)
+                || test_detection::is_test_function(node.name.as_str(), rel_path, &[]))
         {
             continue;
         }

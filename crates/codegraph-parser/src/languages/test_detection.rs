@@ -117,6 +117,11 @@ pub fn is_test_file(rel_path: &str) -> bool {
     SINGULAR_TEST_DIR_RE.is_match(&normalized)
 }
 
+/// Whether `name` is a JS/TS test runner call (`describe`, `it`, ...), CRG `_TEST_RUNNER_NAMES`.
+pub fn is_test_runner_name(name: &str) -> bool {
+    TEST_RUNNER_NAMES.contains(&name)
+}
+
 /// CRG `_is_test_function`: a test-like name, a test-runner name in a test file, or a test
 /// annotation/decorator (given without its `@` or `#[ ]` wrapper).
 pub fn is_test_function(name: &str, rel_path: &str, decorators: &[&str]) -> bool {

@@ -1,7 +1,7 @@
 // ABOUTME: TypeScript/JavaScript extractor producing code-review-graph's declarations and calls.
 // ABOUTME: Tracks the enclosing named function so calls in anonymous callbacks stay with it.
 
-use super::crg_shape;
+use super::{crg_shape, test_detection};
 use codegraph_core::{
     CodeNode, EdgeRelationship, EdgeType, ExtractionResult, Language, Location, NodeId, NodeType,
     Span,
@@ -71,6 +71,12 @@ const FUNCTION_KINDS: &[&str] = &[
     "abstract_method_signature",
 ];
 
+/// CRG `_TEST_MODIFIER_SUFFIXES`: `describe.only`, `it.skip`, ... run as their base runner.
+const TEST_MODIFIER_SUFFIXES: &[&str] = &["only", "skip", "each", "todo", "concurrent", "failing"];
+
+/// CRG `_MAX_TEST_DESCRIPTION_LEN`.
+const MAX_TEST_DESCRIPTION_LEN: usize = 200;
+
 /// Function values a variable or class field can name (`const f = () => {}`).
 const FUNCTION_VALUE_KINDS: &[&str] = &["arrow_function", "function_expression", "function"];
 
@@ -78,7 +84,6 @@ struct TypeScriptCollector<'a> {
     content: &'a str,
     file_path: &'a str,
     language: Language,
-    #[allow(dead_code)]
     test_file: bool,
     nodes: Vec<CodeNode>,
     edges: Vec<EdgeRelationship>,
@@ -144,6 +149,13 @@ impl<'a> TypeScriptCollector<'a> {
         } else if kind == "import_statement" {
             self.import(&node);
         } else if kind == "call_expression" {
+            if let Some(runner) = self.test_runner(&node) {
+                // The callback's calls belong to the test, not to a CALLS edge to `it`.
+                self.functions.push(runner);
+                self.walk_children(node);
+                self.functions.pop();
+                return;
+            }
             self.call(&node);
         }
         self.walk_children(node);
@@ -228,6 +240,60 @@ impl<'a> TypeScriptCollector<'a> {
             metadata,
             span: Some(self.span_for(node)),
         });
+    }
+
+    /// In a test file, a call to a test runner (`describe('S', ...)`, `it.skip(...)`) becomes a
+    /// test node named `<runner>:<description>@L<line>`, like CRG's `_extract_calls`.
+    fn test_runner(&mut self, node: &Node) -> Option<NodeId> {
+        if !self.test_file {
+            return None;
+        }
+        let runner = self.runner_name(node)?;
+        let line = node.start_position().row + 1;
+        let name = match self.test_description(node) {
+            Some(description) => format!("{runner}:{description}@L{line}"),
+            None => format!("{runner}@L{line}"),
+        };
+        let mut code = self.code_node(name, NodeType::Function, node);
+        code.metadata
+            .attributes
+            .insert(crg_shape::TEST_RUNNER_ATTR.into(), "true".into());
+        let id = code.id;
+        self.nodes.push(code);
+        Some(id)
+    }
+
+    /// The runner a call names: `it`, or the base of a modifier call (`it.skip` -> `it`).
+    fn runner_name(&self, node: &Node) -> Option<String> {
+        let name = self.call_name(node)?;
+        if test_detection::is_test_runner_name(&name) {
+            return Some(name);
+        }
+        if !TEST_MODIFIER_SUFFIXES.contains(&name.as_str()) {
+            return None;
+        }
+        let callee = node.child_by_field_name("function")?;
+        let mut object = callee.child_by_field_name("object")?;
+        while object.kind() == "member_expression" {
+            object = object.child_by_field_name("object")?;
+        }
+        let base = (object.kind() == "identifier").then(|| self.node_text(&object))?;
+        test_detection::is_test_runner_name(&base).then_some(base)
+    }
+
+    /// CRG `_get_test_description`: the first string argument, unquoted, whitespace collapsed
+    /// and cut to `MAX_TEST_DESCRIPTION_LEN` characters.
+    fn test_description(&self, node: &Node) -> Option<String> {
+        let arguments = node.child_by_field_name("arguments")?;
+        let mut cursor = arguments.walk();
+        let argument = arguments
+            .children(&mut cursor)
+            .find(|a| matches!(a.kind(), "string" | "template_string"))?;
+        let text = self.node_text(&argument);
+        let stripped = text.trim_matches(|c| matches!(c, '\'' | '"' | '`'));
+        let normalized = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+        let description: String = normalized.chars().take(MAX_TEST_DESCRIPTION_LEN).collect();
+        (!description.is_empty()).then_some(description)
     }
 
     /// CRG `_get_call_name`: the callee identifier, or the rightmost member of a member
@@ -375,5 +441,80 @@ mod tests {
             !e.metadata
                 .contains_key(super::super::crg_shape::FILE_SCOPE_ATTR)
         }));
+    }
+
+    fn node<'r>(result: &'r ExtractionResult, qualified: &str) -> &'r CodeNode {
+        result
+            .nodes
+            .iter()
+            .find(|n| {
+                n.metadata
+                    .attributes
+                    .get("qualified_name")
+                    .map(String::as_str)
+                    == Some(qualified)
+            })
+            .unwrap_or_else(|| panic!("{qualified} missing"))
+    }
+
+    fn contains_edges(result: &ExtractionResult) -> BTreeSet<(String, String)> {
+        result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Contains)
+            .map(|e| {
+                let from = result.nodes.iter().find(|n| n.id == e.from).unwrap();
+                (
+                    from.metadata.attributes["qualified_name"].clone(),
+                    e.to.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn runner_calls_in_test_files_become_tests() {
+        let src = "describe.only('S', () => {\n  it.skip(`finds  one`, () => { svc.findById(1); });\n\
+                   beforeEach(() => {});\n});\n";
+        let r = extract_ts(src, "a.test.ts");
+        let qns = qualified_names(&r);
+        for q in [
+            "a.test.ts::describe:S@L1",
+            "a.test.ts::it:finds one@L2",
+            "a.test.ts::beforeEach@L3",
+        ] {
+            assert!(qns.contains(q), "{q} missing from {qns:?}");
+        }
+        let edges = contains_edges(&r);
+        assert!(edges.contains(&("a.test.ts".into(), "a.test.ts::describe:S@L1".into())));
+        assert!(edges.contains(&(
+            "a.test.ts::describe:S@L1".into(),
+            "a.test.ts::it:finds one@L2".into()
+        )));
+        assert_eq!(
+            calls_from(&r, "a.test.ts::it:finds one@L2"),
+            vec!["findById"]
+        );
+        assert!(calls_from(&r, "a.test.ts").is_empty());
+        let it = node(&r, "a.test.ts::it:finds one@L2");
+        assert_eq!(it.node_type, Some(NodeType::Other("Test".into())));
+        assert_eq!(it.metadata.attributes["is_test"], "true");
+        assert_eq!(crate::languages::crg_shape::id_node_type(it), "Function");
+        assert_eq!((it.location.line, it.location.end_line), (2, Some(2)));
+    }
+
+    #[test]
+    fn runner_calls_outside_test_files_are_plain_calls() {
+        let r = extract_ts("describe('S', () => { go(); });\n", "src/a.ts");
+        assert!(!qualified_names(&r).iter().any(|q| q.contains('@')));
+        assert_eq!(calls_from(&r, "src/a.ts"), vec!["describe", "go"]);
+    }
+
+    #[test]
+    fn runner_descriptions_are_capped_at_200_characters() {
+        let long = "x".repeat(250);
+        let r = extract_ts(&format!("it('{long}', () => {{}});\n"), "a.test.ts");
+        let expected = format!("a.test.ts::it:{}@L1", "x".repeat(200));
+        assert!(qualified_names(&r).contains(&expected));
     }
 }
