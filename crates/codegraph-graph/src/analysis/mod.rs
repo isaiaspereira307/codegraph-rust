@@ -3,6 +3,7 @@
 
 pub mod communities;
 pub mod flows;
+pub mod insights;
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -117,6 +118,22 @@ impl AnalysisGraph {
             graph.edges.push(row?);
         }
         Ok(graph)
+    }
+
+    /// Builds a graph from rows already in id order (used by `load` and by tests).
+    pub fn from_parts(nodes: Vec<AnalysisNode>, edges: Vec<AnalysisEdge>) -> Self {
+        let by_qualified = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.qualified.clone(), i))
+            .collect();
+        let by_node_id = nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
+        AnalysisGraph {
+            nodes,
+            edges,
+            by_qualified,
+            by_node_id,
+        }
     }
 
     pub fn index_of(&self, qualified: &str) -> Option<usize> {

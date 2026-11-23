@@ -22,6 +22,11 @@ the server side.
 | "Are there dependency cycles?" | `detect_circular_dependencies` |
 | "How coupled is X?" | `calculate_coupling_metrics` |
 | "What are the central components?" | `get_hub_nodes` |
+| "Which nodes are chokepoints between regions?" | `get_bridge_nodes` |
+| "Which execution flows exist, and which matter most?" | `list_flows`, `get_flow` |
+| "Which flows does this change reach?" | `get_affected_flows` |
+| "How is the code clustered?" | `list_communities`, `get_community` |
+| "How coupled are the modules?" | `get_architecture_overview` |
 | "Where should review focus?" | `find_complexity_hotspots` |
 
 `edge_type` selects the relationship to follow: `Calls`, `Imports`, `Uses`,

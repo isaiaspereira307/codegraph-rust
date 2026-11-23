@@ -77,6 +77,7 @@ impl GraphToolSchemas {
             Self::list_communities(),
             Self::get_community(),
             Self::get_architecture_overview(),
+            Self::get_bridge_nodes(),
         ]
     }
 
@@ -632,17 +633,52 @@ impl GraphToolSchemas {
     pub fn get_hub_nodes() -> ToolSchema {
         ToolSchema {
             name: "get_hub_nodes".to_string(),
-            description: "Identify highly connected hub nodes in the code graph with degree >= min_degree. \
-                Returns nodes sorted by total degree (incoming + outgoing connections) in descending order. \
-                Useful for finding architectural hotspots, central components, and potential bottlenecks or god objects.".to_string(),
+            description: "Most connected nodes (in + out edges of every kind), highest total \
+                degree first. Hubs are architectural hotspots: changing one has a wide blast \
+                radius. Returns name, qualified name, kind, file, degrees and community id."
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Hubs to return (1-100, defaults to 10)",
+                        "minimum": 1, "maximum": 100, "default": 10
+                    },
+                    "detail_level": {
+                        "type": "string", "enum": ["standard", "minimal"], "default": "standard",
+                        "description": "minimal returns name, kind and total_degree only"
+                    },
                     "min_degree": {
                         "type": "integer",
-                        "description": "Minimum total degree (incoming + outgoing connections) to qualify as a hub (defaults to 5)",
-                        "minimum": 1,
-                        "default": 5
+                        "description": "Optional: only nodes with at least this total degree",
+                        "minimum": 1
+                    }
+                },
+                "required": []
+            }),
+        }
+    }
+
+    /// Schema for get_bridge_nodes (betweenness centrality)
+    pub fn get_bridge_nodes() -> ToolSchema {
+        ToolSchema {
+            name: "get_bridge_nodes".to_string(),
+            description: "Architectural chokepoints: nodes with the highest betweenness \
+                centrality, i.e. on the shortest paths between many other nodes. If they break, \
+                several regions of the code lose connectivity. Exact up to 5000 vertices, \
+                sampled (deterministically) above."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "top_n": {
+                        "type": "integer", "description": "Bridges to return (1-100, defaults to 10)",
+                        "minimum": 1, "maximum": 100, "default": 10
+                    },
+                    "detail_level": {
+                        "type": "string", "enum": ["standard", "minimal"], "default": "standard",
+                        "description": "minimal returns name, kind and betweenness only"
                     }
                 },
                 "required": []
@@ -730,7 +766,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 23, "Should have exactly 23 tool schemas");
+        assert_eq!(schemas.len(), 24, "Should have exactly 24 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -758,7 +794,7 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 24);
         for flow_tool in [
             "list_flows",
             "get_flow",
@@ -766,6 +802,7 @@ mod tests {
             "list_communities",
             "get_community",
             "get_architecture_overview",
+            "get_bridge_nodes",
         ] {
             assert!(names.contains(&flow_tool.to_string()), "{flow_tool}");
         }

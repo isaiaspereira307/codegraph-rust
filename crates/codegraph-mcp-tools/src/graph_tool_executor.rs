@@ -396,6 +396,7 @@ impl GraphToolExecutor {
                         .await?
                 }
                 "get_hub_nodes" => self.execute_get_hub_nodes(parameters.clone()).await?,
+                "get_bridge_nodes" => self.execute_get_bridge_nodes(parameters.clone()).await?,
                 "get_reverse_dependencies" => {
                     self.execute_get_reverse_dependencies(parameters.clone())
                         .await?
@@ -1145,22 +1146,75 @@ impl GraphToolExecutor {
         }))
     }
 
-    /// Execute get_hub_nodes
+    /// Execute get_hub_nodes - most connected nodes, CRG-shaped
     async fn execute_get_hub_nodes(&self, params: JsonValue) -> Result<JsonValue> {
-        let min_degree = params["min_degree"].as_i64().unwrap_or(5) as i32;
-
-        let result = self
+        let top_n = params["top_n"].as_i64().unwrap_or(10).clamp(1, 100) as usize;
+        let min_degree = params["min_degree"].as_i64().map(|d| d.max(1) as usize);
+        let minimal = params["detail_level"].as_str() == Some("minimal");
+        let mut hubs = self
             .graph_query
-            .get_hub_nodes(min_degree)
+            .hub_nodes()
             .await
-            .map_err(|e| McpError::Protocol(format!("get_hub_nodes failed: {}", e)))?;
-
+            .map_err(|e| McpError::Protocol(format!("get_hub_nodes failed: {e:#}")))?;
+        if let Some(min) = min_degree {
+            hubs.retain(|h| h.total_degree >= min);
+        }
+        let total = hubs.len();
+        hubs.truncate(top_n);
+        let rows: Vec<JsonValue> = hubs
+            .iter()
+            .map(|h| {
+                if minimal {
+                    json!({"name": h.name, "kind": h.kind, "total_degree": h.total_degree})
+                } else {
+                    serde_json::to_value(h).unwrap_or(JsonValue::Null)
+                }
+            })
+            .collect();
         Ok(json!({
             "tool": "get_hub_nodes",
-            "parameters": {
-                "min_degree": min_degree
-            },
-            "result": result
+            "parameters": { "top_n": top_n, "min_degree": min_degree,
+                            "detail_level": if minimal { "minimal" } else { "standard" } },
+            "result": {
+                "status": "ok",
+                "summary": format!("{total} hub node(s) ranked by degree{}", shown_of(rows.len(), total)),
+                "hub_nodes": rows, "count": rows.len(), "total": total,
+                "truncated": rows.len() < total,
+            }
+        }))
+    }
+
+    /// Execute get_bridge_nodes - betweenness centrality chokepoints
+    async fn execute_get_bridge_nodes(&self, params: JsonValue) -> Result<JsonValue> {
+        let top_n = params["top_n"].as_i64().unwrap_or(10).clamp(1, 100) as usize;
+        let minimal = params["detail_level"].as_str() == Some("minimal");
+        let mut bridges = self
+            .graph_query
+            .bridge_nodes()
+            .await
+            .map_err(|e| McpError::Protocol(format!("get_bridge_nodes failed: {e:#}")))?;
+        let total = bridges.len();
+        bridges.truncate(top_n);
+        let rows: Vec<JsonValue> = bridges
+            .iter()
+            .map(|b| {
+                if minimal {
+                    json!({"name": b.name, "kind": b.kind, "betweenness": b.betweenness})
+                } else {
+                    serde_json::to_value(b).unwrap_or(JsonValue::Null)
+                }
+            })
+            .collect();
+        Ok(json!({
+            "tool": "get_bridge_nodes",
+            "parameters": { "top_n": top_n,
+                            "detail_level": if minimal { "minimal" } else { "standard" } },
+            "result": {
+                "status": "ok",
+                "summary": format!("{total} bridge node(s) ranked by betweenness{}", shown_of(rows.len(), total)),
+                "bridge_nodes": rows, "count": rows.len(), "total": total,
+                "truncated": rows.len() < total,
+            }
         }))
     }
 
@@ -1310,13 +1364,13 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 23);
+        assert_eq!(schemas.len(), 24);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 23);
+        assert_eq!(names.len(), 24);
         assert!(names.contains(&"get_review_context".to_string()));
         assert!(names.contains(&"detect_changes".to_string()));
         assert!(names.contains(&"get_impact_radius".to_string()));

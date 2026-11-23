@@ -299,9 +299,25 @@ pub struct NodeRequest {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HubRequest {
-    /// Minimum incoming + outgoing connections to qualify as a hub (default 5)
+    /// Hubs to return (1-100, default 10)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_n: Option<u32>,
+    /// standard (default) or minimal (name, kind, total_degree)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_level: Option<String>,
+    /// Optional: only nodes with at least this many incoming + outgoing connections
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_degree: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct BridgeRequest {
+    /// Bridges to return (1-100, default 10)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_n: Option<u32>,
+    /// standard (default) or minimal (name, kind, betweenness)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_level: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -466,6 +482,16 @@ impl CodeGraphMCPServer {
     }
 
     #[tool(
+        description = "Architectural chokepoints: nodes with the highest betweenness centrality (on the shortest paths between many others)."
+    )]
+    async fn get_bridge_nodes(
+        &self,
+        params: Parameters<BridgeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_bridge_nodes", &params.0).await
+    }
+
+    #[tool(
         description = "List communities: clusters of closely related functions and classes with size, cohesion and a sample of members."
     )]
     async fn list_communities(
@@ -545,7 +571,7 @@ impl CodeGraphMCPServer {
     }
 
     #[tool(
-        description = "Highly connected nodes (degree >= min_degree), sorted by total degree. Finds central components and god objects."
+        description = "Most connected nodes (in + out edges), highest total degree first. Finds central components and god objects."
     )]
     async fn get_hub_nodes(
         &self,

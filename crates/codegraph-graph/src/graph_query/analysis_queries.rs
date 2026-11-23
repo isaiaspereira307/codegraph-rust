@@ -436,3 +436,27 @@ impl GraphQuery {
             .await
     }
 }
+
+impl GraphQuery {
+    /// Every hub candidate, most connected first (see `analysis::insights::hub_nodes`).
+    pub async fn hub_nodes(&self) -> Result<Vec<crate::analysis::insights::HubRow>> {
+        self.store()
+            .with_conn(|conn| {
+                Ok(crate::analysis::insights::hub_nodes(
+                    &crate::analysis::AnalysisGraph::load(conn)?,
+                ))
+            })
+            .await
+    }
+
+    /// Every node with positive betweenness, highest first (exact to 5000 vertices, then sampled).
+    pub async fn bridge_nodes(&self) -> Result<Vec<crate::analysis::insights::BridgeRow>> {
+        self.store()
+            .with_conn(|conn| {
+                Ok(crate::analysis::insights::bridge_nodes(
+                    &crate::analysis::AnalysisGraph::load(conn)?,
+                ))
+            })
+            .await
+    }
+}

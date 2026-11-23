@@ -28,8 +28,15 @@ that ID to the other tools:
 | Follow calls from a function | `trace_call_chain` | `from_node`, `max_depth` |
 | Find dependency cycles | `detect_circular_dependencies` | `edge_type` |
 | Coupling of a node | `calculate_coupling_metrics` | `node_id` |
-| Central components | `get_hub_nodes` | `min_degree` |
+| Central components | `get_hub_nodes` | `top_n`, `detail_level` |
+| Chokepoints between code regions | `get_bridge_nodes` | `top_n`, `detail_level` |
 | Risky functions to review | `find_complexity_hotspots` | `min_complexity`, `limit` |
+| Execution flows from entry points, most critical first | `list_flows` | `sort_by`, `limit`, `kind`, `detail_level` |
+| One flow with its steps (and source) | `get_flow` | `flow_id` or `flow_name`, `include_source`, `max_steps` |
+| Flows that pass through the changed files | `get_affected_flows` | `changed_files` or `base_ref`, `detail_level`, `max_flows` |
+| Code clusters (communities) with size and cohesion | `list_communities` | `sort_by`, `min_size`, `detail_level`, `max_members` |
+| One community, optionally with member nodes | `get_community` | `community_id` or `community_name`, `include_members` |
+| Communities and the coupling between them | `get_architecture_overview` | `detail_level`, `max_results` |
 
 `edge_type` is one of `Calls`, `Imports`, `Uses`, `Extends`, `Implements`, `References`.
 
