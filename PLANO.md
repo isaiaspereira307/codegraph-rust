@@ -342,6 +342,15 @@ harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
 
 ## Fase 4 — Análise de grafo
 
+Plano detalhado: `docs/superpowers/plans/2026-11-23-fase4-analise-grafo.md`. Tasks 1-9 de 13
+concluídas (2026-11-23): `AnalysisGraph`, entry points, flows (`list_flows`, `get_flow`,
+`get_affected_flows`, `flows_s` ≈ 0,5 s neste repo, sem incremental), Leiden determinístico,
+comunidades (+ nomes, split, fallback por diretório; `list_communities`, `get_community`,
+`get_architecture_overview`, ids estáveis entre `finalize`) e `get_hub_nodes` no formato CRG +
+`get_bridge_nodes`. Faltam: Task 10 (`get_knowledge_gaps`, `get_surprising_connections`), 11
+(`get_suggested_questions`), 12 (risk score no review), 13 (paridade com o CRG, docs, fechamento) e a
+revisão final do branch. Ledger local: `.superpowers/sdd/2026-11-23-fase4-analise-grafo/progress.md`.
+
 1. Flows: `list_flows`, `get_flow`, `get_affected_flows` (portar `flows.py`; usar a base de
    call chain).
 2. Comunidades: `list_communities`, `get_community`, `get_bridge_nodes`,
