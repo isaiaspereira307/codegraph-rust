@@ -2,6 +2,7 @@
 // ABOUTME: Deterministic port of communities.py (code-review-graph); naming and storage follow.
 
 pub mod leiden;
+pub mod naming;
 
 use super::{AnalysisEdge, AnalysisGraph, AnalysisNode, round_half_even};
 use leiden::{WeightedGraph, leiden};
@@ -255,7 +256,13 @@ pub fn detect_communities(g: &AnalysisGraph, min_size: usize) -> Vec<Community> 
     } else {
         detect_by_directory(&nodes, &g.edges, min_size)
     };
-    split_oversized(communities, g)
+    // Parents are named before the split (sub-communities fall back to "{parent}-{n}"); names
+    // are made unique last, like code-review-graph.
+    let mut communities = communities;
+    naming::fill_names(g, &mut communities);
+    let mut communities = split_oversized(communities, g);
+    naming::dedupe_names(g, &mut communities);
+    communities
 }
 
 fn dir_parts(path: &str) -> (Vec<String>, String) {
@@ -353,8 +360,8 @@ fn detect_by_directory(
 /// Splits communities above `max(25% of all members, 10)` with a second Leiden pass at
 /// resolution 0.5 on their own subgraph (one pass, not recursive). A community that does not
 /// split, has too few nodes or has no internal edge stays as it is. Sub-communities have level
-/// `parent + 1`, the parent's dominant language, an unrounded cohesion and an empty name (named
-/// by the caller).
+/// `parent + 1`, the parent's dominant language and an unrounded cohesion. Each sub-community is
+/// named from its members, falling back to `{parent}-{n}` (n counts sub-communities created).
 pub fn split_oversized(communities: Vec<Community>, g: &AnalysisGraph) -> Vec<Community> {
     let total: usize = communities.iter().map(|c| c.size).sum();
     if total == 0 {
@@ -363,6 +370,7 @@ pub fn split_oversized(communities: Vec<Community>, g: &AnalysisGraph) -> Vec<Co
     let threshold = ((total as f64 * 0.25) as usize).max(10);
     let vertices: Vec<&AnalysisNode> = g.nodes.iter().filter(|n| n.kind != "File").collect();
     let mut out = Vec::new();
+    let mut next_id = 1;
     for comm in communities {
         let members: HashSet<&str> = comm.members.iter().map(String::as_str).collect();
         if members.len() <= threshold {
@@ -419,8 +427,17 @@ pub fn split_oversized(communities: Vec<Community>, g: &AnalysisGraph) -> Vec<Co
             .collect();
         let cohesions = compute_cohesion(&sets, &g.edges);
         for (members, cohesion) in sets.into_iter().zip(cohesions) {
+            let sub_nodes: Vec<&AnalysisNode> = members
+                .iter()
+                .filter_map(|qn| g.index_of(qn).map(|i| &g.nodes[i]))
+                .collect();
+            let mut name = naming::generate_name(&sub_nodes);
+            if matches!(name.as_str(), "" | "empty" | "cluster") {
+                name = format!("{}-{next_id}", comm.name);
+            }
+            next_id += 1;
             out.push(Community {
-                name: String::new(),
+                name,
                 level: comm.level + 1,
                 cohesion,
                 size: members.len(),
