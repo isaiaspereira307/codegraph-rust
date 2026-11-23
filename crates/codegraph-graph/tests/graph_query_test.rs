@@ -418,3 +418,67 @@ async fn find_nodes_by_name_ranks_name_matches_and_symbols_first() {
         .collect();
     assert_eq!(chain, vec!["zchain", "c1"]);
 }
+
+#[tokio::test]
+async fn search_nodes_matches_stems_and_camel_tokens_name_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteGraphStore::open(dir.path()).unwrap();
+    let parse = node(60, "parse_file", "reader.py", 1.0);
+    let hashed = node(61, "hashPassword", "auth.py", 1.0);
+    // Name hit on "reader".
+    let by_name = node(62, "reader", "other.py", 1.0);
+    // Path-only hit: "reader" appears only in this node's file path.
+    let by_path = node(63, "helper", "reader_utils.py", 1.0);
+    store
+        .upsert_nodes_batch(&[parse, hashed, by_name, by_path])
+        .await
+        .unwrap();
+    store.finalize("full").await.unwrap();
+    let q = GraphQuery::new(store.clone());
+
+    // Porter stemming: "parsing" reaches "parse_file".
+    let found = q.search_nodes("parsing", 10).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, id(60));
+
+    // camelCase tokens: "password" reaches "hashPassword".
+    let found = q.search_nodes("password", 10).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, id(61));
+
+    // Name hits rank above path-only hits.
+    let found = q.search_nodes("reader", 10).await.unwrap();
+    assert_eq!(found.len(), 3);
+    assert_eq!(found[0].id, id(62));
+
+    // Operators and quotes are plain text; blank input finds nothing; limit 0 uses the default.
+    assert!(q.search_nodes("\"\" OR NEAR(", 10).await.is_ok());
+    assert!(q.search_nodes("   ", 10).await.unwrap().is_empty());
+    assert_eq!(q.search_nodes("password", 0).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn graph_stats_count_kinds_files_languages_and_last_build() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_store, q) = fixture(dir.path()).await;
+
+    let stats = q.graph_stats().await.unwrap();
+    assert_eq!(stats.total_nodes, 14);
+    assert_eq!(stats.nodes_by_kind.get("Function"), Some(&14));
+    assert_eq!(stats.total_edges, 12);
+    assert_eq!(stats.edges_by_kind.get("CALLS"), Some(&12));
+    // cycle.py, chain.py, hub.py, big.py, deps.py
+    assert_eq!(stats.files, 5);
+    assert_eq!(stats.languages, vec!["python".to_string()]);
+    assert!(stats.last_updated.is_some(), "finalize writes last_updated");
+
+    // An empty database reports zeros and no build time.
+    let empty_dir = tempfile::tempdir().unwrap();
+    let empty = SqliteGraphStore::open(empty_dir.path()).unwrap();
+    let stats = GraphQuery::new(empty).graph_stats().await.unwrap();
+    assert_eq!(stats.total_nodes, 0);
+    assert_eq!(stats.total_edges, 0);
+    assert_eq!(stats.files, 0);
+    assert!(stats.languages.is_empty());
+    assert_eq!(stats.last_updated, None);
+}

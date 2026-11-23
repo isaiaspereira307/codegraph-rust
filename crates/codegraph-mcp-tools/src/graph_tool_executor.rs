@@ -336,6 +336,8 @@ impl GraphToolExecutor {
             // Execute based on tool name
             let result = match tool_name {
                 "find_nodes_by_name" => self.execute_find_nodes_by_name(parameters.clone()).await?,
+                "search_nodes" => self.execute_search_nodes(parameters.clone()).await?,
+                "list_graph_stats" => self.execute_list_graph_stats().await?,
                 "get_transitive_dependencies" => {
                     self.execute_get_transitive_dependencies(parameters.clone())
                         .await?
@@ -428,6 +430,44 @@ impl GraphToolExecutor {
                 "name": name,
                 "limit": limit
             },
+            "result": result
+        }))
+    }
+
+    /// Execute search_nodes - full-text search over the FTS5 index
+    async fn execute_search_nodes(&self, params: JsonValue) -> Result<JsonValue> {
+        let query = params["query"]
+            .as_str()
+            .ok_or_else(|| McpError::Protocol("Missing query".to_string()))?;
+        let limit = params["limit"].as_i64().unwrap_or(10).clamp(1, 50) as usize;
+
+        let result = self
+            .graph_query
+            .search_nodes(query, limit)
+            .await
+            .map_err(|e| McpError::Protocol(format!("search_nodes failed: {}", e)))?;
+
+        Ok(json!({
+            "tool": "search_nodes",
+            "parameters": {
+                "query": query,
+                "limit": limit
+            },
+            "result": result
+        }))
+    }
+
+    /// Execute list_graph_stats - graph-wide counts read from SQLite
+    async fn execute_list_graph_stats(&self) -> Result<JsonValue> {
+        let result = self
+            .graph_query
+            .graph_stats()
+            .await
+            .map_err(|e| McpError::Protocol(format!("list_graph_stats failed: {}", e)))?;
+
+        Ok(json!({
+            "tool": "list_graph_stats",
+            "parameters": {},
             "result": result
         }))
     }
@@ -702,13 +742,15 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 8);
+        assert_eq!(schemas.len(), 10);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 10);
+        assert!(names.contains(&"search_nodes".to_string()));
+        assert!(names.contains(&"list_graph_stats".to_string()));
         assert!(names.contains(&"get_transitive_dependencies".to_string()));
         assert!(names.contains(&"find_complexity_hotspots".to_string()));
     }

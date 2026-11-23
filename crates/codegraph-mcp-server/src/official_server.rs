@@ -46,6 +46,19 @@ pub struct FindNodesRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SearchNodesRequest {
+    /// Words to search for; every word must match (e.g. "parse file")
+    pub query: String,
+    /// Maximum number of results (1-50, default 10)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// `list_graph_stats` takes no parameters.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListGraphStatsRequest {}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DependencyRequest {
     /// Node ID returned by find_nodes_by_name
     pub node_id: String,
@@ -123,6 +136,26 @@ impl CodeGraphMCPServer {
         params: Parameters<FindNodesRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("find_nodes_by_name", &params.0).await
+    }
+
+    #[tool(
+        description = "Full-text search over code nodes (names, paths, signatures, docstrings) with stemming and camelCase splitting. Ranks name matches first. Returns node IDs and locations."
+    )]
+    async fn search_nodes(
+        &self,
+        params: Parameters<SearchNodesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("search_nodes", &params.0).await
+    }
+
+    #[tool(
+        description = "Graph-wide counts: nodes and edges per kind, number of files, languages and the time of the last build. Takes no parameters."
+    )]
+    async fn list_graph_stats(
+        &self,
+        params: Parameters<ListGraphStatsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("list_graph_stats", &params.0).await
     }
 
     #[tool(

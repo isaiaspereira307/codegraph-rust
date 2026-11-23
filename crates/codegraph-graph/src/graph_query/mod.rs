@@ -1,7 +1,9 @@
 // ABOUTME: Graph tool queries over an in-memory petgraph snapshot of the SQLite store.
 // ABOUTME: Semantics follow the former SurrealQL fn::* functions (depth limits, defaults).
 
+mod search;
 mod snapshot;
+mod stats;
 pub mod types;
 
 use crate::sqlite_store::SqliteGraphStore;

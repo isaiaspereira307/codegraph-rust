@@ -14,6 +14,7 @@ that ID to the other tools:
 | Need | Tool | Parameters |
 | --- | --- | --- |
 | Resolve a symbol to node IDs | `find_nodes_by_name` | `name`, `limit` |
+| Find code by words (stems, camelCase) | `search_nodes` | `query`, `limit` |
 | What does X depend on? | `get_transitive_dependencies` | `node_id`, `edge_type`, `depth` |
 | What breaks if X changes? | `get_reverse_dependencies` | `node_id`, `edge_type`, `depth` |
 | Follow calls from a function | `trace_call_chain` | `from_node`, `max_depth` |

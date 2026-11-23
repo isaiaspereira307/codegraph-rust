@@ -27,7 +27,53 @@ impl GraphToolSchemas {
             Self::get_hub_nodes(),
             Self::get_reverse_dependencies(),
             Self::find_complexity_hotspots(),
+            Self::search_nodes(),
+            Self::list_graph_stats(),
         ]
+    }
+
+    /// Schema for list_graph_stats (graph-wide counts; takes no parameters)
+    pub fn list_graph_stats() -> ToolSchema {
+        ToolSchema {
+            name: "list_graph_stats".to_string(),
+            description: "Graph-wide counts: nodes and edges per kind, number of files, \
+                   languages and the time of the last build. Use it to check that the index \
+                   exists and is fresh before relying on other graph tools."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {},
+            }),
+        }
+    }
+
+    /// Schema for search_nodes (full-text search over the FTS5 index)
+    pub fn search_nodes() -> ToolSchema {
+        ToolSchema {
+            name: "search_nodes".to_string(),
+            description: "Full-text search over code nodes: names, qualified names, file paths, \
+                   signatures and docstrings, with stemming (\"parsing\" finds \"parse\") and \
+                   camelCase splitting (\"password\" finds \"hashPassword\"). Ranks name matches \
+                   first. Returns node IDs, names, kinds and locations."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Words to search for; every word must match (e.g., 'parse file')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (1-50, defaults to 10)",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "default": 10
+                    }
+                },
+                "required": ["query"]
+            }),
+        }
     }
 
     /// Schema for find_nodes_by_name function (entrypoint for obtaining node IDs)
@@ -265,7 +311,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 8, "Should have exactly 8 tool schemas");
+        assert_eq!(schemas.len(), 10, "Should have exactly 10 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -293,7 +339,9 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 10);
+        assert!(names.contains(&"search_nodes".to_string()));
+        assert!(names.contains(&"list_graph_stats".to_string()));
         assert!(names.contains(&"find_nodes_by_name".to_string()));
         assert!(names.contains(&"get_transitive_dependencies".to_string()));
         assert!(names.contains(&"detect_circular_dependencies".to_string()));

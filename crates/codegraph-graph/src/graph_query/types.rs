@@ -2,6 +2,7 @@
 // ABOUTME: Serialized as-is into MCP/CLI tool responses.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencyNode {
@@ -157,4 +158,21 @@ pub struct ComplexityHotspot {
     pub efferent_coupling: i32,
     pub instability: f32,
     pub risk_score: f32,
+}
+
+/// Graph-wide counts, read with GROUP BY over the SQLite tables.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GraphStats {
+    pub total_nodes: usize,
+    pub total_edges: usize,
+    /// Node count per kind (File, Function, Class, Test, ...), sorted by kind.
+    pub nodes_by_kind: BTreeMap<String, usize>,
+    /// Edge count per kind (CALLS, IMPORTS_FROM, CONTAINS, ...), sorted by kind.
+    pub edges_by_kind: BTreeMap<String, usize>,
+    /// Distinct file paths that own at least one node.
+    pub files: usize,
+    /// Distinct non-empty node languages, sorted.
+    pub languages: Vec<String>,
+    /// `metadata.last_updated` as written by the last finalize; `None` on an empty database.
+    pub last_updated: Option<String>,
 }

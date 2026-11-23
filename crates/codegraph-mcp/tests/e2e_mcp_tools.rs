@@ -142,14 +142,18 @@ async fn test_tool_discovery() -> Result<()> {
         "get_hub_nodes",
         "get_reverse_dependencies",
         "get_transitive_dependencies",
+        "list_graph_stats",
+        "search_nodes",
         "trace_call_chain",
     ];
     expected.sort();
     assert_eq!(discovered, expected);
 
     for tool in &tools.tools {
-        assert!(
-            tool.input_schema.get("properties").is_some(),
+        // MCP requires an object schema; parameterless tools may omit "properties".
+        assert_eq!(
+            tool.input_schema.get("type").and_then(|t| t.as_str()),
+            Some("object"),
             "Tool '{}' must publish a parameter schema",
             tool.name
         );
