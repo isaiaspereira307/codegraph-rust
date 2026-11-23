@@ -70,6 +70,22 @@ pub struct QueryGraphRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetImpactRadiusRequest {
+    /// Changed node IDs
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_ids: Option<Vec<String>>,
+    /// Changed file paths (exact or suffix match)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
+    /// Levels of dependents to walk (1-10, default 3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    /// Maximum impacted nodes to return (1-1000, default 200)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_nodes: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct TraverseGraphRequest {
     /// Node ID from find_nodes_by_name or search_nodes; takes precedence over name
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,6 +249,16 @@ impl CodeGraphMCPServer {
         params: Parameters<TraverseGraphRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("traverse_graph", &params.0).await
+    }
+
+    #[tool(
+        description = "Blast radius of a change: transitive dependents of the given node_ids or files, grouped by depth, with affected files and the tests covering them."
+    )]
+    async fn get_impact_radius(
+        &self,
+        params: Parameters<GetImpactRadiusRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_impact_radius", &params.0).await
     }
 
     #[tool(

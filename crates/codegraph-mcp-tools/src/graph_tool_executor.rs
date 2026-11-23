@@ -344,6 +344,7 @@ impl GraphToolExecutor {
                 }
                 "query_graph" => self.execute_query_graph(parameters.clone()).await?,
                 "traverse_graph" => self.execute_traverse_graph(parameters.clone()).await?,
+                "get_impact_radius" => self.execute_get_impact_radius(parameters.clone()).await?,
                 "get_transitive_dependencies" => {
                     self.execute_get_transitive_dependencies(parameters.clone())
                         .await?
@@ -508,6 +509,45 @@ impl GraphToolExecutor {
         Ok(json!({
             "tool": "query_graph",
             "parameters": { "pattern": pattern.name(), "node_id": node_id, "limit": limit },
+            "result": result
+        }))
+    }
+
+    /// Execute get_impact_radius - dependents of changed nodes or files, with tests
+    async fn execute_get_impact_radius(&self, params: JsonValue) -> Result<JsonValue> {
+        let strings = |key: &str| -> Vec<String> {
+            params[key]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let node_ids = strings("node_ids");
+        let files = strings("files");
+        if node_ids.is_empty() && files.is_empty() {
+            return Err(McpError::Protocol("Missing node_ids or files".to_string()).into());
+        }
+        let depth = params["depth"].as_i64().unwrap_or(3) as i32;
+        let max_nodes = params["max_nodes"].as_i64().unwrap_or(200).clamp(1, 1000) as usize;
+
+        let result = self
+            .graph_query
+            .get_impact_radius(&node_ids, &files, depth, max_nodes)
+            .await
+            .map_err(|e| McpError::Protocol(format!("get_impact_radius failed: {}", e)))?;
+
+        Ok(json!({
+            "tool": "get_impact_radius",
+            "parameters": {
+                "node_ids": node_ids,
+                "files": files,
+                "depth": depth,
+                "max_nodes": max_nodes
+            },
             "result": result
         }))
     }
@@ -852,13 +892,14 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 13);
+        assert_eq!(schemas.len(), 14);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
+        assert!(names.contains(&"get_impact_radius".to_string()));
         assert!(names.contains(&"find_large_functions".to_string()));
         assert!(names.contains(&"query_graph".to_string()));
         assert!(names.contains(&"traverse_graph".to_string()));

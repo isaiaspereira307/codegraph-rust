@@ -1,6 +1,7 @@
 // ABOUTME: Graph tool queries over an in-memory petgraph snapshot of the SQLite store.
 // ABOUTME: Semantics follow the former SurrealQL fn::* functions (depth limits, defaults).
 
+mod impact;
 mod large;
 mod query;
 mod search;
@@ -8,6 +9,7 @@ mod snapshot;
 mod stats;
 mod traverse;
 
+pub use impact::{ImpactRadius, ImpactedNode};
 pub use query::{QueryGraphResult, QueryPattern};
 pub use traverse::{TraversalResult, TraverseDirection, TraversedNode};
 pub mod types;

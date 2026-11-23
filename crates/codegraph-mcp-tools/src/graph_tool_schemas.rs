@@ -32,7 +32,48 @@ impl GraphToolSchemas {
             Self::find_large_functions(),
             Self::query_graph(),
             Self::traverse_graph(),
+            Self::get_impact_radius(),
         ]
+    }
+
+    /// Schema for get_impact_radius (transitive dependents of changed nodes or files, and tests)
+    pub fn get_impact_radius() -> ToolSchema {
+        ToolSchema {
+            name: "get_impact_radius".to_string(),
+            description: "Blast radius of a change: the transitive dependents of the given nodes \
+                   or of every node in the given files, grouped by depth, with the affected \
+                   files and the tests that cover them. Give node_ids, files, or both."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "node_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Changed node IDs"
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Changed file paths (exact or suffix match)"
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Levels of dependents to walk (1-10, defaults to 3)",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "default": 3
+                    },
+                    "max_nodes": {
+                        "type": "integer",
+                        "description": "Maximum impacted nodes to return (1-1000, defaults to 200)",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "default": 200
+                    }
+                }
+            }),
+        }
     }
 
     /// Schema for traverse_graph (breadth-first walk from one node)
@@ -432,7 +473,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 13, "Should have exactly 13 tool schemas");
+        assert_eq!(schemas.len(), 14, "Should have exactly 14 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -460,7 +501,8 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
+        assert!(names.contains(&"get_impact_radius".to_string()));
         assert!(names.contains(&"find_large_functions".to_string()));
         assert!(names.contains(&"query_graph".to_string()));
         assert!(names.contains(&"traverse_graph".to_string()));

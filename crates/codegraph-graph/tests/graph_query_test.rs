@@ -675,3 +675,80 @@ async fn traverse_graph_walks_by_direction_depth_and_budget() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn impact_radius_walks_dependents_files_and_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = fixture(dir.path()).await;
+    // A test node (kind Test) calls c2, so finalize derives TESTED_BY c2 -> test.
+    let mut test = CodeNode::new(
+        "test_c2",
+        Some(NodeType::Other("Test".to_string())),
+        Some(Language::Python),
+        Location {
+            file_path: "test_chain.py".to_string(),
+            line: 1,
+            column: 0,
+            end_line: Some(3),
+            end_column: None,
+        },
+    );
+    test.id = uuid::Uuid::from_u128(80);
+    store.upsert_nodes_batch(&[test]).await.unwrap();
+    store
+        .upsert_edges_batch(&[calls(400, 80, 12)])
+        .await
+        .unwrap();
+    store.finalize("full").await.unwrap();
+    let q = GraphQuery::new(store.clone());
+
+    // c4's dependents: c3 at depth 1, c2 at depth 2 (depth 2 stops there).
+    let radius = q.get_impact_radius(&[id(14)], &[], 2, 0).await.unwrap();
+    let got: Vec<_> = radius
+        .impacted
+        .iter()
+        .map(|n| (n.node.name.as_str(), n.depth))
+        .collect();
+    assert_eq!(got, vec![("c3", 1), ("c2", 2)]);
+    assert_eq!(radius.changed.len(), 1);
+    assert!(!radius.truncated);
+    // c2 is covered by the test, which is also reported.
+    assert_eq!(radius.tests.len(), 1);
+    assert_eq!(radius.tests[0].name, "test_c2");
+
+    // Full depth reaches c1 too, and the test that calls c2 is a dependent as well.
+    let full = q.get_impact_radius(&[id(14)], &[], 10, 0).await.unwrap();
+    assert_eq!(full.impacted.len(), 4);
+    assert!(full.impacted.iter().any(|n| n.node.name == "test_c2"));
+    // chain.py plus the test's own file.
+    assert_eq!(full.affected_files.len(), 2);
+    assert!(full.affected_files.iter().any(|f| f.ends_with("chain.py")));
+    assert!(
+        full.affected_files
+            .iter()
+            .any(|f| f.ends_with("test_chain.py"))
+    );
+
+    // Changing big.py: its file node set is seeded, and d1 depends on big.
+    let by_file = q
+        .get_impact_radius(&[], &["big.py".to_string()], 3, 0)
+        .await
+        .unwrap();
+    assert_eq!(by_file.changed.len(), 1);
+    assert_eq!(by_file.changed[0].name, "big");
+    let names: Vec<_> = by_file
+        .impacted
+        .iter()
+        .map(|n| n.node.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["d1"]);
+
+    // The node budget stops the walk and says so; unknown ids are ignored.
+    let capped = q
+        .get_impact_radius(&[id(14), id(999)], &[], 10, 1)
+        .await
+        .unwrap();
+    assert_eq!(capped.changed.len(), 1);
+    assert_eq!(capped.impacted.len(), 1);
+    assert!(capped.truncated);
+}
