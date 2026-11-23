@@ -6,8 +6,10 @@ mod query;
 mod search;
 mod snapshot;
 mod stats;
+mod traverse;
 
 pub use query::{QueryGraphResult, QueryPattern};
+pub use traverse::{TraversalResult, TraverseDirection, TraversedNode};
 pub mod types;
 
 use crate::sqlite_store::SqliteGraphStore;

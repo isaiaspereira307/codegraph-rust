@@ -70,6 +70,28 @@ pub struct QueryGraphRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct TraverseGraphRequest {
+    /// Node ID from find_nodes_by_name or search_nodes; takes precedence over name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Symbol name, used when node_id is not given
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// out, in or both (default out)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    /// Single edge kind such as Calls; all dependency kinds when omitted
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_type: Option<String>,
+    /// Levels to walk (1-10, default 3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+    /// Maximum nodes to return (1-500, default 100)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_nodes: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct FindLargeFunctionsRequest {
     /// Minimum number of lines in the function (default 50)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,6 +223,16 @@ impl CodeGraphMCPServer {
         params: Parameters<QueryGraphRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("query_graph", &params.0).await
+    }
+
+    #[tool(
+        description = "Breadth-first walk from a node over dependency edges, out, in or both, bounded by max_depth and max_nodes. Returns reached nodes nearest first, with depth and a truncated flag."
+    )]
+    async fn traverse_graph(
+        &self,
+        params: Parameters<TraverseGraphRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("traverse_graph", &params.0).await
     }
 
     #[tool(

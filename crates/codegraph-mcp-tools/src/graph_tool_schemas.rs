@@ -31,7 +31,57 @@ impl GraphToolSchemas {
             Self::list_graph_stats(),
             Self::find_large_functions(),
             Self::query_graph(),
+            Self::traverse_graph(),
         ]
+    }
+
+    /// Schema for traverse_graph (breadth-first walk from one node)
+    pub fn traverse_graph() -> ToolSchema {
+        ToolSchema {
+            name: "traverse_graph".to_string(),
+            description: "Breadth-first walk from a node over dependency edges (CALLS, \
+                   IMPORTS_FROM, INHERITS, ...), following out, in or both directions. Returns \
+                   reached nodes nearest first with their depth. Give node_id, or name for the \
+                   best match. `truncated` is true when max_nodes stopped the walk."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "node_id": {
+                        "type": "string",
+                        "description": "Node ID returned by find_nodes_by_name or search_nodes"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Symbol name, used when node_id is not given; exact matches win"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["out", "in", "both"],
+                        "description": "out follows what the node depends on, in what depends on it",
+                        "default": "out"
+                    },
+                    "edge_type": {
+                        "type": "string",
+                        "description": "Single edge kind such as Calls or ImportsFrom; all dependency kinds when omitted"
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Levels to walk (1-10, defaults to 3)",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "default": 3
+                    },
+                    "max_nodes": {
+                        "type": "integer",
+                        "description": "Maximum nodes to return (1-500, defaults to 100)",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "default": 100
+                    }
+                }
+            }),
+        }
     }
 
     /// Schema for query_graph (callers, callees, imports, importers and tests of one node)
@@ -382,7 +432,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 12, "Should have exactly 12 tool schemas");
+        assert_eq!(schemas.len(), 13, "Should have exactly 13 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -410,9 +460,10 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 13);
         assert!(names.contains(&"find_large_functions".to_string()));
         assert!(names.contains(&"query_graph".to_string()));
+        assert!(names.contains(&"traverse_graph".to_string()));
         assert!(names.contains(&"search_nodes".to_string()));
         assert!(names.contains(&"list_graph_stats".to_string()));
         assert!(names.contains(&"find_nodes_by_name".to_string()));

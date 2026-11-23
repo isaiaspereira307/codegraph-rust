@@ -608,3 +608,70 @@ async fn query_graph_follows_call_edges_and_counts_unresolved_targets() {
     );
     assert_eq!(QueryPattern::parse("callers"), None);
 }
+
+#[tokio::test]
+async fn traverse_graph_walks_by_direction_depth_and_budget() {
+    use codegraph_graph::graph_query::TraverseDirection;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (_store, q) = fixture(dir.path()).await;
+
+    // c1 → c2 → c3 → c4 along CALLS.
+    let out = q
+        .traverse_graph(&id(11), TraverseDirection::Out, Some("Calls"), 2, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    let got: Vec<_> = out
+        .nodes
+        .iter()
+        .map(|n| (n.node.name.as_str(), n.depth))
+        .collect();
+    assert_eq!(got, vec![("c2", 1), ("c3", 2)]);
+    assert!(!out.truncated);
+
+    // Walking in from c4 reaches c3, c2, c1 (depth 3), nearest first.
+    let inward = q
+        .traverse_graph(&id(14), TraverseDirection::In, Some("CALLS"), 10, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    let names: Vec<_> = inward.nodes.iter().map(|n| n.node.name.as_str()).collect();
+    assert_eq!(names, vec!["c3", "c2", "c1"]);
+
+    // Both directions from c2: c1 (in) and c3 (out) at depth 1, then c4 at depth 2.
+    let both = q
+        .traverse_graph(&id(12), TraverseDirection::Both, Some("CALLS"), 2, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    let got: Vec<_> = both
+        .nodes
+        .iter()
+        .map(|n| (n.node.name.as_str(), n.depth))
+        .collect();
+    assert_eq!(got, vec![("c1", 1), ("c3", 1), ("c4", 2)]);
+
+    // The node budget stops the walk and says so.
+    let capped = q
+        .traverse_graph(&id(14), TraverseDirection::In, Some("CALLS"), 10, 2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(capped.nodes.len(), 2);
+    assert!(capped.truncated);
+
+    // Depth outside 1..=10 falls back to the default of 3; unknown nodes are None.
+    let deflt = q
+        .traverse_graph(&id(11), TraverseDirection::Out, Some("CALLS"), 99, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(deflt.nodes.len(), 3);
+    assert!(
+        q.traverse_graph(&id(999), TraverseDirection::Out, None, 1, 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

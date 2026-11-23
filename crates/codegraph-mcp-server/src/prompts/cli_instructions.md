@@ -17,6 +17,7 @@ that ID to the other tools:
 | Find code by words (stems, camelCase) | `search_nodes` | `query`, `limit` |
 | Find long functions (refactoring candidates) | `find_large_functions` | `min_lines`, `limit` |
 | Callers, callees, imports, importers, tests of a node | `query_graph` | `pattern`, `node_id` or `name`, `limit` |
+| Walk dependencies out, in or both, bounded | `traverse_graph` | `node_id` or `name`, `direction`, `edge_type`, `max_depth`, `max_nodes` |
 | What does X depend on? | `get_transitive_dependencies` | `node_id`, `edge_type`, `depth` |
 | What breaks if X changes? | `get_reverse_dependencies` | `node_id`, `edge_type`, `depth` |
 | Follow calls from a function | `trace_call_chain` | `from_node`, `max_depth` |

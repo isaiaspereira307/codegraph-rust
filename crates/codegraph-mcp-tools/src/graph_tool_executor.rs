@@ -1,7 +1,7 @@
 // ABOUTME: Tool executor for the graph analysis tools over the SQLite graph
 // ABOUTME: Validates tool parameters, runs GraphQuery calls and caches their results
 
-use codegraph_graph::graph_query::{GraphQuery, QueryPattern};
+use codegraph_graph::graph_query::{GraphQuery, QueryPattern, TraverseDirection};
 use codegraph_mcp_core::debug_logger::DebugLogger;
 use codegraph_mcp_core::error::{McpError, Result};
 use lru::LruCache;
@@ -343,6 +343,7 @@ impl GraphToolExecutor {
                         .await?
                 }
                 "query_graph" => self.execute_query_graph(parameters.clone()).await?,
+                "traverse_graph" => self.execute_traverse_graph(parameters.clone()).await?,
                 "get_transitive_dependencies" => {
                     self.execute_get_transitive_dependencies(parameters.clone())
                         .await?
@@ -462,6 +463,27 @@ impl GraphToolExecutor {
         }))
     }
 
+    /// Node id for a call: `node_id` as given, else the best `name` match (exact name wins).
+    /// `Ok(None)` when the name matches nothing; an error when neither is given.
+    async fn target_node_id(&self, params: &JsonValue) -> Result<Option<String>> {
+        if let Some(id) = params["node_id"].as_str() {
+            return Ok(Some(id.to_string()));
+        }
+        let name = params["name"]
+            .as_str()
+            .ok_or_else(|| McpError::Protocol("Missing node_id or name".to_string()))?;
+        let candidates = self
+            .graph_query
+            .search_nodes(name, 10)
+            .await
+            .map_err(|e| McpError::Protocol(format!("node lookup failed: {}", e)))?;
+        Ok(candidates
+            .iter()
+            .find(|n| n.name == name)
+            .or(candidates.first())
+            .map(|n| n.id.clone()))
+    }
+
     /// Execute query_graph - one pattern from a node given by id or by name
     async fn execute_query_graph(&self, params: JsonValue) -> Result<JsonValue> {
         let pattern_name = params["pattern"]
@@ -474,35 +496,9 @@ impl GraphToolExecutor {
         })?;
         let limit = params["limit"].as_i64().unwrap_or(20).clamp(1, 100) as usize;
 
-        let node_id = match (params["node_id"].as_str(), params["name"].as_str()) {
-            (Some(id), _) => id.to_string(),
-            (None, Some(name)) => {
-                let candidates = self
-                    .graph_query
-                    .search_nodes(name, 10)
-                    .await
-                    .map_err(|e| McpError::Protocol(format!("query_graph failed: {}", e)))?;
-                match candidates
-                    .iter()
-                    .find(|n| n.name == name)
-                    .or(candidates.first())
-                {
-                    Some(best) => best.id.clone(),
-                    None => {
-                        return Ok(json!({
-                            "tool": "query_graph",
-                            "parameters": { "pattern": pattern.name(), "name": name, "limit": limit },
-                            "result": null,
-                            "message": format!("no node matches name '{name}'")
-                        }));
-                    }
-                }
-            }
-            (None, None) => {
-                return Err(McpError::Protocol("Missing node_id or name".to_string()).into());
-            }
+        let Some(node_id) = self.target_node_id(&params).await? else {
+            return Ok(no_match("query_graph", &params));
         };
-
         let result = self
             .graph_query
             .query_graph(pattern, &node_id, limit)
@@ -512,6 +508,40 @@ impl GraphToolExecutor {
         Ok(json!({
             "tool": "query_graph",
             "parameters": { "pattern": pattern.name(), "node_id": node_id, "limit": limit },
+            "result": result
+        }))
+    }
+
+    /// Execute traverse_graph - breadth-first walk over dependency edges
+    async fn execute_traverse_graph(&self, params: JsonValue) -> Result<JsonValue> {
+        let direction_name = params["direction"].as_str().unwrap_or("out");
+        let direction = TraverseDirection::parse(direction_name).ok_or_else(|| {
+            McpError::Protocol(format!(
+                "Unknown direction '{direction_name}'; expected out, in or both"
+            ))
+        })?;
+        let edge_type = params["edge_type"].as_str();
+        let max_depth = params["max_depth"].as_i64().unwrap_or(3) as i32;
+        let max_nodes = params["max_nodes"].as_i64().unwrap_or(100).clamp(1, 500) as usize;
+
+        let Some(node_id) = self.target_node_id(&params).await? else {
+            return Ok(no_match("traverse_graph", &params));
+        };
+        let result = self
+            .graph_query
+            .traverse_graph(&node_id, direction, edge_type, max_depth, max_nodes)
+            .await
+            .map_err(|e| McpError::Protocol(format!("traverse_graph failed: {}", e)))?;
+
+        Ok(json!({
+            "tool": "traverse_graph",
+            "parameters": {
+                "node_id": node_id,
+                "direction": direction_name,
+                "edge_type": edge_type,
+                "max_depth": max_depth,
+                "max_nodes": max_nodes
+            },
             "result": result
         }))
     }
@@ -822,15 +852,16 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 12);
+        assert_eq!(schemas.len(), 13);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 13);
         assert!(names.contains(&"find_large_functions".to_string()));
         assert!(names.contains(&"query_graph".to_string()));
+        assert!(names.contains(&"traverse_graph".to_string()));
         assert!(names.contains(&"search_nodes".to_string()));
         assert!(names.contains(&"list_graph_stats".to_string()));
         assert!(names.contains(&"get_transitive_dependencies".to_string()));
@@ -1030,4 +1061,14 @@ mod tests {
 
         writer.into_string()
     }
+}
+
+/// Result for a call whose `name` matched no node.
+fn no_match(tool: &str, params: &JsonValue) -> JsonValue {
+    json!({
+        "tool": tool,
+        "parameters": { "name": params["name"] },
+        "result": null,
+        "message": "no node matches the given name"
+    })
 }
