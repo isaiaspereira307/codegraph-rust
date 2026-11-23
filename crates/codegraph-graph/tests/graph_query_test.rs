@@ -534,3 +534,77 @@ async fn find_large_functions_applies_line_threshold_longest_first() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].name, "huge");
 }
+
+#[tokio::test]
+async fn query_graph_follows_call_edges_and_counts_unresolved_targets() {
+    use codegraph_graph::graph_query::QueryPattern;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = fixture(dir.path()).await;
+    // c1 calls an unresolved `print`: text target, not a node.
+    let mut print = CodeEdge::unresolved(uuid::Uuid::from_u128(11), "print", EdgeType::Calls);
+    print.set_deterministic_id("print");
+    store.upsert_edges_batch(&[print]).await.unwrap();
+    store.finalize("full").await.unwrap();
+    let q = GraphQuery::new(store.clone());
+
+    // h has six callers d1..d6, all resolved.
+    let callers = q
+        .query_graph(QueryPattern::CallersOf, &id(20), 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(callers.pattern, "callers_of");
+    assert_eq!(callers.target.name, "h");
+    assert_eq!(callers.total, 6);
+    assert_eq!(callers.results.len(), 6);
+    assert_eq!(callers.unresolved, 0);
+
+    // The limit truncates results but not the total.
+    let limited = q
+        .query_graph(QueryPattern::CallersOf, &id(20), 2)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((limited.results.len(), limited.total), (2, 6));
+
+    // d1 calls big and h, sorted by name.
+    let callees = q
+        .query_graph(QueryPattern::CalleesOf, &id(21), 0)
+        .await
+        .unwrap()
+        .unwrap();
+    let names: Vec<_> = callees.results.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, vec!["big", "h"]);
+
+    // c1's text target is ignored and counted.
+    let c1 = q
+        .query_graph(QueryPattern::CalleesOf, &id(11), 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(c1.total, 1);
+    assert_eq!(c1.results[0].name, "c2");
+    assert_eq!(c1.unresolved, 1);
+
+    // No import or test edges in this fixture: empty, not an error.
+    let tests = q
+        .query_graph(QueryPattern::TestsFor, &id(20), 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(tests.results.is_empty());
+
+    // Unknown node and unknown pattern name.
+    assert!(
+        q.query_graph(QueryPattern::CallersOf, &id(999), 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        QueryPattern::parse("callers_of"),
+        Some(QueryPattern::CallersOf)
+    );
+    assert_eq!(QueryPattern::parse("callers"), None);
+}

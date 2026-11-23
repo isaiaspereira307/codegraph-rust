@@ -11,6 +11,8 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) struct NodeData {
     pub id: String,
+    /// Stored qualified name; text edge targets are matched against it.
+    pub qualified: String,
     pub name: String,
     pub kind: Option<String>,
     pub file_path: String,
@@ -44,6 +46,7 @@ impl Snapshot {
             let attributes: Option<String> = row.get(9)?;
             let ix = graph.add_node(NodeData {
                 id: uuid.clone().unwrap_or_else(|| qualified.clone()),
+                qualified: qualified.clone(),
                 name: row.get(1)?,
                 kind: row.get(2)?,
                 file_path: row.get(3)?,

@@ -2,9 +2,12 @@
 // ABOUTME: Semantics follow the former SurrealQL fn::* functions (depth limits, defaults).
 
 mod large;
+mod query;
 mod search;
 mod snapshot;
 mod stats;
+
+pub use query::{QueryGraphResult, QueryPattern};
 pub mod types;
 
 use crate::sqlite_store::SqliteGraphStore;

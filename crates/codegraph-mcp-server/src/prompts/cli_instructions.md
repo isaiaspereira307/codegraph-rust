@@ -16,6 +16,7 @@ that ID to the other tools:
 | Resolve a symbol to node IDs | `find_nodes_by_name` | `name`, `limit` |
 | Find code by words (stems, camelCase) | `search_nodes` | `query`, `limit` |
 | Find long functions (refactoring candidates) | `find_large_functions` | `min_lines`, `limit` |
+| Callers, callees, imports, importers, tests of a node | `query_graph` | `pattern`, `node_id` or `name`, `limit` |
 | What does X depend on? | `get_transitive_dependencies` | `node_id`, `edge_type`, `depth` |
 | What breaks if X changes? | `get_reverse_dependencies` | `node_id`, `edge_type`, `depth` |
 | Follow calls from a function | `trace_call_chain` | `from_node`, `max_depth` |

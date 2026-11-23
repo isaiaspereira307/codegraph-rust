@@ -30,7 +30,47 @@ impl GraphToolSchemas {
             Self::search_nodes(),
             Self::list_graph_stats(),
             Self::find_large_functions(),
+            Self::query_graph(),
         ]
+    }
+
+    /// Schema for query_graph (callers, callees, imports, importers and tests of one node)
+    pub fn query_graph() -> ToolSchema {
+        ToolSchema {
+            name: "query_graph".to_string(),
+            description: "Direct relationships of one node. Patterns: callers_of (CALLS into the \
+                   node), callees_of (CALLS out of it), imports_of (files it imports), \
+                   importers_of (files importing it), tests_for (tests that cover it). Give \
+                   node_id, or name to pick the best match. Returns the target, matches sorted \
+                   by name, the total, and how many text targets were ignored as unresolved."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "enum": ["callers_of", "callees_of", "imports_of", "importers_of", "tests_for"],
+                        "description": "Relationship to follow"
+                    },
+                    "node_id": {
+                        "type": "string",
+                        "description": "Node ID returned by find_nodes_by_name or search_nodes"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Symbol name, used when node_id is not given; exact matches win"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (1-100, defaults to 20)",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 20
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        }
     }
 
     /// Schema for find_large_functions (functions by line span, longest first)
@@ -342,7 +382,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 11, "Should have exactly 11 tool schemas");
+        assert_eq!(schemas.len(), 12, "Should have exactly 12 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -370,8 +410,9 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 12);
         assert!(names.contains(&"find_large_functions".to_string()));
+        assert!(names.contains(&"query_graph".to_string()));
         assert!(names.contains(&"search_nodes".to_string()));
         assert!(names.contains(&"list_graph_stats".to_string()));
         assert!(names.contains(&"find_nodes_by_name".to_string()));

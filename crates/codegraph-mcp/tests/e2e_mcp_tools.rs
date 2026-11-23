@@ -144,6 +144,7 @@ async fn test_tool_discovery() -> Result<()> {
         "get_reverse_dependencies",
         "get_transitive_dependencies",
         "list_graph_stats",
+        "query_graph",
         "search_nodes",
         "trace_call_chain",
     ];

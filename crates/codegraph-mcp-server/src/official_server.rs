@@ -55,6 +55,21 @@ pub struct SearchNodesRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct QueryGraphRequest {
+    /// callers_of, callees_of, imports_of, importers_of or tests_for
+    pub pattern: String,
+    /// Node ID from find_nodes_by_name or search_nodes; takes precedence over name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// Symbol name, used when node_id is not given
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Maximum number of results (1-100, default 20)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct FindLargeFunctionsRequest {
     /// Minimum number of lines in the function (default 50)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,6 +191,16 @@ impl CodeGraphMCPServer {
         params: Parameters<FindLargeFunctionsRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("find_large_functions", &params.0).await
+    }
+
+    #[tool(
+        description = "Direct relationships of one node: callers_of, callees_of, imports_of, importers_of or tests_for. Give node_id, or name for the best match. Returns the target, matches and the count of unresolved text targets."
+    )]
+    async fn query_graph(
+        &self,
+        params: Parameters<QueryGraphRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("query_graph", &params.0).await
     }
 
     #[tool(
