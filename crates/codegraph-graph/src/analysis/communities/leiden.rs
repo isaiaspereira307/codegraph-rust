@@ -36,6 +36,11 @@ impl WeightedGraph {
         self.adj[b].push((a, w));
     }
 
+    /// Weight of the edge between `a` and `b`, if any.
+    pub fn weight(&self, a: usize, b: usize) -> Option<f64> {
+        self.adj[a].iter().find(|&&(j, _)| j == b).map(|&(_, w)| w)
+    }
+
     pub fn neighbors(&self, i: usize) -> &[(usize, f64)] {
         &self.adj[i]
     }
