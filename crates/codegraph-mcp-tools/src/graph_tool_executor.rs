@@ -10,7 +10,17 @@ const UNCACHED_TOOLS: &[&str] = &[
     "detect_changes",
     "get_review_context",
     "get_minimal_context",
+    "get_affected_flows",
 ];
+
+/// `, showing N of M` when a list was cut.
+fn shown_of(shown: usize, total: usize) -> String {
+    if shown < total {
+        format!(", showing {shown} of {total}")
+    } else {
+        String::new()
+    }
+}
 
 fn is_uncached(tool_name: &str) -> bool {
     UNCACHED_TOOLS.contains(&tool_name)
@@ -363,6 +373,9 @@ impl GraphToolExecutor {
                 "detect_changes" => self.execute_detect_changes(parameters.clone()).await?,
                 "get_review_context" => self.execute_review(parameters.clone(), false).await?,
                 "get_minimal_context" => self.execute_review(parameters.clone(), true).await?,
+                "list_flows" => self.execute_list_flows(parameters.clone()).await?,
+                "get_flow" => self.execute_get_flow(parameters.clone()).await?,
+                "get_affected_flows" => self.execute_get_affected_flows(parameters.clone()).await?,
                 "get_transitive_dependencies" => {
                     self.execute_get_transitive_dependencies(parameters.clone())
                         .await?
@@ -565,6 +578,177 @@ impl GraphToolExecutor {
             },
             "result": result
         }))
+    }
+
+    /// Execute list_flows - stored execution flows by criticality
+    async fn execute_list_flows(&self, params: JsonValue) -> Result<JsonValue> {
+        let sort_by = params["sort_by"]
+            .as_str()
+            .unwrap_or("criticality")
+            .to_string();
+        let limit = params["limit"].as_i64().unwrap_or(50).clamp(1, 200) as usize;
+        let kind = params["kind"]
+            .as_str()
+            .filter(|k| !k.is_empty())
+            .map(str::to_string);
+        let minimal = params["detail_level"].as_str() == Some("minimal");
+        let (flows, total) = self
+            .graph_query
+            .list_flows(&sort_by, limit, kind.as_deref())
+            .await
+            .map_err(|e| McpError::Protocol(format!("list_flows failed: {e:#}")))?;
+        let shown = flows.len();
+        let rows: Vec<JsonValue> = flows
+            .iter()
+            .map(|f| {
+                if minimal {
+                    json!({"name": f.name, "criticality": f.criticality, "node_count": f.node_count})
+                } else {
+                    serde_json::to_value(f).unwrap_or(JsonValue::Null)
+                }
+            })
+            .collect();
+        Ok(json!({
+            "tool": "list_flows",
+            "parameters": { "sort_by": sort_by, "limit": limit, "kind": kind,
+                            "detail_level": if minimal { "minimal" } else { "standard" } },
+            "result": {
+                "summary": format!("Found {total} execution flow(s){}", shown_of(shown, total)),
+                "flows": rows,
+                "total": total,
+                "truncated": shown < total,
+            }
+        }))
+    }
+
+    /// Execute get_flow - one flow with steps and optional numbered source
+    async fn execute_get_flow(&self, params: JsonValue) -> Result<JsonValue> {
+        let flow_id = params["flow_id"].as_i64();
+        let flow_name = params["flow_name"].as_str().map(str::to_string);
+        let include_source = params["include_source"].as_bool().unwrap_or(false);
+        let max_steps = params["max_steps"].as_i64().unwrap_or(50).clamp(1, 200) as usize;
+        let max_source_lines = params["max_source_lines"]
+            .as_i64()
+            .unwrap_or(400)
+            .clamp(1, 2000) as usize;
+        let parameters = json!({ "flow_id": flow_id, "flow_name": flow_name,
+            "include_source": include_source, "max_steps": max_steps,
+            "max_source_lines": max_source_lines });
+        let detail = self
+            .graph_query
+            .get_flow(flow_id, flow_name.as_deref(), max_steps)
+            .await
+            .map_err(|e| McpError::Protocol(format!("get_flow failed: {e:#}")))?;
+        let Some(detail) = detail else {
+            return Ok(
+                json!({ "tool": "get_flow", "parameters": parameters, "result": {
+                "status": "not_found",
+                "summary": "No flow found matching the given criteria." } }),
+            );
+        };
+        let summary = format!(
+            "Flow '{}': {} nodes, depth {}, criticality {:.4}{}",
+            detail.flow.name,
+            detail.flow.node_count,
+            detail.flow.depth,
+            detail.flow.criticality,
+            shown_of(detail.steps.len(), detail.total_steps)
+        );
+        let mut truncated = detail.truncated;
+        let mut source_truncated = false;
+        let mut flow = serde_json::to_value(&detail)?;
+        if include_source {
+            let root = PathBuf::from(self.graph_query.project_id());
+            let mut budget = max_source_lines;
+            for (i, step) in detail.steps.iter().enumerate() {
+                if budget == 0 {
+                    truncated = true;
+                    source_truncated = true;
+                    break;
+                }
+                flow["steps"][i]["source"] = json!(crate::flows::numbered_source(
+                    &root,
+                    &step.file,
+                    step.line_start,
+                    step.line_end,
+                    &mut budget
+                ));
+            }
+        }
+        flow["total_steps"] = json!(detail.total_steps);
+        flow["truncated"] = json!(truncated);
+        if source_truncated {
+            flow["source_truncated"] = json!(true);
+        }
+        Ok(
+            json!({ "tool": "get_flow", "parameters": parameters, "result": {
+            "status": "ok", "summary": summary, "flow": flow } }),
+        )
+    }
+
+    /// Execute get_affected_flows - flows through the changed files
+    async fn execute_get_affected_flows(&self, params: JsonValue) -> Result<JsonValue> {
+        let base_ref = params["base_ref"].as_str().unwrap_or("HEAD~1").to_string();
+        let minimal = params["detail_level"].as_str() == Some("minimal");
+        let max_flows = params["max_flows"].as_i64().unwrap_or(50).max(0) as usize;
+        let given: Option<Vec<String>> = params["changed_files"].as_array().map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        });
+        let files = match given {
+            Some(files) => files,
+            None => {
+                let root = PathBuf::from(self.graph_query.project_id());
+                let base = base_ref.clone();
+                tokio::task::spawn_blocking(move || changed_files(&root, &base))
+                    .await
+                    .map_err(|e| McpError::Protocol(format!("git task failed: {e}")))?
+                    .map_err(|e| McpError::Protocol(format!("get_affected_flows failed: {e}")))?
+                    .into_iter()
+                    .map(|f| f.path)
+                    .collect()
+            }
+        };
+        let parameters = json!({ "changed_files": files, "base_ref": base_ref,
+            "detail_level": if minimal { "minimal" } else { "standard" }, "max_flows": max_flows });
+        if files.is_empty() {
+            return Ok(
+                json!({ "tool": "get_affected_flows", "parameters": parameters, "result": {
+                "status": "ok", "summary": "No changed files detected.",
+                "affected_flows": [], "total": 0, "truncated": false } }),
+            );
+        }
+        let mut flows = self
+            .graph_query
+            .affected_flows(&files)
+            .await
+            .map_err(|e| McpError::Protocol(format!("get_affected_flows failed: {e:#}")))?;
+        let total = flows.len();
+        let ceiling = if minimal { 500 } else { 25 };
+        let limit = if max_flows == 0 {
+            ceiling
+        } else {
+            max_flows.min(ceiling)
+        };
+        let mut truncated = total > limit;
+        flows.truncate(limit);
+        let shown = flows.len();
+        let rows: Vec<JsonValue> = if minimal {
+            flows.iter().map(crate::flows::affected_minimal).collect()
+        } else {
+            let (rows, cut) = crate::flows::bound_flow_steps(flows);
+            truncated |= cut;
+            rows
+        };
+        Ok(
+            json!({ "tool": "get_affected_flows", "parameters": parameters, "result": {
+            "status": "ok",
+            "summary": format!("{total} flow(s) affected by changes in {} file(s){}",
+                files.len(), shown_of(shown, total)),
+            "changed_files": files, "affected_flows": rows, "total": total,
+            "truncated": truncated } }),
+        )
     }
 
     /// Execute detect_changes - nodes touched by `git diff -U0 <base_ref>` in the project
@@ -981,13 +1165,13 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 17);
+        assert_eq!(schemas.len(), 20);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 20);
         assert!(names.contains(&"get_review_context".to_string()));
         assert!(names.contains(&"detect_changes".to_string()));
         assert!(names.contains(&"get_impact_radius".to_string()));

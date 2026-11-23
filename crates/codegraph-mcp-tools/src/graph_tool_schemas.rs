@@ -71,7 +71,110 @@ impl GraphToolSchemas {
             Self::detect_changes(),
             Self::get_review_context(),
             Self::get_minimal_context(),
+            Self::list_flows(),
+            Self::get_flow(),
+            Self::get_affected_flows(),
         ]
+    }
+
+    /// Schema for list_flows (stored execution flows by criticality)
+    pub fn list_flows() -> ToolSchema {
+        ToolSchema {
+            name: "list_flows".to_string(),
+            description: "List execution flows (call chains from an entry point such as a route \
+                   handler, CLI command or main), most critical first. Criticality blends file \
+                   spread, unresolved calls, security-sensitive names, test gaps and depth."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "sort_by": {
+                        "type": "string",
+                        "description": "criticality (default), depth, node_count, file_count or name",
+                        "default": "criticality"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum flows (1-200, defaults to 50)",
+                        "minimum": 1, "maximum": 200, "default": 50
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "Only flows whose entry node has this kind (Function, Test)"
+                    },
+                    "detail_level": {
+                        "type": "string",
+                        "description": "standard (default) or minimal (name, criticality, node_count)",
+                        "enum": ["standard", "minimal"], "default": "standard"
+                    }
+                },
+                "required": []
+            }),
+        }
+    }
+
+    /// Schema for get_flow (one flow with its steps and optional source)
+    pub fn get_flow() -> ToolSchema {
+        ToolSchema {
+            name: "get_flow".to_string(),
+            description: "One execution flow with every step (function, file, lines). Pass \
+                   flow_id from list_flows, or flow_name for a case-insensitive partial match. \
+                   include_source adds numbered source for each step within a line budget."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "flow_id": { "type": "integer", "description": "Flow id from list_flows" },
+                    "flow_name": { "type": "string", "description": "Partial name; ignored when flow_id is given" },
+                    "include_source": { "type": "boolean", "default": false },
+                    "max_steps": {
+                        "type": "integer", "description": "Steps to return (1-200, defaults to 50)",
+                        "minimum": 1, "maximum": 200, "default": 50
+                    },
+                    "max_source_lines": {
+                        "type": "integer",
+                        "description": "Total source lines across steps (1-2000, defaults to 400)",
+                        "minimum": 1, "maximum": 2000, "default": 400
+                    }
+                },
+                "required": []
+            }),
+        }
+    }
+
+    /// Schema for get_affected_flows (flows through changed files)
+    pub fn get_affected_flows() -> ToolSchema {
+        ToolSchema {
+            name: "get_affected_flows".to_string(),
+            description: "Execution flows that pass through the changed files, most critical \
+                   first. Without changed_files it uses `git diff` against base_ref. Use it in \
+                   review to see which entry points a change reaches."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "changed_files": {
+                        "type": "array", "items": { "type": "string" },
+                        "description": "Repo-relative paths; detected from git when omitted"
+                    },
+                    "base_ref": {
+                        "type": "string",
+                        "description": "Commit, branch or tag to diff against (defaults to HEAD~1)",
+                        "default": "HEAD~1"
+                    },
+                    "detail_level": {
+                        "type": "string",
+                        "description": "standard (steps, shared 400-step budget, max 25 flows) or minimal (max 500 flows)",
+                        "enum": ["standard", "minimal"], "default": "standard"
+                    },
+                    "max_flows": {
+                        "type": "integer", "description": "Flows to return (defaults to 50, then capped by detail level)",
+                        "minimum": 0, "default": 50
+                    }
+                },
+                "required": []
+            }),
+        }
     }
 
     /// Schema for get_review_context (changed nodes by risk, impact radius, snippets)
@@ -558,7 +661,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 17, "Should have exactly 17 tool schemas");
+        assert_eq!(schemas.len(), 20, "Should have exactly 20 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -586,7 +689,10 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 20);
+        for flow_tool in ["list_flows", "get_flow", "get_affected_flows"] {
+            assert!(names.contains(&flow_tool.to_string()), "{flow_tool}");
+        }
         assert!(names.contains(&"get_review_context".to_string()));
         assert!(names.contains(&"get_minimal_context".to_string()));
         assert!(names.contains(&"detect_changes".to_string()));

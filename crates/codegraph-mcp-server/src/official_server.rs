@@ -86,6 +86,57 @@ pub struct ReviewRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListFlowsRequest {
+    /// criticality (default), depth, node_count, file_count or name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<String>,
+    /// Maximum flows (1-200, default 50)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Only flows whose entry node has this kind (Function, Test)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// standard (default) or minimal
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_level: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetFlowRequest {
+    /// Flow id from list_flows
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<i64>,
+    /// Partial, case-insensitive name; ignored when flow_id is given
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_name: Option<String>,
+    /// Add numbered source to each step (default false)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_source: Option<bool>,
+    /// Steps to return (1-200, default 50)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u32>,
+    /// Total source lines across steps (1-2000, default 400)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_source_lines: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AffectedFlowsRequest {
+    /// Repo-relative changed paths; detected from git when omitted
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_files: Option<Vec<String>>,
+    /// Commit, branch or tag to diff against (default HEAD~1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    /// standard (default) or minimal
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_level: Option<String>,
+    /// Flows to return (default 50, capped by detail level)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_flows: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DetectChangesRequest {
     /// Commit, branch or tag to diff against (default HEAD)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -334,6 +385,36 @@ impl CodeGraphMCPServer {
         params: Parameters<ReviewRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("get_minimal_context", &params.0).await
+    }
+
+    #[tool(
+        description = "List execution flows (call chains from entry points such as route handlers, CLI commands and main), most critical first."
+    )]
+    async fn list_flows(
+        &self,
+        params: Parameters<ListFlowsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("list_flows", &params.0).await
+    }
+
+    #[tool(
+        description = "One execution flow with its steps (function, file, lines); optionally numbered source. Pass flow_id or a partial flow_name."
+    )]
+    async fn get_flow(
+        &self,
+        params: Parameters<GetFlowRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_flow", &params.0).await
+    }
+
+    #[tool(
+        description = "Execution flows that pass through the changed files (from git diff when changed_files is omitted), most critical first."
+    )]
+    async fn get_affected_flows(
+        &self,
+        params: Parameters<AffectedFlowsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_affected_flows", &params.0).await
     }
 
     #[tool(

@@ -269,3 +269,103 @@ fn store_flows_writes_python_json_path() {
         .collect();
     assert_eq!(positions, vec![(ids[0], 0), (ids[1], 1)]);
 }
+
+// ---- GraphQuery flow reads ----
+
+use codegraph_graph::analysis::{PostprocessLevel, run_postprocess};
+use codegraph_graph::graph_query::GraphQuery;
+
+/// Two flows: `main` (3 nodes, two files) and `zeta_job` (2 nodes); both rooted in functions.
+fn flow_db() -> (tempfile::TempDir, GraphQuery) {
+    let (dir, store) = fixture_db(
+        &[
+            ("Function", "a.py::main", "main", "a.py", false),
+            ("Function", "a.py::helper", "helper", "a.py", false),
+            ("Function", "b.py::leaf", "leaf", "b.py", false),
+            ("Function", "c.py::zeta_job", "zeta_job", "c.py", false),
+            ("Function", "c.py::step", "step", "c.py", false),
+            ("Class", "d.py::Svc", "Svc", "d.py", false),
+        ],
+        &[
+            ("CALLS", "a.py::main", "a.py::helper"),
+            ("CALLS", "a.py::helper", "b.py::leaf"),
+            ("CALLS", "c.py::zeta_job", "c.py::step"),
+        ],
+    );
+    let mut conn = open_conn(dir.path());
+    run_postprocess(&mut conn, PostprocessLevel::Full).unwrap();
+    (dir, GraphQuery::new(store))
+}
+
+#[tokio::test]
+async fn list_flows_sorts_and_caps() {
+    let (_d, q) = flow_db();
+    let (flows, total) = q.list_flows("criticality", 50, None).await.unwrap();
+    assert_eq!((flows.len(), total), (2, 2));
+    assert!(flows[0].criticality >= flows[1].criticality);
+    let (by_name, _) = q.list_flows("name", 50, None).await.unwrap();
+    assert_eq!(by_name[0].name, "main");
+    let (by_nodes, _) = q.list_flows("node_count", 1, None).await.unwrap();
+    assert_eq!((by_nodes.len(), by_nodes[0].node_count), (1, 3));
+    let (fallback, _) = q.list_flows("bogus", 50, None).await.unwrap();
+    assert_eq!(fallback[0].id, flows[0].id);
+}
+
+#[tokio::test]
+async fn list_flows_filters_by_entry_kind() {
+    let (_d, q) = flow_db();
+    let (none, total) = q
+        .list_flows("criticality", 50, Some("Class"))
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+    assert_eq!(total, 0);
+    let (some, total) = q
+        .list_flows("criticality", 50, Some("Function"))
+        .await
+        .unwrap();
+    assert_eq!((some.len(), total), (2, 2));
+}
+
+#[tokio::test]
+async fn get_flow_by_name_substring_case_insensitive() {
+    let (_d, q) = flow_db();
+    let flow = q.get_flow(None, Some("ZETA"), 50).await.unwrap().unwrap();
+    assert_eq!(flow.flow.name, "zeta_job");
+    assert_eq!(flow.steps.len(), 2);
+    assert_eq!(flow.steps[0].name, "zeta_job");
+    assert_eq!((flow.total_steps, flow.truncated), (2, false));
+    let capped = q
+        .get_flow(Some(flow.flow.id), None, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((capped.steps.len(), capped.truncated), (1, true));
+}
+
+#[tokio::test]
+async fn get_flow_missing_is_none() {
+    let (_d, q) = flow_db();
+    assert!(q.get_flow(None, Some("nope"), 50).await.unwrap().is_none());
+    assert!(q.get_flow(Some(9999), None, 50).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn affected_flows_from_file() {
+    let (_d, q) = flow_db();
+    let hit = q.affected_flows(&["b.py".to_string()]).await.unwrap();
+    assert_eq!(hit.len(), 1);
+    assert_eq!(hit[0].flow.name, "main");
+    let both = q
+        .affected_flows(&["b.py".to_string(), "c.py".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(both.len(), 2);
+    assert!(
+        q.affected_flows(&["zzz.py".to_string()])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(q.affected_flows(&[]).await.unwrap().is_empty());
+}
