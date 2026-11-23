@@ -698,3 +698,35 @@ async fn skip_postprocess_leaves_flows_empty() -> Result<()> {
     assert_eq!(flow_counts(&indexer.graph_store())?, ["0|0"]);
     Ok(())
 }
+
+#[tokio::test]
+async fn community_ids_stable_across_finalize() -> Result<()> {
+    let module = |prefix: &str| {
+        format!(
+            "def {p}_one():\n    {p}_two()\n    {p}_three()\n\ndef {p}_two():\n    {p}_three()\n\n\
+             def {p}_three():\n    pass\n",
+            p = prefix
+        )
+    };
+    let (a, b) = (module("alpha"), module("beta"));
+    let Some((dir, indexer)) = index_files(
+        concat!(module_path!(), "::community_ids_stable_across_finalize"),
+        &[("alpha.py", a.as_str()), ("beta.py", b.as_str())],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let sql = "SELECT qualified_name, CAST(community_id AS TEXT) FROM nodes \
+               WHERE kind IN ('Function', 'Class', 'Test') ORDER BY qualified_name";
+    let first = rows(&indexer.graph_store(), sql)?;
+    assert!(!first.is_empty());
+    assert!(
+        first.iter().all(|row| !row.ends_with('|')),
+        "every function belongs to a community: {first:?}"
+    );
+    // Unchanged sources finalize again; the assignment must not move.
+    indexer.index_project(dir.path()).await?;
+    assert_eq!(rows(&indexer.graph_store(), sql)?, first);
+    Ok(())
+}

@@ -255,3 +255,167 @@ fn empty_graph_no_communities() {
     let g = graph(&[], &[]);
     assert!(detect_communities(&g, 2).is_empty());
 }
+
+// ---- storage and community reads ----
+
+use codegraph_graph::analysis::{PostprocessLevel, run_postprocess};
+use codegraph_graph::graph_query::GraphQuery;
+
+#[test]
+fn store_sets_community_id_and_detector() {
+    let a = funcs("a", 4, "a.py");
+    let b = funcs("b", 4, "b.py");
+    let mut nodes = rows(&a);
+    nodes.extend(rows(&b));
+    let mut pairs = dense("a", 4, "a.py");
+    pairs.extend(dense("b", 4, "b.py"));
+    pairs.push(("a.py::a3".into(), "b.py::b0".into()));
+    let (dir, _store) = fixture_db(&nodes, &calls(&pairs));
+    let mut conn = open_conn(dir.path());
+    let stats = run_postprocess(&mut conn, PostprocessLevel::Full).unwrap();
+    assert_eq!(stats.communities, 2);
+    let stored: i64 = conn
+        .query_row("SELECT count(*) FROM communities", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, 2);
+    let assigned: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM nodes WHERE community_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(assigned, 8);
+    let detector: String = conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'community_detector'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(detector, "leiden");
+    // A second run replaces, never appends, and keeps node assignments.
+    let before: Vec<(String, Option<i64>)> = conn
+        .prepare("SELECT qualified_name, community_id FROM nodes ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    run_postprocess(&mut conn, PostprocessLevel::Full).unwrap();
+    let after: Vec<(String, Option<i64>)> = conn
+        .prepare("SELECT qualified_name, community_id FROM nodes ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let comm_count: i64 = conn
+        .query_row("SELECT count(*) FROM communities", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(comm_count, 2);
+    // An unchanged graph keeps the very same community id for every node.
+    assert_eq!(before, after);
+}
+
+/// Three hand-written communities: billing (12), orders (12), test-billing (2).
+fn community_db() -> (tempfile::TempDir, GraphQuery) {
+    let mut spec = funcs("b", 12, "billing/b.py");
+    spec.extend(funcs("o", 12, "orders/o.py"));
+    spec.extend(funcs("t", 2, "tests/t.py"));
+    let mut edges: Vec<(String, String)> = Vec::new();
+    for i in 0..11 {
+        edges.push((format!("billing/b.py::b{i}"), format!("orders/o.py::o{i}")));
+    }
+    for i in 0..12 {
+        edges.push((
+            format!("tests/t.py::t{}", i % 2),
+            format!("billing/b.py::b{i}"),
+        ));
+    }
+    let (dir, store) = fixture_db(&rows(&spec), &calls(&edges));
+    let conn = open_conn(dir.path());
+    for (id, name, size, cohesion, prefix) in [
+        (1, "billing", 12, 0.9, "billing/"),
+        (2, "orders", 12, 0.5, "orders/"),
+        (3, "test-billing", 2, 0.1, "tests/"),
+    ] {
+        conn.execute(
+            "INSERT INTO communities (id, name, level, cohesion, size, dominant_language, description) \
+             VALUES (?1, ?2, 0, ?3, ?4, 'python', 'd')",
+            rusqlite::params![id, name, cohesion, size],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE nodes SET community_id = ?1 WHERE file_path LIKE ?2",
+            rusqlite::params![id, format!("{prefix}%")],
+        )
+        .unwrap();
+    }
+    (dir, GraphQuery::new(store))
+}
+
+#[tokio::test]
+async fn list_communities_sorting_and_filtering() {
+    let (_d, q) = community_db();
+    let by_size = q.list_communities("size", 0).await.unwrap();
+    assert_eq!(
+        by_size.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["billing", "orders", "test-billing"]
+    );
+    assert_eq!(by_size[0].members.len(), 12);
+    assert_eq!(by_size[0].members[0], "billing/b.py::b0");
+    let by_cohesion = q.list_communities("cohesion", 0).await.unwrap();
+    assert_eq!(by_cohesion[1].name, "orders");
+    let by_name = q.list_communities("name", 0).await.unwrap();
+    assert_eq!(by_name[0].name, "billing");
+    assert_eq!(by_name[2].name, "test-billing");
+    let big = q.list_communities("bogus", 5).await.unwrap();
+    assert_eq!(big.len(), 2);
+}
+
+#[tokio::test]
+async fn get_community_by_name_substring() {
+    let (_d, q) = community_db();
+    let c = q.get_community(None, Some("BILL")).await.unwrap().unwrap();
+    assert_eq!(c.name, "billing");
+    let by_id = q
+        .get_community(Some(2), Some("ignored"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_id.name, "orders");
+    assert!(q.get_community(None, Some("zzz")).await.unwrap().is_none());
+    let members = q.community_members(2).await.unwrap();
+    assert_eq!(members.len(), 12);
+    assert_eq!(members[0].name, "o0");
+}
+
+#[tokio::test]
+async fn overview_warns_on_high_coupling_skips_test_communities() {
+    let (_d, q) = community_db();
+    let overview = q.architecture_overview().await.unwrap();
+    assert_eq!(overview.communities.len(), 3);
+    // 11 billing->orders edges and 12 tests->billing edges; tests are skipped in warnings.
+    assert_eq!(overview.cross_community_edges.len(), 23);
+    assert_eq!(
+        overview.warnings,
+        ["High coupling (11 edges) between 'billing' and 'orders'"]
+    );
+}
+
+#[tokio::test]
+async fn overview_ignores_tested_by_edges() {
+    let (dir, q) = community_db();
+    let conn = open_conn(dir.path());
+    for i in 0..12 {
+        conn.execute(
+            "INSERT INTO edges (kind, source_qualified, target_qualified, file_path, line, updated_at) \
+             VALUES ('TESTED_BY', ?1, ?2, '', 1, 0)",
+            rusqlite::params![format!("billing/b.py::b{i}"), format!("orders/o.py::o{i}")],
+        )
+        .unwrap();
+    }
+    let overview = q.architecture_overview().await.unwrap();
+    assert_eq!(overview.cross_community_edges.len(), 23);
+}

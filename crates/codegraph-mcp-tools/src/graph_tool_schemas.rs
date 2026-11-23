@@ -74,6 +74,9 @@ impl GraphToolSchemas {
             Self::list_flows(),
             Self::get_flow(),
             Self::get_affected_flows(),
+            Self::list_communities(),
+            Self::get_community(),
+            Self::get_architecture_overview(),
         ]
     }
 
@@ -171,6 +174,72 @@ impl GraphToolSchemas {
                         "type": "integer", "description": "Flows to return (defaults to 50, then capped by detail level)",
                         "minimum": 0, "default": 50
                     }
+                },
+                "required": []
+            }),
+        }
+    }
+
+    /// Schema for list_communities (stored code clusters)
+    pub fn list_communities() -> ToolSchema {
+        ToolSchema {
+            name: "list_communities".to_string(),
+            description: "List communities: clusters of closely related functions and classes \
+                   (Leiden over calls, imports and inheritance, or directory grouping), with \
+                   size, cohesion and a sample of members."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "sort_by": { "type": "string", "description": "size (default), cohesion or name", "default": "size" },
+                    "min_size": { "type": "integer", "minimum": 0, "default": 0, "description": "Smallest community to include" },
+                    "detail_level": { "type": "string", "enum": ["standard", "minimal"], "default": "standard",
+                        "description": "minimal returns name, size and cohesion only" },
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 },
+                    "max_members": { "type": "integer", "minimum": 1, "maximum": 25, "default": 10,
+                        "description": "Members listed per community; size keeps the true count" }
+                },
+                "required": []
+            }),
+        }
+    }
+
+    /// Schema for get_community (one community, optionally with member nodes)
+    pub fn get_community() -> ToolSchema {
+        ToolSchema {
+            name: "get_community".to_string(),
+            description: "One community by community_id, or by a partial community_name (largest \
+                   match first). include_members adds member node details."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "community_id": { "type": "integer" },
+                    "community_name": { "type": "string", "description": "Case-insensitive partial name; ignored when community_id is given" },
+                    "include_members": { "type": "boolean", "default": false },
+                    "max_members": { "type": "integer", "minimum": 1, "maximum": 25, "default": 25 }
+                },
+                "required": []
+            }),
+        }
+    }
+
+    /// Schema for get_architecture_overview (communities and coupling between them)
+    pub fn get_architecture_overview() -> ToolSchema {
+        ToolSchema {
+            name: "get_architecture_overview".to_string(),
+            description: "Architecture overview from the community structure: communities, the \
+                   edges that cross between them and warnings for heavily coupled pairs. \
+                   minimal (default) aggregates edges per community pair."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "detail_level": { "type": "string", "enum": ["minimal", "standard"], "default": "minimal" },
+                    "max_results": { "type": "integer", "minimum": 1, "maximum": 200, "default": 100,
+                        "description": "Cross-community rows and warnings to return" },
+                    "max_members": { "type": "integer", "minimum": 1, "maximum": 25, "default": 10,
+                        "description": "standard only: members listed per community" }
                 },
                 "required": []
             }),
@@ -661,7 +730,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 20, "Should have exactly 20 tool schemas");
+        assert_eq!(schemas.len(), 23, "Should have exactly 23 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -689,8 +758,15 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 20);
-        for flow_tool in ["list_flows", "get_flow", "get_affected_flows"] {
+        assert_eq!(names.len(), 23);
+        for flow_tool in [
+            "list_flows",
+            "get_flow",
+            "get_affected_flows",
+            "list_communities",
+            "get_community",
+            "get_architecture_overview",
+        ] {
             assert!(names.contains(&flow_tool.to_string()), "{flow_tool}");
         }
         assert!(names.contains(&"get_review_context".to_string()));

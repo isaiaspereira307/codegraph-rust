@@ -204,3 +204,235 @@ impl GraphQuery {
         .await
     }
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommunityRow {
+    pub id: i64,
+    pub name: String,
+    pub level: i64,
+    pub cohesion: f64,
+    pub size: i64,
+    pub dominant_language: String,
+    pub description: String,
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemberNode {
+    pub id: i64,
+    pub kind: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub file_path: String,
+    pub line_start: Option<i64>,
+    pub line_end: Option<i64>,
+    pub language: Option<String>,
+    pub is_test: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CrossCommunityEdge {
+    pub source_community: i64,
+    pub target_community: i64,
+    pub edge_kind: String,
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchitectureOverview {
+    pub communities: Vec<CommunityRow>,
+    pub cross_community_edges: Vec<CrossCommunityEdge>,
+    pub warnings: Vec<String>,
+}
+
+fn test_community_regex() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)(^test[-/]|[-/]test([:/]|$)|it:should|describe:|spec[-/]|[-/]spec$)",
+        )
+        .expect("valid regex")
+    });
+    &RE
+}
+
+fn read_communities(
+    conn: &Connection,
+    sort_by: &str,
+    min_size: usize,
+) -> Result<Vec<CommunityRow>> {
+    let (column, dir) = match sort_by {
+        "cohesion" => ("cohesion", "DESC"),
+        "name" => ("name", "ASC"),
+        _ => ("size", "DESC"),
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, name, level, cohesion, size, dominant_language, description FROM communities \
+         WHERE size >= ?1 ORDER BY {column} {dir}, id ASC"
+    ))?;
+    let mut rows = stmt
+        .query_map([min_size as i64], |r| {
+            Ok(CommunityRow {
+                id: r.get(0)?,
+                name: crate::analysis::sanitize_name(&r.get::<_, String>(1)?),
+                level: r.get(2)?,
+                cohesion: r.get(3)?,
+                size: r.get(4)?,
+                dominant_language: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                description: crate::analysis::sanitize_name(
+                    &r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                ),
+                members: Vec::new(),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut members =
+        conn.prepare("SELECT qualified_name FROM nodes WHERE community_id = ?1 ORDER BY id")?;
+    for row in &mut rows {
+        row.members = members
+            .query_map([row.id], |r| r.get::<_, String>(0))?
+            .map(|m| m.map(|qn| crate::analysis::sanitize_name(&qn)))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+    }
+    Ok(rows)
+}
+
+impl GraphQuery {
+    /// Stored communities; `sort_by` is size or cohesion (descending) or name (ascending), anything
+    /// else is size; ties by id. Each carries its member qualified names in node id order.
+    pub async fn list_communities(
+        &self,
+        sort_by: &str,
+        min_size: usize,
+    ) -> Result<Vec<CommunityRow>> {
+        let sort_by = sort_by.to_string();
+        self.store()
+            .with_conn(move |conn| read_communities(conn, &sort_by, min_size))
+            .await
+    }
+
+    /// `id` wins; otherwise the largest community whose name contains `name`, ignoring case.
+    pub async fn get_community(
+        &self,
+        id: Option<i64>,
+        name: Option<&str>,
+    ) -> Result<Option<CommunityRow>> {
+        let needle = name.map(str::to_lowercase);
+        self.store()
+            .with_conn(move |conn| {
+                let all = read_communities(conn, "size", 0)?;
+                Ok(match (id, needle) {
+                    (Some(id), _) => all.into_iter().find(|c| c.id == id),
+                    (None, Some(n)) => all.into_iter().find(|c| c.name.to_lowercase().contains(&n)),
+                    _ => None,
+                })
+            })
+            .await
+    }
+
+    /// Member nodes of a community, in node id order.
+    pub async fn community_members(&self, id: i64) -> Result<Vec<MemberNode>> {
+        self.store()
+            .with_conn(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, kind, name, qualified_name, file_path, line_start, line_end, language, \
+                     is_test FROM nodes WHERE community_id = ?1 ORDER BY id",
+                )?;
+                let rows = stmt
+                    .query_map([id], |r| {
+                        Ok(MemberNode {
+                            id: r.get(0)?,
+                            kind: r.get(1)?,
+                            name: r.get(2)?,
+                            qualified_name: r.get(3)?,
+                            file_path: r.get(4)?,
+                            line_start: r.get(5)?,
+                            line_end: r.get(6)?,
+                            language: r.get(7)?,
+                            is_test: r.get::<_, Option<i64>>(8)?.unwrap_or(0) != 0,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+
+    /// Communities, the edges (other than TESTED_BY) that cross between them, and a warning for
+    /// every pair with more than 10 such edges unless a side looks test-dominated by name.
+    pub async fn architecture_overview(&self) -> Result<ArchitectureOverview> {
+        self.store()
+            .with_conn(move |conn| {
+                let communities = read_communities(conn, "size", 0)?;
+                let mut owner: std::collections::HashMap<&str, i64> =
+                    std::collections::HashMap::new();
+                for c in &communities {
+                    for qn in &c.members {
+                        owner.insert(qn.as_str(), c.id);
+                    }
+                }
+                let mut stmt = conn.prepare(
+                    "SELECT kind, source_qualified, target_qualified FROM edges \
+                     WHERE kind != 'TESTED_BY' ORDER BY id",
+                )?;
+                let mut cross = Vec::new();
+                let mut counts: std::collections::BTreeMap<(i64, i64), usize> = Default::default();
+                for row in stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })? {
+                    let (kind, source, target) = row?;
+                    let (Some(&a), Some(&b)) =
+                        (owner.get(source.as_str()), owner.get(target.as_str()))
+                    else {
+                        continue;
+                    };
+                    if a == b {
+                        continue;
+                    }
+                    *counts.entry((a.min(b), a.max(b))).or_default() += 1;
+                    cross.push(CrossCommunityEdge {
+                        source_community: a,
+                        target_community: b,
+                        edge_kind: kind,
+                        source: crate::analysis::sanitize_name(&source),
+                        target: crate::analysis::sanitize_name(&target),
+                    });
+                }
+                let names: std::collections::HashMap<i64, &str> = communities
+                    .iter()
+                    .map(|c| (c.id, c.name.as_str()))
+                    .collect();
+                let mut ordered: Vec<_> = counts.into_iter().collect();
+                ordered.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                let mut warnings = Vec::new();
+                for ((c1, c2), count) in ordered {
+                    if count <= 10 {
+                        continue;
+                    }
+                    let n1 = names
+                        .get(&c1)
+                        .map_or_else(|| format!("community-{c1}"), |n| n.to_string());
+                    let n2 = names
+                        .get(&c2)
+                        .map_or_else(|| format!("community-{c2}"), |n| n.to_string());
+                    if test_community_regex().is_match(&n1) || test_community_regex().is_match(&n2)
+                    {
+                        continue;
+                    }
+                    warnings.push(format!(
+                        "High coupling ({count} edges) between '{n1}' and '{n2}'"
+                    ));
+                }
+                Ok(ArchitectureOverview {
+                    communities,
+                    cross_community_edges: cross,
+                    warnings,
+                })
+            })
+            .await
+    }
+}

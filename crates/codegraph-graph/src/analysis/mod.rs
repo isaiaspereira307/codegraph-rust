@@ -253,13 +253,19 @@ pub fn run_postprocess(conn: &mut Connection, level: PostprocessLevel) -> Result
     let started = std::time::Instant::now();
     let graph = AnalysisGraph::load(conn)?;
     let flows = flows::trace_flows(&graph, flows::FLOW_MAX_DEPTH);
+    let flows_s = started.elapsed().as_secs_f64();
+    let communities = communities::detect_communities(&graph, 2);
+    let communities_s = started.elapsed().as_secs_f64() - flows_s;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     stats.flows = flows::store_flows(&tx, &flows)?;
+    stats.communities = communities::store_communities(&tx, &communities)?;
     tx.commit()?;
     tracing::info!(
-        flows_s = started.elapsed().as_secs_f64(),
+        flows_s,
+        communities_s,
         flows = stats.flows,
-        "flows stored"
+        communities = stats.communities,
+        "analysis stored"
     );
     Ok(stats)
 }

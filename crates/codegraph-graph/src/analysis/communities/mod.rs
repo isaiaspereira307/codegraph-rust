@@ -5,7 +5,9 @@ pub mod leiden;
 pub mod naming;
 
 use super::{AnalysisEdge, AnalysisGraph, AnalysisNode, round_half_even};
+use anyhow::Result;
 use leiden::{WeightedGraph, leiden};
+use rusqlite::{Transaction, params, params_from_iter};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone)]
@@ -449,4 +451,53 @@ pub fn split_oversized(communities: Vec<Community>, g: &AnalysisGraph) -> Vec<Co
         }
     }
     out
+}
+
+const SQL_BATCH: usize = 450;
+
+/// Replaces the stored communities and every node's `community_id`, and records which
+/// detectors produced them in `metadata.community_detector` (communities.py `store_communities`).
+pub fn store_communities(tx: &Transaction, comms: &[Community]) -> Result<usize> {
+    tx.execute("DELETE FROM communities", [])?;
+    // Restart AUTOINCREMENT so an unchanged graph keeps the same community ids on every build.
+    tx.execute("DELETE FROM sqlite_sequence WHERE name = 'communities'", [])?;
+    tx.execute("UPDATE nodes SET community_id = NULL", [])?;
+    for comm in comms {
+        tx.execute(
+            "INSERT INTO communities (name, level, cohesion, size, dominant_language, description) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                comm.name,
+                comm.level,
+                comm.cohesion,
+                comm.size as i64,
+                comm.dominant_language,
+                comm.description
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        for batch in comm.members.chunks(SQL_BATCH) {
+            let marks = vec!["?"; batch.len()].join(",");
+            let sql =
+                format!("UPDATE nodes SET community_id = ? WHERE qualified_name IN ({marks})");
+            let args = std::iter::once(rusqlite::types::Value::Integer(id)).chain(
+                batch
+                    .iter()
+                    .map(|qn| rusqlite::types::Value::Text(qn.clone())),
+            );
+            tx.execute(&sql, params_from_iter(args))?;
+        }
+    }
+    if comms.is_empty() {
+        tx.execute("DELETE FROM metadata WHERE key = 'community_detector'", [])?;
+    } else {
+        let detectors: std::collections::BTreeSet<&str> =
+            comms.iter().map(|c| c.detector).collect();
+        tx.execute(
+            "INSERT INTO metadata (key, value) VALUES ('community_detector', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [detectors.into_iter().collect::<Vec<_>>().join("+")],
+        )?;
+    }
+    Ok(comms.len())
 }

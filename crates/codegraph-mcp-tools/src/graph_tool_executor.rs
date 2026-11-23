@@ -376,6 +376,12 @@ impl GraphToolExecutor {
                 "list_flows" => self.execute_list_flows(parameters.clone()).await?,
                 "get_flow" => self.execute_get_flow(parameters.clone()).await?,
                 "get_affected_flows" => self.execute_get_affected_flows(parameters.clone()).await?,
+                "list_communities" => self.execute_list_communities(parameters.clone()).await?,
+                "get_community" => self.execute_get_community(parameters.clone()).await?,
+                "get_architecture_overview" => {
+                    self.execute_get_architecture_overview(parameters.clone())
+                        .await?
+                }
                 "get_transitive_dependencies" => {
                     self.execute_get_transitive_dependencies(parameters.clone())
                         .await?
@@ -749,6 +755,145 @@ impl GraphToolExecutor {
             "changed_files": files, "affected_flows": rows, "total": total,
             "truncated": truncated } }),
         )
+    }
+
+    /// Execute list_communities - stored communities with capped member lists
+    async fn execute_list_communities(&self, params: JsonValue) -> Result<JsonValue> {
+        let sort_by = params["sort_by"].as_str().unwrap_or("size").to_string();
+        let min_size = params["min_size"].as_i64().unwrap_or(0).max(0) as usize;
+        let minimal = params["detail_level"].as_str() == Some("minimal");
+        let max_results = params["max_results"].as_i64().unwrap_or(50).clamp(1, 200) as usize;
+        let max_members = params["max_members"].as_i64().unwrap_or(10).clamp(1, 25) as usize;
+        let all = self
+            .graph_query
+            .list_communities(&sort_by, min_size)
+            .await
+            .map_err(|e| McpError::Protocol(format!("list_communities failed: {e:#}")))?;
+        let total = all.len();
+        let rows: Vec<JsonValue> = all
+            .iter()
+            .take(max_results)
+            .map(|c| {
+                if minimal {
+                    json!({"name": c.name, "size": c.size, "cohesion": c.cohesion})
+                } else {
+                    let mut v = serde_json::to_value(c).unwrap_or(JsonValue::Null);
+                    crate::communities::cap_members(&mut v, max_members);
+                    v
+                }
+            })
+            .collect();
+        let shown = rows.len();
+        Ok(json!({
+            "tool": "list_communities",
+            "parameters": { "sort_by": sort_by, "min_size": min_size,
+                "detail_level": if minimal { "minimal" } else { "standard" },
+                "max_results": max_results, "max_members": max_members },
+            "result": {
+                "summary": format!("Found {total} communities{}", shown_of(shown, total)),
+                "communities": rows, "total": total, "truncated": shown < total,
+            }
+        }))
+    }
+
+    /// Execute get_community - one community, optionally with member node details
+    async fn execute_get_community(&self, params: JsonValue) -> Result<JsonValue> {
+        let id = params["community_id"].as_i64();
+        let name = params["community_name"].as_str().map(str::to_string);
+        let include_members = params["include_members"].as_bool().unwrap_or(false);
+        let max_members = params["max_members"].as_i64().unwrap_or(25).clamp(1, 25) as usize;
+        let parameters = json!({ "community_id": id, "community_name": name,
+            "include_members": include_members, "max_members": max_members });
+        let found = self
+            .graph_query
+            .get_community(id, name.as_deref())
+            .await
+            .map_err(|e| McpError::Protocol(format!("get_community failed: {e:#}")))?;
+        let Some(community) = found else {
+            return Ok(
+                json!({ "tool": "get_community", "parameters": parameters, "result": {
+                "status": "not_found",
+                "summary": "No community found matching the given criteria." } }),
+            );
+        };
+        let summary = format!(
+            "Community '{}': {} nodes, cohesion {:.4}",
+            community.name, community.size, community.cohesion
+        );
+        let mut value = serde_json::to_value(&community)?;
+        if include_members {
+            let details = self
+                .graph_query
+                .community_members(community.id)
+                .await
+                .map_err(|e| McpError::Protocol(format!("get_community failed: {e:#}")))?;
+            value["member_details"] = serde_json::to_value(details)?;
+        }
+        crate::communities::cap_members(&mut value, max_members);
+        Ok(
+            json!({ "tool": "get_community", "parameters": parameters, "result": {
+            "status": "ok", "summary": summary, "community": value } }),
+        )
+    }
+
+    /// Execute get_architecture_overview - communities and the coupling between them
+    async fn execute_get_architecture_overview(&self, params: JsonValue) -> Result<JsonValue> {
+        let minimal = params["detail_level"].as_str().unwrap_or("minimal") != "standard";
+        let max_results = params["max_results"].as_i64().unwrap_or(100).clamp(1, 200) as usize;
+        let max_members = params["max_members"].as_i64().unwrap_or(10).clamp(1, 25) as usize;
+        let overview = self
+            .graph_query
+            .architecture_overview()
+            .await
+            .map_err(|e| McpError::Protocol(format!("get_architecture_overview failed: {e:#}")))?;
+        let mut value = if minimal {
+            crate::communities::minimal_overview(&overview)
+        } else {
+            let mut v = serde_json::to_value(&overview)?;
+            if let Some(list) = v["communities"].as_array_mut() {
+                for c in list {
+                    crate::communities::cap_members(c, max_members);
+                }
+            }
+            v
+        };
+        let mut truncated = false;
+        let mut cross_total = 0;
+        let mut warn_total = 0;
+        for (key, total) in [
+            ("cross_community_edges", &mut cross_total),
+            ("warnings", &mut warn_total),
+        ] {
+            if let Some(rows) = value[key].as_array_mut() {
+                *total = rows.len();
+                if rows.len() > max_results {
+                    rows.truncate(max_results);
+                    truncated = true;
+                }
+            }
+        }
+        let shown = value["cross_community_edges"]
+            .as_array()
+            .map_or(0, Vec::len);
+        let label = if minimal {
+            "community pairs"
+        } else {
+            "cross-community edges"
+        };
+        value["summary"] = json!(format!(
+            "Architecture: {} communities, {cross_total} {label}{}, {warn_total} warning(s)",
+            overview.communities.len(),
+            shown_of(shown, cross_total)
+        ));
+        value["status"] = json!("ok");
+        value["cross_community_edges_total"] = json!(cross_total);
+        value["truncated"] = json!(truncated);
+        Ok(json!({
+            "tool": "get_architecture_overview",
+            "parameters": { "detail_level": if minimal { "minimal" } else { "standard" },
+                "max_results": max_results, "max_members": max_members },
+            "result": value
+        }))
     }
 
     /// Execute detect_changes - nodes touched by `git diff -U0 <base_ref>` in the project
@@ -1165,13 +1310,13 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 20);
+        assert_eq!(schemas.len(), 23);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 23);
         assert!(names.contains(&"get_review_context".to_string()));
         assert!(names.contains(&"detect_changes".to_string()));
         assert!(names.contains(&"get_impact_radius".to_string()));

@@ -137,6 +137,54 @@ pub struct AffectedFlowsRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ListCommunitiesRequest {
+    /// size (default), cohesion or name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<String>,
+    /// Smallest community to include (default 0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_size: Option<u32>,
+    /// standard (default) or minimal
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_level: Option<String>,
+    /// Communities to return (1-200, default 50)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_results: Option<u32>,
+    /// Members listed per community (1-25, default 10)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_members: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct GetCommunityRequest {
+    /// Community id from list_communities
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community_id: Option<i64>,
+    /// Partial, case-insensitive name; ignored when community_id is given
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community_name: Option<String>,
+    /// Add member node details (default false)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_members: Option<bool>,
+    /// Members to list (1-25, default 25)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_members: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ArchitectureOverviewRequest {
+    /// minimal (default) or standard
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_level: Option<String>,
+    /// Cross-community rows and warnings (1-200, default 100)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_results: Option<u32>,
+    /// standard only: members per community (1-25, default 10)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_members: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DetectChangesRequest {
     /// Commit, branch or tag to diff against (default HEAD)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -415,6 +463,36 @@ impl CodeGraphMCPServer {
         params: Parameters<AffectedFlowsRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("get_affected_flows", &params.0).await
+    }
+
+    #[tool(
+        description = "List communities: clusters of closely related functions and classes with size, cohesion and a sample of members."
+    )]
+    async fn list_communities(
+        &self,
+        params: Parameters<ListCommunitiesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("list_communities", &params.0).await
+    }
+
+    #[tool(
+        description = "One community by community_id or partial community_name; include_members adds member node details."
+    )]
+    async fn get_community(
+        &self,
+        params: Parameters<GetCommunityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_community", &params.0).await
+    }
+
+    #[tool(
+        description = "Architecture overview from communities: the edges between them and warnings for heavily coupled pairs."
+    )]
+    async fn get_architecture_overview(
+        &self,
+        params: Parameters<ArchitectureOverviewRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_architecture_overview", &params.0).await
     }
 
     #[tool(

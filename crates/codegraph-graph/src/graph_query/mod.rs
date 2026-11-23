@@ -12,7 +12,10 @@ mod snapshot;
 mod stats;
 mod traverse;
 
-pub use analysis_queries::{FlowDetail, FlowRow, FlowStep};
+pub use analysis_queries::{
+    ArchitectureOverview, CommunityRow, CrossCommunityEdge, FlowDetail, FlowRow, FlowStep,
+    MemberNode,
+};
 pub use coverage::NodeCoverage;
 pub use impact::{ImpactRadius, ImpactedNode};
 pub use query::{QueryGraphResult, QueryPattern};
