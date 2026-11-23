@@ -142,25 +142,54 @@ fn decorators_from_extra(extra: Option<&str>) -> Vec<String> {
 /// Rounds like Python's `round(x, places)`: decided on the float's exact decimal expansion,
 /// ties to the even digit.
 pub fn round_half_even(x: f64, places: i32) -> f64 {
-    let p = places.max(0) as usize;
-    let exact = format!("{:.*}", p + 20, x);
-    let tie = exact
-        .split_once('.')
-        .map(|(_, f)| f[p..].starts_with('5') && f[p + 1..].chars().all(|c| c == '0'))
-        .unwrap_or(false);
-    let scale = 10f64.powi(places);
-    let scaled = x * scale;
-    let floor = scaled.floor();
-    let rounded = if tie {
-        if floor % 2.0 == 0.0 {
-            floor
-        } else {
-            floor + 1.0
+    if !x.is_finite() || places < 0 {
+        return x;
+    }
+    let p = places as usize;
+    // 1100 fractional digits cover the exact expansion of any f64.
+    let exact = format!("{:.1100}", x.abs());
+    let (int_part, frac) = exact.split_once('.').unwrap_or((&exact, ""));
+    let (kept, rest) = frac.split_at(p.min(frac.len()));
+    let mut digits: Vec<u8> = int_part
+        .bytes()
+        .chain(kept.bytes())
+        .map(|b| b - b'0')
+        .collect();
+    let first = rest.as_bytes().first().copied().unwrap_or(b'0');
+    let tail_zero = rest.len() <= 1 || rest[1..].bytes().all(|b| b == b'0');
+    let last_odd = digits.last().is_some_and(|d| d % 2 == 1);
+    let up = first > b'5' || (first == b'5' && (!tail_zero || last_odd));
+    if up {
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, 1);
+                break;
+            }
+            i -= 1;
+            if digits[i] == 9 {
+                digits[i] = 0;
+            } else {
+                digits[i] += 1;
+                break;
+            }
         }
-    } else {
-        scaled.round()
-    };
-    rounded / scale
+    }
+    let int_len = digits.len() - p;
+    let text: String = digits
+        .iter()
+        .enumerate()
+        .flat_map(|(i, d)| {
+            let c = (b'0' + d) as char;
+            if i == int_len && p > 0 {
+                vec!['.', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect();
+    let value: f64 = text.parse().unwrap_or(x.abs());
+    if x.is_sign_negative() { -value } else { value }
 }
 
 /// Removes control characters and caps the name at 256 chars (`_sanitize_name` in the CRG).
