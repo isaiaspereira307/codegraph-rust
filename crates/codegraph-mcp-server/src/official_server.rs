@@ -145,6 +145,28 @@ pub struct FindLargeFunctionsRequest {
 pub struct ListGraphStatsRequest {}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct BuildOrUpdateGraphRequest {
+    /// Project directory (default: the server's working directory)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Indexing tier: fast (default), balanced or full
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_tier: Option<String>,
+}
+
+const INDEX_TIERS: &[&str] = &["fast", "balanced", "full"];
+
+/// Arguments for the `codegraph update` child process behind `build_or_update_graph`.
+fn update_command_args(path: &str, index_tier: Option<&str>) -> Vec<String> {
+    let mut args = vec!["update".to_string(), path.to_string()];
+    if let Some(tier) = index_tier {
+        args.push("--index-tier".to_string());
+        args.push(tier.to_string());
+    }
+    args
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DependencyRequest {
     /// Node ID returned by find_nodes_by_name
     pub node_id: String,
@@ -382,6 +404,56 @@ impl CodeGraphMCPServer {
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("find_complexity_hotspots", &params.0).await
     }
+
+    #[tool(
+        description = "Build the project graph from scratch or update it incrementally (changed files only). Runs `codegraph update` in a child process with captured output; returns ok, exit code and the last output lines. Fails if another writer holds the graph lock. Use after editing, before detect_changes or get_review_context, when the graph may be stale."
+    )]
+    async fn build_or_update_graph(
+        &self,
+        params: Parameters<BuildOrUpdateGraphRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let request = params.0;
+        if let Some(tier) = request
+            .index_tier
+            .as_deref()
+            .filter(|tier| !INDEX_TIERS.contains(tier))
+        {
+            return Err(McpError::invalid_params(
+                format!("index_tier must be one of fast, balanced, full (got {tier})"),
+                None,
+            ));
+        }
+        let path = match request.path {
+            Some(path) => path,
+            None => std::env::current_dir()
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let exe =
+            std::env::current_exe().map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let output = tokio::process::Command::new(exe)
+            .args(update_command_args(&path, request.index_tier.as_deref()))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        let lines: Vec<&str> = text.lines().collect();
+        let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+        let result = serde_json::json!({
+            "ok": output.status.success(),
+            "exit_code": output.status.code(),
+            "path": path,
+            "output_tail": tail,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result)
+                .unwrap_or_else(|_| "Error formatting tool result".to_string()),
+        )]))
+    }
 }
 
 impl CodeGraphMCPServer {
@@ -514,8 +586,19 @@ mod tests {
             .collect();
         exposed.sort();
         let mut expected = GraphToolExecutor::get_tool_names();
+        // Served by the server itself (writes the graph via a child process), not the executor.
+        expected.push("build_or_update_graph".to_string());
         expected.sort();
         assert_eq!(exposed, expected);
+    }
+
+    #[test]
+    fn build_or_update_graph_builds_update_args() {
+        assert_eq!(update_command_args("/repo", None), vec!["update", "/repo"]);
+        assert_eq!(
+            update_command_args("/repo", Some("full")),
+            vec!["update", "/repo", "--index-tier", "full"]
+        );
     }
 
     #[test]

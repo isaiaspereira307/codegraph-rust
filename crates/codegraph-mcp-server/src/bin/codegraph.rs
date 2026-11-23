@@ -123,6 +123,14 @@ enum Commands {
         index_tier: Option<IndexTier>,
     },
 
+    #[command(
+        about = "Show node/edge counts, files, languages and last build of the project graph"
+    )]
+    GraphStatus {
+        #[command(flatten)]
+        target: tool_cli::ToolTarget,
+    },
+
     #[command(about = "Map git changes to the graph nodes they touch")]
     DetectChanges {
         #[arg(long, help = "Git ref to diff against (default HEAD)")]
@@ -597,6 +605,7 @@ fn main() -> Result<()> {
 fn quick_tool_call(command: &Commands) -> Option<tool_cli::ToolCommand> {
     let mut params = serde_json::Map::new();
     let (name, target) = match command {
+        Commands::GraphStatus { target } => ("list_graph_stats", target),
         Commands::DetectChanges { base, target } => {
             if let Some(base) = base {
                 params.insert("base_ref".into(), base.clone().into());
@@ -669,6 +678,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         | Commands::Tool { .. }
         | Commands::Hooks { .. }
         | Commands::DetectChanges { .. }
+        | Commands::GraphStatus { .. }
         | Commands::Impact { .. }
         | Commands::Query { .. }
         | Commands::Search { .. } => {

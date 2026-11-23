@@ -28,7 +28,31 @@ pub enum HookCommand {
     },
     /// Read a harness event from stdin and return non-blocking context JSON.
     Emit,
+    /// Add or remove a marked post-commit block that runs `codegraph update` in the background.
+    /// Opt-in: nothing is installed unless this command is run.
+    Git {
+        #[command(subcommand)]
+        action: GitHookAction,
+    },
 }
+
+#[derive(Debug, Subcommand)]
+pub enum GitHookAction {
+    /// Append the marked block to the repository's post-commit hook (idempotent).
+    Install {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Remove only the marked block; delete the hook file if nothing else remains.
+    Uninstall {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+const GIT_BLOCK_START: &str = "# >>> codegraph post-commit >>>";
+const GIT_BLOCK_END: &str = "# <<< codegraph post-commit <<<";
+const GIT_BLOCK_BODY: &str = "if [ ! -f .code-review-graph/crg-hooks-off ] && command -v codegraph >/dev/null 2>&1; then\n  root=$(git rev-parse --show-toplevel) && (codegraph update \"$root\" >/dev/null 2>&1 &)\nfi";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Harness {
@@ -84,7 +108,138 @@ pub fn run(command: &HookCommand) -> Result<()> {
             println!("{response}");
             Ok(())
         }
+        HookCommand::Git { action } => match action {
+            GitHookAction::Install { project } => {
+                let (path, changed) = install_git_hook(project)?;
+                println!(
+                    "{} {}",
+                    if changed {
+                        "Installed:"
+                    } else {
+                        "Already configured:"
+                    },
+                    path.display()
+                );
+                Ok(())
+            }
+            GitHookAction::Uninstall { project } => {
+                let (path, changed) = uninstall_git_hook(project)?;
+                println!(
+                    "{} {}",
+                    if changed {
+                        "Removed block from:"
+                    } else {
+                        "Not installed:"
+                    },
+                    path.display()
+                );
+                Ok(())
+            }
+        },
     }
+}
+
+fn git_block() -> String {
+    format!("{GIT_BLOCK_START}\n{GIT_BLOCK_BODY}\n{GIT_BLOCK_END}\n")
+}
+
+/// Remove the marked block (every occurrence) and keep all other lines unchanged.
+fn strip_git_block(text: &str) -> String {
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_end();
+        if skipping {
+            if trimmed == GIT_BLOCK_END {
+                skipping = false;
+            }
+        } else if trimmed == GIT_BLOCK_START {
+            skipping = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn with_git_block(existing: &str) -> String {
+    let mut base = strip_git_block(existing);
+    if base.trim().is_empty() {
+        base = "#!/bin/sh\n".to_string();
+    } else if !base.ends_with('\n') {
+        base.push('\n');
+    }
+    base.push_str(&git_block());
+    base
+}
+
+fn post_commit_path(project: &Path) -> Result<PathBuf> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project)
+        .args(["rev-parse", "--git-path", "hooks/post-commit"])
+        .output()
+        .context("Cannot run git")?;
+    if !output.status.success() {
+        bail!("{} is not a git repository", project.display());
+    }
+    let relative = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let path = PathBuf::from(relative);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        project.join(path)
+    })
+}
+
+fn read_hook(path: &Path) -> Result<Option<String>> {
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!(
+            "Refusing to write git hook through symlink {}",
+            path.display()
+        );
+    }
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn install_git_hook(project: &Path) -> Result<(PathBuf, bool)> {
+    let path = post_commit_path(project)?;
+    let existing = read_hook(&path)?.unwrap_or_default();
+    let updated = with_git_block(&existing);
+    if updated == existing {
+        return Ok((path, false));
+    }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(&path, updated)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok((path, true))
+}
+
+fn uninstall_git_hook(project: &Path) -> Result<(PathBuf, bool)> {
+    let path = post_commit_path(project)?;
+    let Some(existing) = read_hook(&path)? else {
+        return Ok((path, false));
+    };
+    let stripped = strip_git_block(&existing);
+    if stripped == existing {
+        return Ok((path, false));
+    }
+    if stripped.trim().is_empty() || stripped.trim() == "#!/bin/sh" {
+        fs::remove_file(&path)?;
+    } else {
+        fs::write(&path, stripped)?;
+    }
+    Ok((path, true))
 }
 
 /// Produce only guidance; never evaluate prompts, tool arguments, or transcript paths.
@@ -468,5 +623,27 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), project.path().join(".claude")).unwrap();
         assert!(install(project.path(), Harness::Claude, false).is_err());
         assert!(!outside.path().join("settings.json").exists());
+    }
+
+    #[test]
+    fn git_block_on_empty_hook_adds_shebang_and_is_idempotent() {
+        let once = with_git_block("");
+        assert!(once.starts_with("#!/bin/sh\n"));
+        assert!(once.contains(GIT_BLOCK_START) && once.contains(GIT_BLOCK_END));
+        assert_eq!(with_git_block(&once), once);
+    }
+
+    #[test]
+    fn git_block_keeps_user_lines_and_strips_back_exactly() {
+        let user = "#!/bin/sh\necho hi\n";
+        let with = with_git_block(user);
+        assert!(with.contains("echo hi"));
+        assert_eq!(strip_git_block(&with), user);
+    }
+
+    #[test]
+    fn git_block_appends_newline_to_user_hook_without_one() {
+        let with = with_git_block("#!/bin/sh\necho hi");
+        assert_eq!(strip_git_block(&with), "#!/bin/sh\necho hi\n");
     }
 }

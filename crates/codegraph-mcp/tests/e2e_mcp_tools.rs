@@ -140,6 +140,7 @@ async fn test_tool_discovery() -> Result<()> {
         "find_complexity_hotspots",
         "find_large_functions",
         "find_nodes_by_name",
+        "build_or_update_graph",
         "get_hub_nodes",
         "get_reverse_dependencies",
         "get_transitive_dependencies",
