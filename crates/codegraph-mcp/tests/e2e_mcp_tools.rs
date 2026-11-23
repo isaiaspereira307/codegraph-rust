@@ -153,6 +153,13 @@ async fn test_tool_discovery() -> Result<()> {
         "get_review_context",
         "search_nodes",
         "trace_call_chain",
+        "list_flows",
+        "get_flow",
+        "get_affected_flows",
+        "list_communities",
+        "get_community",
+        "get_architecture_overview",
+        "get_bridge_nodes",
     ];
     expected.sort();
     assert_eq!(discovered, expected);
