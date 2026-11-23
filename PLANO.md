@@ -272,16 +272,25 @@ reportada.
 Itens pequenos que bloqueiam a Fase 3. As demais linguagens da Fase 2 (item 6) ficam sob
 demanda, depois do MVP.
 
-1. **IDs estáveis por caminho**: canonicalizar o caminho de cada arquivo relativo à raiz do
+1. ✅ **IDs estáveis por caminho**: canonicalizar o caminho de cada arquivo relativo à raiz do
    repositório antes de gerar o ID do nó, para que indexar por `.`, por caminho relativo ou
    por caminho absoluto produza os mesmos IDs (hoje os sufixos `@L` mudam em execuções
    mistas). Sem isso, o `detect_changes` (git hook com caminho relativo, servidor MCP com
    absoluto) não cruza os arquivos do diff com os nós do banco. Teste: indexar o mesmo
    fixture pelos três caminhos e comparar os conjuntos de IDs.
-2. **`line` das arestas**: preencher a linha da chamada/import em CALLS e IMPORTS_FROM (hoje
+   Feito: `canonical_file_key` (core) gera a chave relativa à raiz para o hash do ID; nós
+   `File` usam a chave como nome; o caminho de diretórios (`Directory`) resolve pela mesma
+   chave. Fixture de 2 arquivos em `.`, caminho absoluto e `./../fx/.`: mesmos UUIDs.
+   `GRAPH_SHAPE_VERSION` virou `crg-shape-8` (força rebuild de grafos antigos). Pendente:
+   `qualified_name` guarda o caminho cru, então `..` não é normalizado nessa coluna.
+2. ✅ **`line` das arestas**: preencher a linha da chamada/import em CALLS e IMPORTS_FROM (hoje
    0, e o `TESTED_BY` herda o 0), a partir do `source_span`, como o CRG grava. O
    `get_review_context` e os snippets dependem disso. Incluir `line` na comparação do
    harness de paridade.
+   Feito: `parse_source_at` calcula `line` (1-based) de cada aresta com `span` a partir do
+   texto usado na extração; `TESTED_BY` herda. O harness (`parity.py`) ganhou a coluna
+   "line agreement" (só arestas presentes nos dois grafos). Corpus: CALLS e IMPORTS_FROM em
+   1.000 nas 5 linguagens; nós e CALLS sem mudança de Jaccard (python CALLS 0.923).
 3. ✅ **Conflito com o CRG instalado**: o `code-review-graph` 2.3.7 no PATH grava schema v9
    pelos hooks globais (`status` no SessionStart, `update` depois de Edit/Write), e o Rust
    recusa abrir. Feito: o erro de versão cita o caminho do banco, diz se foi um CRG mais
@@ -297,6 +306,9 @@ como resolver) um repositório que já tem banco do CRG.
 ---
 
 ## Fase 3 — Núcleo de revisão (MVP usável)
+
+Plano de implementação (11 tarefas, ordem e decisões): `docs/superpowers/plans/2026-11-23-fase3-nucleo-revisao.md`.
+Tasks 1 (`search_nodes`, FTS5), 2 (`list_graph_stats`), 3 (`find_large_functions`), 4 (`query_graph`), 5 (`traverse_graph`), 6 (`get_impact_radius`), 7 (`detect_changes`), 8 (`get_review_context`) e 9 (`get_minimal_context`) concluídas. Task 10 parcial: subcomandos CLI `build`, `update`, `detect-changes`, `impact`, `query`, `search` prontos; `build_or_update_graph` como tool MCP fica para depois (ver decisão abaixo). Task 11 pendente.
 
 Ferramentas MCP e comandos CLI equivalentes aos do CRG:
 
