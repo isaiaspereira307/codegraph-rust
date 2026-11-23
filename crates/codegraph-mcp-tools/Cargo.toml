@@ -25,3 +25,4 @@ tokio = { workspace = true }
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
+uuid = { workspace = true }

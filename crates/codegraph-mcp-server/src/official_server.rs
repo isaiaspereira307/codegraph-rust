@@ -70,6 +70,22 @@ pub struct QueryGraphRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ReviewRequest {
+    /// Commit, branch or tag to diff against (default HEAD)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    /// Levels of dependents to walk (1-10, default 3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    /// Maximum impacted nodes (1-500, default 50)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_nodes: Option<u32>,
+    /// Lines per changed-node snippet (1-100, default 20); get_review_context only
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_snippet_lines: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DetectChangesRequest {
     /// Commit, branch or tag to diff against (default HEAD)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,6 +292,26 @@ impl CodeGraphMCPServer {
         params: Parameters<DetectChangesRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("detect_changes", &params.0).await
+    }
+
+    #[tool(
+        description = "Review context for the current git diff in one call: changed nodes by risk, impact radius by depth, affected files, covering tests and snippets."
+    )]
+    async fn get_review_context(
+        &self,
+        params: Parameters<ReviewRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_review_context", &params.0).await
+    }
+
+    #[tool(
+        description = "Compact review context for the current git diff: changed node IDs with risk, affected files and counts. No snippets or impact list."
+    )]
+    async fn get_minimal_context(
+        &self,
+        params: Parameters<ReviewRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_minimal_context", &params.0).await
     }
 
     #[tool(

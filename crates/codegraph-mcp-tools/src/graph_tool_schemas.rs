@@ -15,6 +15,41 @@ pub struct ToolSchema {
 /// Collection of all graph analysis tool schemas
 pub struct GraphToolSchemas;
 
+/// Parameters shared by the two review tools.
+fn review_parameters() -> JsonValue {
+    json!({
+        "type": "object",
+        "properties": {
+            "base_ref": {
+                "type": "string",
+                "description": "Commit, branch or tag to diff against (defaults to HEAD)",
+                "default": "HEAD"
+            },
+            "depth": {
+                "type": "integer",
+                "description": "Levels of dependents to walk (1-10, defaults to 3)",
+                "minimum": 1,
+                "maximum": 10,
+                "default": 3
+            },
+            "max_nodes": {
+                "type": "integer",
+                "description": "Maximum impacted nodes (1-500, defaults to 50)",
+                "minimum": 1,
+                "maximum": 500,
+                "default": 50
+            },
+            "max_snippet_lines": {
+                "type": "integer",
+                "description": "Lines per changed-node snippet (1-100, defaults to 20); get_review_context only",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 20
+            }
+        }
+    })
+}
+
 impl GraphToolSchemas {
     /// Get all tool schemas for registration with LLM
     pub fn all() -> Vec<ToolSchema> {
@@ -34,7 +69,34 @@ impl GraphToolSchemas {
             Self::traverse_graph(),
             Self::get_impact_radius(),
             Self::detect_changes(),
+            Self::get_review_context(),
+            Self::get_minimal_context(),
         ]
+    }
+
+    /// Schema for get_review_context (changed nodes by risk, impact radius, snippets)
+    pub fn get_review_context() -> ToolSchema {
+        ToolSchema {
+            name: "get_review_context".to_string(),
+            description: "Review context for the current git diff in one call: changed files, \
+                   changed nodes ordered by risk (dependents plus one when untested), the \
+                   transitive impact by depth, affected files, covering tests, and a snippet of \
+                   each changed node. Use it instead of reading the changed files."
+                .to_string(),
+            parameters: review_parameters(),
+        }
+    }
+
+    /// Schema for get_minimal_context (same input; ids, files and counts only)
+    pub fn get_minimal_context() -> ToolSchema {
+        ToolSchema {
+            name: "get_minimal_context".to_string(),
+            description: "Compact review context for the current git diff: changed node IDs with \
+                   risk, changed and affected files, and counts. Same input as \
+                   get_review_context, without snippets or the impact list."
+                .to_string(),
+            parameters: review_parameters(),
+        }
     }
 
     /// Schema for detect_changes (nodes touched by the work tree's diff against a base ref)
@@ -496,7 +558,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 15, "Should have exactly 15 tool schemas");
+        assert_eq!(schemas.len(), 17, "Should have exactly 17 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -524,7 +586,9 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 17);
+        assert!(names.contains(&"get_review_context".to_string()));
+        assert!(names.contains(&"get_minimal_context".to_string()));
         assert!(names.contains(&"detect_changes".to_string()));
         assert!(names.contains(&"get_impact_radius".to_string()));
         assert!(names.contains(&"find_large_functions".to_string()));

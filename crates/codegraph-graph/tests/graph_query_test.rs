@@ -798,3 +798,35 @@ async fn nodes_at_lines_matches_overlapping_spans_by_file_suffix() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn node_coverage_counts_dependents_and_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = fixture(dir.path()).await;
+    let mut test = CodeNode::new(
+        "test_h",
+        Some(NodeType::Other("Test".to_string())),
+        Some(Language::Python),
+        Location {
+            file_path: "test_hub.py".to_string(),
+            line: 1,
+            column: 0,
+            end_line: Some(2),
+            end_column: None,
+        },
+    );
+    test.id = uuid::Uuid::from_u128(81);
+    store.upsert_nodes_batch(&[test]).await.unwrap();
+    store
+        .upsert_edges_batch(&[calls(401, 81, 20)])
+        .await
+        .unwrap();
+    store.finalize("full").await.unwrap();
+    let q = GraphQuery::new(store.clone());
+
+    let cov = q.node_coverage(&[id(20), id(30), id(999)]).await.unwrap();
+    // h: six callers (d1..d6) plus the test, which is also a dependent; big: d1, no test.
+    assert_eq!(cov.len(), 2);
+    assert_eq!((cov[0].dependents, cov[0].tests), (7, 1));
+    assert_eq!((cov[1].dependents, cov[1].tests), (1, 0));
+}

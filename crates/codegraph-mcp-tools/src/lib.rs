@@ -4,6 +4,7 @@
 pub mod git_changes;
 pub mod graph_tool_executor;
 pub mod graph_tool_schemas;
+pub mod review;
 
 pub use graph_tool_executor::*;
 pub use graph_tool_schemas::*;

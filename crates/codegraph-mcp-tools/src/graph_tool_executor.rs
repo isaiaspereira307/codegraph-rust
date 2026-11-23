@@ -2,10 +2,15 @@
 // ABOUTME: Validates tool parameters, runs GraphQuery calls and caches their results
 
 use crate::git_changes::changed_files;
+use crate::review::{ReviewOptions, build_review, minimal_view};
 use std::path::PathBuf;
 
 /// Tools whose answer depends on the git work tree, which `data_version` does not track.
-const UNCACHED_TOOLS: &[&str] = &["detect_changes"];
+const UNCACHED_TOOLS: &[&str] = &[
+    "detect_changes",
+    "get_review_context",
+    "get_minimal_context",
+];
 
 fn is_uncached(tool_name: &str) -> bool {
     UNCACHED_TOOLS.contains(&tool_name)
@@ -356,6 +361,8 @@ impl GraphToolExecutor {
                 "traverse_graph" => self.execute_traverse_graph(parameters.clone()).await?,
                 "get_impact_radius" => self.execute_get_impact_radius(parameters.clone()).await?,
                 "detect_changes" => self.execute_detect_changes(parameters.clone()).await?,
+                "get_review_context" => self.execute_review(parameters.clone(), false).await?,
+                "get_minimal_context" => self.execute_review(parameters.clone(), true).await?,
                 "get_transitive_dependencies" => {
                     self.execute_get_transitive_dependencies(parameters.clone())
                         .await?
@@ -520,6 +527,42 @@ impl GraphToolExecutor {
         Ok(json!({
             "tool": "query_graph",
             "parameters": { "pattern": pattern.name(), "node_id": node_id, "limit": limit },
+            "result": result
+        }))
+    }
+
+    /// Execute get_review_context (`minimal` = false) or get_minimal_context (`minimal` = true)
+    async fn execute_review(&self, params: JsonValue, minimal: bool) -> Result<JsonValue> {
+        let opts = ReviewOptions {
+            base_ref: params["base_ref"].as_str().unwrap_or("HEAD").to_string(),
+            depth: params["depth"].as_i64().unwrap_or(3).clamp(1, 10) as i32,
+            max_nodes: params["max_nodes"].as_i64().unwrap_or(50).clamp(1, 500) as usize,
+            max_snippet_lines: params["max_snippet_lines"]
+                .as_i64()
+                .unwrap_or(20)
+                .clamp(1, 100) as usize,
+        };
+        let tool = if minimal {
+            "get_minimal_context"
+        } else {
+            "get_review_context"
+        };
+        let ctx = build_review(&self.graph_query, &opts)
+            .await
+            .map_err(|e| McpError::Protocol(format!("{tool} failed: {e}")))?;
+        let result = if minimal {
+            minimal_view(&ctx)
+        } else {
+            serde_json::to_value(&ctx)?
+        };
+        Ok(json!({
+            "tool": tool,
+            "parameters": {
+                "base_ref": opts.base_ref,
+                "depth": opts.depth,
+                "max_nodes": opts.max_nodes,
+                "max_snippet_lines": opts.max_snippet_lines
+            },
             "result": result
         }))
     }
@@ -938,13 +981,14 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 15);
+        assert_eq!(schemas.len(), 17);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 15);
+        assert_eq!(names.len(), 17);
+        assert!(names.contains(&"get_review_context".to_string()));
         assert!(names.contains(&"detect_changes".to_string()));
         assert!(names.contains(&"get_impact_radius".to_string()));
         assert!(names.contains(&"find_large_functions".to_string()));

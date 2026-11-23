@@ -2,6 +2,7 @@
 // ABOUTME: Semantics follow the former SurrealQL fn::* functions (depth limits, defaults).
 
 mod changes;
+mod coverage;
 mod impact;
 mod large;
 mod query;
@@ -10,6 +11,7 @@ mod snapshot;
 mod stats;
 mod traverse;
 
+pub use coverage::NodeCoverage;
 pub use impact::{ImpactRadius, ImpactedNode};
 pub use query::{QueryGraphResult, QueryPattern};
 pub use traverse::{TraversalResult, TraverseDirection, TraversedNode};
