@@ -636,3 +636,65 @@ async fn inherits_targets_stay_text() -> Result<()> {
     assert_eq!(inherits, vec!["INHERITS|base.ts::Leaf|Base".to_string()]);
     Ok(())
 }
+
+const FLOW_SOURCE: (&str, &str) = (
+    "app.py",
+    "def main():\n    helper()\n\ndef helper():\n    leaf()\n\ndef leaf():\n    pass\n",
+);
+
+fn flow_counts(store: &SqliteGraphStore) -> Result<Vec<String>> {
+    rows(
+        store,
+        "SELECT CAST((SELECT count(*) FROM flows) AS TEXT), \
+         CAST((SELECT count(*) FROM flow_memberships) AS TEXT)",
+    )
+}
+
+#[tokio::test]
+async fn finalize_twice_keeps_flow_counts() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(module_path!(), "::finalize_twice_keeps_flow_counts"),
+        &[FLOW_SOURCE],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let first = flow_counts(&indexer.graph_store())?;
+    assert_ne!(first, ["0|0"], "main -> helper -> leaf must yield a flow");
+    // A second run over unchanged sources finalizes again.
+    indexer.index_project(dir.path()).await?;
+    assert_eq!(flow_counts(&indexer.graph_store())?, first);
+    Ok(())
+}
+
+#[tokio::test]
+async fn skip_postprocess_leaves_flows_empty() -> Result<()> {
+    if !test_env::run(
+        concat!(module_path!(), "::skip_postprocess_leaves_flows_empty"),
+        &[
+            ("CODEGRAPH_NO_PROGRESS", Some("1")),
+            ("CODEGRAPH_ANALYZERS", Some("0")),
+            ("CODEGRAPH_ANALYZERS_REQUIRE_TOOLS", Some("0")),
+        ],
+    ) {
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join(FLOW_SOURCE.0), FLOW_SOURCE.1)?;
+    let config = IndexerConfig {
+        project_root: dir.path().to_path_buf(),
+        indexing_tier: IndexingTier::Fast,
+        postprocess: Some(codegraph_graph::analysis::PostprocessLevel::None),
+        ..Default::default()
+    };
+    let indexer = ProjectIndexer::new(
+        config,
+        &CodeGraphConfig::default(),
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden()),
+    )
+    .await?;
+    indexer.index_project(dir.path()).await?;
+    assert_eq!(flow_counts(&indexer.graph_store())?, ["0|0"]);
+    Ok(())
+}

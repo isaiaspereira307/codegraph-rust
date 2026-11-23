@@ -3,6 +3,7 @@
 
 use super::SqliteGraphStore;
 use super::write::{now_epoch, resolve_pending};
+use crate::analysis::{PostprocessLevel, run_postprocess};
 use crate::records::{FileMetadataRecord, ProjectMetadataRecord};
 use anyhow::Result;
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -144,6 +145,13 @@ impl SqliteGraphStore {
     /// Resolves pending edges, rebuilds the FTS index and its state mirror, and records the
     /// build in `metadata` the way code-review-graph does after a complete build.
     pub async fn finalize(&self, build_type: &str) -> Result<()> {
+        self.finalize_with(build_type, PostprocessLevel::default())
+            .await
+    }
+
+    /// Like [`finalize`](Self::finalize), choosing how much derived analysis (flows, ...) to
+    /// compute after the build transaction commits.
+    pub async fn finalize_with(&self, build_type: &str, level: PostprocessLevel) -> Result<()> {
         let build_type = build_type.to_string();
         let root = self.root.to_string_lossy().into_owned();
         self.with_conn(move |conn| {
@@ -170,6 +178,7 @@ impl SqliteGraphStore {
                 set_metadata(&tx, key, value)?;
             }
             tx.commit()?;
+            run_postprocess(conn, level)?;
             Ok(())
         })
         .await

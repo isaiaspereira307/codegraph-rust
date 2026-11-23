@@ -201,3 +201,64 @@ pub fn sanitize_name(s: &str) -> String {
         .take(256)
         .collect()
 }
+
+/// How much derived analysis `finalize` computes after a build.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PostprocessLevel {
+    #[default]
+    Full,
+    /// Reserved: the CRG's minimal level only refreshes the FTS index, which `finalize` always does.
+    Minimal,
+    None,
+}
+
+impl std::str::FromStr for PostprocessLevel {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "full" => Ok(Self::Full),
+            "minimal" => Ok(Self::Minimal),
+            "none" => Ok(Self::None),
+            other => anyhow::bail!(
+                "invalid postprocess level '{other}' (expected full, minimal or none)"
+            ),
+        }
+    }
+}
+
+impl PostprocessLevel {
+    /// Reads `CODEGRAPH_POSTPROCESS` (default `full`); an invalid value is an error.
+    pub fn from_env() -> Result<Self> {
+        match std::env::var("CODEGRAPH_POSTPROCESS") {
+            Ok(v) if !v.trim().is_empty() => v.parse(),
+            _ => Ok(Self::default()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PostprocessStats {
+    pub flows: usize,
+    pub communities: usize,
+}
+
+/// Computes and stores the derived analysis for the current graph, in its own write transaction.
+pub fn run_postprocess(conn: &mut Connection, level: PostprocessLevel) -> Result<PostprocessStats> {
+    let mut stats = PostprocessStats::default();
+    if level != PostprocessLevel::Full {
+        return Ok(stats);
+    }
+    let started = std::time::Instant::now();
+    let graph = AnalysisGraph::load(conn)?;
+    let flows = flows::trace_flows(&graph, flows::FLOW_MAX_DEPTH);
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    stats.flows = flows::store_flows(&tx, &flows)?;
+    tx.commit()?;
+    tracing::info!(
+        flows_s = started.elapsed().as_secs_f64(),
+        flows = stats.flows,
+        "flows stored"
+    );
+    Ok(stats)
+}

@@ -111,6 +111,8 @@ enum Commands {
         workers: usize,
         #[arg(long, value_enum, help = "Indexing tier: fast | balanced | full")]
         index_tier: Option<IndexTier>,
+        #[command(flatten)]
+        postprocess: PostprocessFlags,
     },
 
     #[command(about = "Incrementally update the graph for changed files")]
@@ -121,6 +123,8 @@ enum Commands {
         workers: usize,
         #[arg(long, value_enum, help = "Indexing tier: fast | balanced | full")]
         index_tier: Option<IndexTier>,
+        #[command(flatten)]
+        postprocess: PostprocessFlags,
     },
 
     #[command(
@@ -245,6 +249,8 @@ enum Commands {
         index_tier: Option<IndexTier>,
         #[arg(long, help = "Write indexing metrics and completion status as JSON")]
         stats_json: Option<PathBuf>,
+        #[command(flatten)]
+        postprocess: PostprocessFlags,
     },
 
     #[command(
@@ -578,6 +584,7 @@ fn main() -> Result<()> {
             batch_size: None,
             index_tier,
             stats_json: None,
+            postprocess: PostprocessFlags::default(),
         };
     }
     if let Some(path) = &cli.config {
@@ -688,6 +695,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             path,
             workers,
             index_tier,
+            postprocess,
         } => {
             handle_index(
                 config,
@@ -702,6 +710,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 None,
                 index_tier,
                 None,
+                postprocess.level(),
                 cli.debug,
             )
             .await?;
@@ -710,6 +719,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             path,
             workers,
             index_tier,
+            postprocess,
         } => {
             handle_index(
                 config,
@@ -724,6 +734,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 None,
                 index_tier,
                 None,
+                postprocess.level(),
                 cli.debug,
             )
             .await?;
@@ -755,6 +766,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             batch_size,
             index_tier,
             stats_json,
+            postprocess,
         } => {
             handle_index(
                 config,
@@ -769,6 +781,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 batch_size,
                 index_tier,
                 stats_json,
+                postprocess.level(),
                 cli.debug,
             )
             .await?;
@@ -1265,6 +1278,32 @@ async fn handle_status(pid_file: Option<PathBuf>, detailed: bool) -> Result<()> 
     Ok(())
 }
 
+/// `--skip-flows` / `--skip-postprocess`; without either the level comes from
+/// `CODEGRAPH_POSTPROCESS` (default `full`).
+#[derive(clap::Args, Debug, Clone, Default)]
+struct PostprocessFlags {
+    #[arg(
+        long,
+        help = "Skip flow tracing after the build (postprocess level: minimal)"
+    )]
+    skip_flows: bool,
+    #[arg(long, help = "Skip all post-build analysis (postprocess level: none)")]
+    skip_postprocess: bool,
+}
+
+impl PostprocessFlags {
+    fn level(&self) -> Option<codegraph_graph::analysis::PostprocessLevel> {
+        use codegraph_graph::analysis::PostprocessLevel;
+        if self.skip_postprocess {
+            Some(PostprocessLevel::None)
+        } else if self.skip_flows {
+            Some(PostprocessLevel::Minimal)
+        } else {
+            None
+        }
+    }
+}
+
 async fn handle_index(
     config: &codegraph_core::config_manager::CodeGraphConfig,
     path: PathBuf,
@@ -1278,6 +1317,7 @@ async fn handle_index(
     batch_size: Option<usize>,
     index_tier: Option<IndexTier>,
     stats_json: Option<PathBuf>,
+    postprocess: Option<codegraph_graph::analysis::PostprocessLevel>,
     debug_log: bool,
 ) -> Result<()> {
     let project_root = path.clone().canonicalize().unwrap_or_else(|_| path.clone());
@@ -1361,6 +1401,7 @@ async fn handle_index(
         batch_size: storage_batch_size,
         indexing_tier: tier,
         project_root: project_root.clone(),
+        postprocess,
         ..Default::default()
     };
 
@@ -2051,6 +2092,34 @@ async fn handle_daemon_start(
 mod cli_command_tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn postprocess_flags_map_to_levels() {
+        use codegraph_graph::analysis::PostprocessLevel;
+        for (args, expected) in [
+            (vec![], None),
+            (vec!["--skip-flows"], Some(PostprocessLevel::Minimal)),
+            (vec!["--skip-postprocess"], Some(PostprocessLevel::None)),
+            (
+                vec!["--skip-flows", "--skip-postprocess"],
+                Some(PostprocessLevel::None),
+            ),
+        ] {
+            for command in ["build", "update", "index"] {
+                let mut argv = vec!["codegraph", command];
+                argv.extend(args.iter().copied());
+                argv.push(".");
+                let cli = Cli::try_parse_from(argv).unwrap();
+                let flags = match cli.command {
+                    Commands::Build { postprocess, .. }
+                    | Commands::Update { postprocess, .. }
+                    | Commands::Index { postprocess, .. } => postprocess,
+                    _ => unreachable!(),
+                };
+                assert_eq!(flags.level(), expected, "{command} {args:?}");
+            }
+        }
+    }
 
     #[test]
     fn indexing_batch_size_preserves_explicit_values_and_rejects_zero() {

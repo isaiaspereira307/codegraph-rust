@@ -85,6 +85,8 @@ pub struct IndexerConfig {
     /// Root directory of the project being indexed (where .codegraph/ will be created)
     /// Defaults to current directory if not specified
     pub project_root: PathBuf,
+    /// Post-build analysis level; `None` reads `CODEGRAPH_POSTPROCESS` (default `full`).
+    pub postprocess: Option<codegraph_graph::analysis::PostprocessLevel>,
 }
 
 impl Default for IndexerConfig {
@@ -100,6 +102,7 @@ impl Default for IndexerConfig {
             batch_size: 100,
             indexing_tier: codegraph_core::config_manager::IndexingTier::default(),
             project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            postprocess: None,
         }
     }
 }
@@ -1445,12 +1448,19 @@ impl ProjectIndexer {
             }
             // Leave the database as code-review-graph expects after a build (pending edges
             // resolved, FTS rebuilt, build metadata), then write the ready marker last.
+            let postprocess = match self.config.postprocess {
+                Some(level) => level,
+                None => codegraph_graph::analysis::PostprocessLevel::from_env()?,
+            };
             self.store
-                .finalize(if previous.is_some() {
-                    "incremental"
-                } else {
-                    "full"
-                })
+                .finalize_with(
+                    if previous.is_some() {
+                        "incremental"
+                    } else {
+                        "full"
+                    },
+                    postprocess,
+                )
                 .await?;
             self.persist_project_metadata(&stats, stats.nodes, stats.edges, &input_fingerprint)
                 .await?;
