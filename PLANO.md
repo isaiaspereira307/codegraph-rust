@@ -121,10 +121,9 @@ como nós `Import` com `IMPORTS_FROM` em laço e descartava chamadas não resolv
 o texto do alvo). Tudo isso foi corrigido pela camada comum (`crg_shape`); ver "Progresso da
 Fase 2" abaixo. Ainda aberto: `INHERITS` (e `IMPLEMENTS`/`REFERENCES`) não são gerados.
 
-Atenção: o `code-review-graph` instalado no PATH é 2.3.7 e cria schema **9**; o hook de
-SessionStart dele já gravou `.code-review-graph/graph.db` v9 neste repo, que o Rust recusa
-abrir. O harness usa o CRG da fonte (`uv run --frozen --project ../code-review-graph`, v2.4.0,
-schema 15). Atualizar o CRG instalado ou desligar o hook dele neste repo.
+O `code-review-graph` instalado no PATH é 2.3.7 e cria schema **9**; o harness usa o CRG da
+fonte (`uv run --frozen --project ../code-review-graph`, v2.4.0, schema 15). Convivência:
+Fase 2.5, item 3.
 
 1. Harness de paridade (`scripts/parity/`): indexar o mesmo repositório com o CRG (Python) e
    com o binário Rust; comparar os dois `graph.db` por `(kind, qualified_name, file, linhas)`
@@ -283,10 +282,13 @@ demanda, depois do MVP.
    0, e o `TESTED_BY` herda o 0), a partir do `source_span`, como o CRG grava. O
    `get_review_context` e os snippets dependem disso. Incluir `line` na comparação do
    harness de paridade.
-3. **Conflito com o CRG instalado**: o `code-review-graph` 2.3.7 no PATH grava schema v9 pelo
-   hook de SessionStart, e o Rust recusa abrir. Definir a convivência: desligar o hook do CRG
-   nos repositórios que usam o Rust (ou atualizar o CRG para v15) e fazer o erro de versão
-   do Rust dizer o que fazer, em vez de só recusar.
+3. ✅ **Conflito com o CRG instalado**: o `code-review-graph` 2.3.7 no PATH grava schema v9
+   pelos hooks globais (`status` no SessionStart, `update` depois de Edit/Write), e o Rust
+   recusa abrir. Feito: o erro de versão cita o caminho do banco, diz se foi um CRG mais
+   antigo ou mais novo e dá a correção; convivência documentada em
+   `docs/architecture/storage-sqlite.md`. Os hooks em `~/.claude/settings.json` pulam
+   repositórios com `.code-review-graph/crg-hooks-off` (o CRG não tem chave por
+   repositório). Este repo tem o marcador e foi reindexado pelo Rust (v15).
 
 Critério de aceite: os mesmos IDs de nó para os três modos de caminho; `line` ≠ 0 em
 CALLS/IMPORTS_FROM com concordância ≥ 95% com o CRG no corpus; `codegraph` abre (ou explica

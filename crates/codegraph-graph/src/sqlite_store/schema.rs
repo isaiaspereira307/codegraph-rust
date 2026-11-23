@@ -4,6 +4,7 @@
 use super::SCHEMA_VERSION;
 use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension};
+use std::path::Path;
 
 const CRG_V15: &str = include_str!("schema_v15.sql");
 const CG_TABLES: &str = include_str!("schema_cg.sql");
@@ -15,7 +16,31 @@ pub(super) fn configure(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn ensure(conn: &mut Connection) -> Result<()> {
+/// Explains a schema mismatch: what wrote the database and how to get a readable one.
+fn version_error(found: Option<&str>, path: &Path) -> String {
+    let path = path.display();
+    let reindex = format!("delete {path} and run `codegraph index`");
+    match found.and_then(|v| v.parse::<u32>().ok()) {
+        Some(v) if v < SCHEMA_VERSION => format!(
+            "graph.db schema version {v} is not supported (expected {SCHEMA_VERSION}): {path} \
+             was written by an older code-review-graph (2.3.x writes 9). Upgrade \
+             code-review-graph to 2.4.0+ and run `code-review-graph update`, or {reindex}. \
+             If code-review-graph hooks keep rewriting it, disable them for this repository \
+             (see docs/architecture/storage-sqlite.md)"
+        ),
+        Some(v) => format!(
+            "graph.db schema version {v} is not supported (expected {SCHEMA_VERSION}): {path} \
+             was written by a newer code-review-graph. Use code-review-graph for this \
+             repository, or {reindex}"
+        ),
+        None => match found {
+            Some(v) => format!("graph.db schema version {v:?} is not a number: {reindex}"),
+            None => format!("graph.db has no schema_version: {reindex}"),
+        },
+    }
+}
+
+pub(super) fn ensure(conn: &mut Connection, path: &Path) -> Result<()> {
     let tx = conn.transaction()?;
     let has_metadata: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metadata')",
@@ -30,13 +55,8 @@ pub(super) fn ensure(conn: &mut Connection) -> Result<()> {
                 |row| row.get(0),
             )
             .optional()?;
-        match version {
-            Some(v) if v == SCHEMA_VERSION.to_string() => {}
-            Some(v) => bail!(
-                "graph.db schema version {v} is not supported (expected {SCHEMA_VERSION}); \
-                 run code-review-graph update"
-            ),
-            None => bail!("graph.db has no schema_version; run code-review-graph update"),
+        if version.as_deref() != Some(SCHEMA_VERSION.to_string().as_str()) {
+            bail!(version_error(version.as_deref(), path));
         }
     } else {
         tx.execute_batch(CRG_V15)?;

@@ -141,27 +141,60 @@ fn opens_database_created_by_crg() {
     }
 }
 
-#[test]
-fn rejects_other_schema_versions() {
-    for version in ["14", "16"] {
-        let dir = tempfile::tempdir().unwrap();
-        install_fixture(dir.path());
-        Connection::open(db_path(dir.path()))
-            .unwrap()
-            .execute(
-                "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
-                [version],
-            )
-            .unwrap();
-        let err = SqliteGraphStore::open(dir.path())
-            .err()
-            .expect("must refuse");
-        assert_eq!(
-            err.to_string(),
-            format!(
-                "graph.db schema version {version} is not supported (expected 15); \
-                 run code-review-graph update"
-            )
-        );
+/// Opens a fixture whose schema_version row was rewritten (or deleted when `None`).
+fn open_error_with_version(version: Option<&str>) -> (String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    install_fixture(dir.path());
+    let conn = Connection::open(db_path(dir.path())).unwrap();
+    match version {
+        Some(v) => conn.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
+            [v],
+        ),
+        None => conn.execute("DELETE FROM metadata WHERE key = 'schema_version'", []),
     }
+    .unwrap();
+    drop(conn);
+    let err = SqliteGraphStore::open(dir.path())
+        .err()
+        .expect("must refuse");
+    (err.to_string(), db_path(dir.path()).display().to_string())
+}
+
+#[test]
+fn rejects_older_schema_and_explains_fix() {
+    for version in ["9", "14"] {
+        let (msg, path) = open_error_with_version(Some(version));
+        assert!(
+            msg.starts_with(&format!(
+                "graph.db schema version {version} is not supported (expected 15)"
+            )),
+            "{msg}"
+        );
+        assert!(msg.contains(&path), "{msg}");
+        assert!(msg.contains("older code-review-graph"), "{msg}");
+        assert!(msg.contains("code-review-graph update"), "{msg}");
+        assert!(msg.contains("run `codegraph index`"), "{msg}");
+    }
+}
+
+#[test]
+fn rejects_newer_schema_and_explains_fix() {
+    let (msg, path) = open_error_with_version(Some("16"));
+    assert!(
+        msg.starts_with("graph.db schema version 16 is not supported (expected 15)"),
+        "{msg}"
+    );
+    assert!(msg.contains(&path), "{msg}");
+    assert!(msg.contains("newer code-review-graph"), "{msg}");
+    assert!(msg.contains("run `codegraph index`"), "{msg}");
+}
+
+#[test]
+fn rejects_missing_schema_version() {
+    let (msg, path) = open_error_with_version(None);
+    assert_eq!(
+        msg,
+        format!("graph.db has no schema_version: delete {path} and run `codegraph index`")
+    );
 }

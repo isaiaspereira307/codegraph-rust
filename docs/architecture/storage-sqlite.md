@@ -9,8 +9,32 @@ other wrote. Code: `crates/codegraph-graph/src/sqlite_store/`.
 - `schema_v15.sql` is the DDL copied verbatim from a database CRG created (`sqlite_master`
   text must match, `fresh_schema_matches_crg_created_schema` checks this). It is applied only
   to a new file, and `metadata.schema_version` is set to `15`.
-- An existing database must have `schema_version = 15`. Any other value is refused with
-  "run code-review-graph update"; CodeGraph never runs migrations.
+- An existing database must have `schema_version = 15`. Any other value is refused with an
+  error that names the database path, says whether an older or newer CRG wrote it, and gives
+  the fix (upgrade CRG and `code-review-graph update`, or delete the file and run
+  `codegraph index`). CodeGraph never runs migrations.
+
+## Coexisting with an installed code-review-graph
+
+CRG 2.3.x writes schema 9, which CodeGraph refuses. CRG's Claude Code hooks (`status` on
+SessionStart, `update` after Edit/Write) rewrite the database on every session, so deleting it
+once is not enough. Two ways out:
+
+1. Upgrade CRG to 2.4.0+ (schema 15). Both tools then share the file. Each `update` rewrites
+   the nodes with CRG's extractor, so pick one writer per repository.
+2. Keep CRG 2.3.x and make its hooks skip repositories that CodeGraph owns. CRG has no
+   per-repository switch, so the guard lives in the hook command; the convention is a marker
+   file `.code-review-graph/crg-hooks-off` (ignored by the directory's own `.gitignore`):
+
+   ```sh
+   root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+   [ -e "$root/.code-review-graph/crg-hooks-off" ] && exit 0
+   code-review-graph update --skip-flows --repo "$root"
+   ```
+
+   Then, in the repository: `rm .code-review-graph/graph.db*`,
+   `touch .code-review-graph/crg-hooks-off`, `codegraph index . -r`. Also leave CRG's MCP
+   server disabled there (`disabledMcpjsonServers` in `.claude/settings.local.json`).
 - `schema_cg.sql` adds Rust-only tables that CRG ignores:
 
 | Table | Holds |

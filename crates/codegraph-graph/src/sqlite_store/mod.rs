@@ -46,7 +46,7 @@ impl SqliteGraphStore {
 
     fn from_connection(mut conn: Connection, project_root: &Path) -> Result<Self> {
         schema::configure(&conn)?;
-        schema::ensure(&mut conn)?;
+        schema::ensure(&mut conn, &db_path(project_root))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             root: project_root.to_path_buf(),
