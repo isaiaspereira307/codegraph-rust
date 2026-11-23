@@ -70,6 +70,13 @@ pub struct QueryGraphRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DetectChangesRequest {
+    /// Commit, branch or tag to diff against (default HEAD)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct GetImpactRadiusRequest {
     /// Changed node IDs
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,6 +266,16 @@ impl CodeGraphMCPServer {
         params: Parameters<GetImpactRadiusRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("get_impact_radius", &params.0).await
+    }
+
+    #[tool(
+        description = "Graph nodes touched by the current git diff against base_ref (default HEAD): changed files, changed line ranges and the nodes whose spans overlap them."
+    )]
+    async fn detect_changes(
+        &self,
+        params: Parameters<DetectChangesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("detect_changes", &params.0).await
     }
 
     #[tool(

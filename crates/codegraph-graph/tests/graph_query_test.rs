@@ -752,3 +752,49 @@ async fn impact_radius_walks_dependents_files_and_tests() {
     assert_eq!(capped.impacted.len(), 1);
     assert!(capped.truncated);
 }
+
+#[tokio::test]
+async fn nodes_at_lines_matches_overlapping_spans_by_file_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteGraphStore::open(dir.path()).unwrap();
+    store
+        .upsert_nodes_batch(&[
+            spanned(90, "top", "pkg/mod.py", 1, 10),
+            spanned(91, "later", "pkg/mod.py", 12, 20),
+            spanned(92, "other", "pkg/other.py", 1, 10),
+        ])
+        .await
+        .unwrap();
+    store.finalize("full").await.unwrap();
+    let q = GraphQuery::new(store.clone());
+
+    // Line 10 touches `top` only; a repo-relative path matches the stored absolute path.
+    let hits = q
+        .nodes_at_lines(&[("pkg/mod.py".to_string(), vec![(10, 10)])])
+        .await
+        .unwrap();
+    let names: Vec<_> = hits.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, vec!["top"]);
+
+    // A range spanning both functions in mod.py, and nothing from other.py.
+    let hits = q
+        .nodes_at_lines(&[("pkg/mod.py".to_string(), vec![(9, 13)])])
+        .await
+        .unwrap();
+    let names: Vec<_> = hits.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, vec!["later", "top"]);
+
+    // Lines outside every span, or other files, match nothing.
+    assert!(
+        q.nodes_at_lines(&[("pkg/mod.py".to_string(), vec![(30, 40)])])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        q.nodes_at_lines(&[("missing.py".to_string(), vec![(1, 5)])])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

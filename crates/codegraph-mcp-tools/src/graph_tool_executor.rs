@@ -1,6 +1,16 @@
 // ABOUTME: Tool executor for the graph analysis tools over the SQLite graph
 // ABOUTME: Validates tool parameters, runs GraphQuery calls and caches their results
 
+use crate::git_changes::changed_files;
+use std::path::PathBuf;
+
+/// Tools whose answer depends on the git work tree, which `data_version` does not track.
+const UNCACHED_TOOLS: &[&str] = &["detect_changes"];
+
+fn is_uncached(tool_name: &str) -> bool {
+    UNCACHED_TOOLS.contains(&tool_name)
+}
+
 use codegraph_graph::graph_query::{GraphQuery, QueryPattern, TraverseDirection};
 use codegraph_mcp_core::debug_logger::DebugLogger;
 use codegraph_mcp_core::error::{McpError, Result};
@@ -308,7 +318,7 @@ impl GraphToolExecutor {
             let project_id = self.graph_query.project_id();
 
             // Check cache if enabled
-            if self.cache_enabled {
+            if self.cache_enabled && !is_uncached(tool_name) {
                 let cache_key = Self::cache_key(&project_id, tool_name, &parameters);
 
                 // Try cache lookup
@@ -345,6 +355,7 @@ impl GraphToolExecutor {
                 "query_graph" => self.execute_query_graph(parameters.clone()).await?,
                 "traverse_graph" => self.execute_traverse_graph(parameters.clone()).await?,
                 "get_impact_radius" => self.execute_get_impact_radius(parameters.clone()).await?,
+                "detect_changes" => self.execute_detect_changes(parameters.clone()).await?,
                 "get_transitive_dependencies" => {
                     self.execute_get_transitive_dependencies(parameters.clone())
                         .await?
@@ -380,7 +391,7 @@ impl GraphToolExecutor {
             let result = self.truncate_if_oversized(tool_name, result);
 
             // Cache the result if enabled
-            if self.cache_enabled {
+            if self.cache_enabled && !is_uncached(tool_name) {
                 let cache_key = Self::cache_key(&project_id, tool_name, &parameters);
                 let mut cache = self.cache.lock();
                 let was_evicted = cache.len() >= cache.cap().get();
@@ -510,6 +521,41 @@ impl GraphToolExecutor {
             "tool": "query_graph",
             "parameters": { "pattern": pattern.name(), "node_id": node_id, "limit": limit },
             "result": result
+        }))
+    }
+
+    /// Execute detect_changes - nodes touched by `git diff -U0 <base_ref>` in the project
+    async fn execute_detect_changes(&self, params: JsonValue) -> Result<JsonValue> {
+        let base_ref = params["base_ref"].as_str().unwrap_or("HEAD").to_string();
+        let root = PathBuf::from(self.graph_query.project_id());
+        let base = base_ref.clone();
+        let files = tokio::task::spawn_blocking(move || changed_files(&root, &base))
+            .await
+            .map_err(|e| McpError::Protocol(format!("detect_changes failed: {}", e)))?
+            .map_err(|e| McpError::Protocol(format!("detect_changes failed: {}", e)))?;
+
+        let ranges: Vec<(String, Vec<(i32, i32)>)> = files
+            .iter()
+            .map(|f| (f.path.clone(), f.lines.clone()))
+            .collect();
+        let nodes = self
+            .graph_query
+            .nodes_at_lines(&ranges)
+            .await
+            .map_err(|e| McpError::Protocol(format!("detect_changes failed: {}", e)))?;
+
+        let changed_files: Vec<JsonValue> = files
+            .iter()
+            .map(|f| json!({ "path": f.path, "lines": f.lines }))
+            .collect();
+        Ok(json!({
+            "tool": "detect_changes",
+            "parameters": { "base_ref": base_ref },
+            "result": {
+                "base_ref": base_ref,
+                "changed_files": changed_files,
+                "changed_nodes": nodes,
+            }
         }))
     }
 
@@ -892,13 +938,14 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 14);
+        assert_eq!(schemas.len(), 15);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 15);
+        assert!(names.contains(&"detect_changes".to_string()));
         assert!(names.contains(&"get_impact_radius".to_string()));
         assert!(names.contains(&"find_large_functions".to_string()));
         assert!(names.contains(&"query_graph".to_string()));

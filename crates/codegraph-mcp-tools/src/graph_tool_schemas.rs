@@ -33,7 +33,30 @@ impl GraphToolSchemas {
             Self::query_graph(),
             Self::traverse_graph(),
             Self::get_impact_radius(),
+            Self::detect_changes(),
         ]
+    }
+
+    /// Schema for detect_changes (nodes touched by the work tree's diff against a base ref)
+    pub fn detect_changes() -> ToolSchema {
+        ToolSchema {
+            name: "detect_changes".to_string(),
+            description: "Nodes touched by the current git diff: runs `git diff -U0 <base_ref>` \
+                   in the project and returns the changed files, their changed line ranges, and \
+                   the graph nodes whose spans overlap them. Staged and unstaged tracked changes \
+                   count; untracked files do not. Fails when the project is not a git work tree."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "base_ref": {
+                        "type": "string",
+                        "description": "Commit, branch or tag to diff against (defaults to HEAD)",
+                        "default": "HEAD"
+                    }
+                }
+            }),
+        }
     }
 
     /// Schema for get_impact_radius (transitive dependents of changed nodes or files, and tests)
@@ -473,7 +496,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 14, "Should have exactly 14 tool schemas");
+        assert_eq!(schemas.len(), 15, "Should have exactly 15 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -501,7 +524,8 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 14);
+        assert_eq!(names.len(), 15);
+        assert!(names.contains(&"detect_changes".to_string()));
         assert!(names.contains(&"get_impact_radius".to_string()));
         assert!(names.contains(&"find_large_functions".to_string()));
         assert!(names.contains(&"query_graph".to_string()));

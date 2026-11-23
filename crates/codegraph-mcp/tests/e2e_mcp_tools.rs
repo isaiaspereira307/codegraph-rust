@@ -147,6 +147,7 @@ async fn test_tool_discovery() -> Result<()> {
         "query_graph",
         "traverse_graph",
         "get_impact_radius",
+        "detect_changes",
         "search_nodes",
         "trace_call_chain",
     ];
