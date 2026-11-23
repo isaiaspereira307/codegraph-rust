@@ -1,6 +1,7 @@
 // ABOUTME: Graph analysis over the CRG SQLite tables: flows, communities, insights and risk.
 // ABOUTME: AnalysisGraph is a plain snapshot of nodes/edges (ordered by id) for deterministic work.
 
+pub mod communities;
 pub mod flows;
 
 use anyhow::Result;
