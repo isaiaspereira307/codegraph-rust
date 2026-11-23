@@ -17,6 +17,7 @@ async-trait = { workspace = true }
 dashmap = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
+regex = { workspace = true }
 
 # SQLite store (code-review-graph v15 schema)
 rusqlite = { workspace = true, optional = true }

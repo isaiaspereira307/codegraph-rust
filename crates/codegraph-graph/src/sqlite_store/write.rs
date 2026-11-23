@@ -164,17 +164,18 @@ fn write_node(tx: &Transaction, root: &Path, node: &CodeNode, now: f64) -> Resul
         .map(|d| d.trim().chars().take(DOCSTRING_CHARS).collect::<String>());
     let tokens = mapping::name_tokens(&kind, &node.name, parent.map(String::as_str), &file_path);
 
+    let extra = extra_json(attrs);
     tx.execute(
         "INSERT INTO nodes (kind, name, qualified_name, file_path, line_start, line_end, \
          language, parent_name, params, return_type, modifiers, is_test, file_hash, extra, \
          symbol, docstring, name_tokens, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, '{}', ?14, ?15, ?16, ?17) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?18, ?14, ?15, ?16, ?17) \
          ON CONFLICT(qualified_name) DO UPDATE SET kind = excluded.kind, name = excluded.name, \
          file_path = excluded.file_path, line_start = excluded.line_start, \
          line_end = excluded.line_end, language = excluded.language, \
          parent_name = excluded.parent_name, params = excluded.params, \
          return_type = excluded.return_type, modifiers = excluded.modifiers, \
-         is_test = excluded.is_test, file_hash = excluded.file_hash, symbol = excluded.symbol, \
+         is_test = excluded.is_test, extra = excluded.extra, file_hash = excluded.file_hash, symbol = excluded.symbol, \
          docstring = excluded.docstring, name_tokens = excluded.name_tokens, \
          updated_at = excluded.updated_at",
         params![
@@ -195,6 +196,7 @@ fn write_node(tx: &Transaction, root: &Path, node: &CodeNode, now: f64) -> Resul
             docstring,
             tokens,
             now,
+            extra,
         ],
     )?;
     tx.execute(
@@ -402,4 +404,22 @@ fn delete_files(tx: &Transaction, root: &PathBuf, paths: &[String]) -> Result<()
          DELETE FROM cg_del_files; DELETE FROM cg_del_nodes; DELETE FROM cg_del_qn;",
     )?;
     Ok(())
+}
+
+/// `nodes.extra` JSON: `{"decorators":[..]}` when the node has decorators, else `{}`.
+fn extra_json(attrs: &std::collections::HashMap<String, String>) -> String {
+    let decorators: Vec<&str> = attrs
+        .get("decorators")
+        .map(|d| {
+            d.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if decorators.is_empty() {
+        "{}".to_string()
+    } else {
+        serde_json::json!({ "decorators": decorators }).to_string()
+    }
 }

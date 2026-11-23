@@ -469,3 +469,27 @@ async fn tested_by_mirrors_calls_from_tests() {
         ]
     );
 }
+
+#[tokio::test]
+async fn writer_stores_decorators_in_extra() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, conn) = open(dir.path());
+    let mut decorated = node(1, "login", NodeType::Function, "app.py", 3);
+    decorated
+        .metadata
+        .attributes
+        .insert("decorators".into(), "app.get, login_required,".into());
+    let plain = node(2, "plain", NodeType::Function, "app.py", 9);
+    store.upsert_nodes_batch(&[decorated, plain]).await.unwrap();
+    let extra = |name: &str| -> String {
+        conn.query_row("SELECT extra FROM nodes WHERE name = ?1", [name], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        extra("login"),
+        r#"{"decorators":["app.get","login_required"]}"#
+    );
+    assert_eq!(extra("plain"), "{}");
+}
