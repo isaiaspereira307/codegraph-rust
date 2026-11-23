@@ -176,3 +176,14 @@ pub struct GraphStats {
     /// `metadata.last_updated` as written by the last finalize; `None` on an empty database.
     pub last_updated: Option<String>,
 }
+
+/// Function longer than the requested threshold, with its line span.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LargeFunction {
+    pub id: String,
+    pub name: String,
+    pub language: Option<String>,
+    pub location: NodeLocation,
+    /// Lines covered by the function, `end_line - start_line + 1`.
+    pub line_count: i32,
+}

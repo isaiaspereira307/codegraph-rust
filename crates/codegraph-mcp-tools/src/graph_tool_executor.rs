@@ -338,6 +338,10 @@ impl GraphToolExecutor {
                 "find_nodes_by_name" => self.execute_find_nodes_by_name(parameters.clone()).await?,
                 "search_nodes" => self.execute_search_nodes(parameters.clone()).await?,
                 "list_graph_stats" => self.execute_list_graph_stats().await?,
+                "find_large_functions" => {
+                    self.execute_find_large_functions(parameters.clone())
+                        .await?
+                }
                 "get_transitive_dependencies" => {
                     self.execute_get_transitive_dependencies(parameters.clone())
                         .await?
@@ -451,6 +455,27 @@ impl GraphToolExecutor {
             "tool": "search_nodes",
             "parameters": {
                 "query": query,
+                "limit": limit
+            },
+            "result": result
+        }))
+    }
+
+    /// Execute find_large_functions - functions by line span, read from SQLite
+    async fn execute_find_large_functions(&self, params: JsonValue) -> Result<JsonValue> {
+        let min_lines = params["min_lines"].as_i64().unwrap_or(50).max(1);
+        let limit = params["limit"].as_i64().unwrap_or(20).clamp(1, 100) as usize;
+
+        let result = self
+            .graph_query
+            .find_large_functions(min_lines, limit)
+            .await
+            .map_err(|e| McpError::Protocol(format!("find_large_functions failed: {}", e)))?;
+
+        Ok(json!({
+            "tool": "find_large_functions",
+            "parameters": {
+                "min_lines": min_lines,
                 "limit": limit
             },
             "result": result
@@ -742,13 +767,14 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 10);
+        assert_eq!(schemas.len(), 11);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 11);
+        assert!(names.contains(&"find_large_functions".to_string()));
         assert!(names.contains(&"search_nodes".to_string()));
         assert!(names.contains(&"list_graph_stats".to_string()));
         assert!(names.contains(&"get_transitive_dependencies".to_string()));

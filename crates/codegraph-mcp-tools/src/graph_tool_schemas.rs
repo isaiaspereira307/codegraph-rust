@@ -29,7 +29,38 @@ impl GraphToolSchemas {
             Self::find_complexity_hotspots(),
             Self::search_nodes(),
             Self::list_graph_stats(),
+            Self::find_large_functions(),
         ]
+    }
+
+    /// Schema for find_large_functions (functions by line span, longest first)
+    pub fn find_large_functions() -> ToolSchema {
+        ToolSchema {
+            name: "find_large_functions".to_string(),
+            description: "Functions whose body spans at least min_lines lines, longest first. \
+                   Use it to find refactoring candidates. Returns node IDs, names, locations \
+                   and line counts."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "min_lines": {
+                        "type": "integer",
+                        "description": "Minimum number of lines in the function (defaults to 50)",
+                        "minimum": 1,
+                        "default": 50
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (1-100, defaults to 20)",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 20
+                    }
+                },
+                "required": []
+            }),
+        }
     }
 
     /// Schema for list_graph_stats (graph-wide counts; takes no parameters)
@@ -311,7 +342,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 10, "Should have exactly 10 tool schemas");
+        assert_eq!(schemas.len(), 11, "Should have exactly 11 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -339,7 +370,8 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 11);
+        assert!(names.contains(&"find_large_functions".to_string()));
         assert!(names.contains(&"search_nodes".to_string()));
         assert!(names.contains(&"list_graph_stats".to_string()));
         assert!(names.contains(&"find_nodes_by_name".to_string()));

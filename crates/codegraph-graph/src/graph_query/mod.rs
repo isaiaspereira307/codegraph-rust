@@ -1,6 +1,7 @@
 // ABOUTME: Graph tool queries over an in-memory petgraph snapshot of the SQLite store.
 // ABOUTME: Semantics follow the former SurrealQL fn::* functions (depth limits, defaults).
 
+mod large;
 mod search;
 mod snapshot;
 mod stats;

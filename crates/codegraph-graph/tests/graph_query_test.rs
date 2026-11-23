@@ -482,3 +482,55 @@ async fn graph_stats_count_kinds_files_languages_and_last_build() {
     assert!(stats.languages.is_empty());
     assert_eq!(stats.last_updated, None);
 }
+
+fn spanned(n: u128, name: &str, file: &str, start: u32, end: u32) -> CodeNode {
+    let mut node = CodeNode::new(
+        name,
+        Some(NodeType::Function),
+        Some(Language::Python),
+        Location {
+            file_path: file.to_string(),
+            line: start,
+            column: 0,
+            end_line: Some(end),
+            end_column: None,
+        },
+    );
+    node.id = uuid::Uuid::from_u128(n);
+    node
+}
+
+#[tokio::test]
+async fn find_large_functions_applies_line_threshold_longest_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteGraphStore::open(dir.path()).unwrap();
+    store
+        .upsert_nodes_batch(&[
+            spanned(70, "exact", "a.py", 1, 50), // 50 lines: at the threshold
+            spanned(71, "short", "a.py", 10, 40), // 31 lines: below
+            spanned(72, "huge", "b.py", 1, 200), // 200 lines
+            spanned(73, "medium", "b.py", 5, 104), // 100 lines
+        ])
+        .await
+        .unwrap();
+    store.finalize("full").await.unwrap();
+    let q = GraphQuery::new(store.clone());
+
+    // Default threshold is 50 lines; longest first.
+    let found = q.find_large_functions(0, 0).await.unwrap();
+    let names: Vec<_> = found.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["huge", "medium", "exact"]);
+    assert_eq!(found[0].line_count, 200);
+    assert_eq!(found[2].line_count, 50);
+    assert_eq!(found[0].id, id(72));
+
+    // Explicit threshold of 100 keeps lines >= 100.
+    let found = q.find_large_functions(100, 10).await.unwrap();
+    let names: Vec<_> = found.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["huge", "medium"]);
+
+    // Limit applies after ordering.
+    let found = q.find_large_functions(1, 1).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "huge");
+}

@@ -54,6 +54,16 @@ pub struct SearchNodesRequest {
     pub limit: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FindLargeFunctionsRequest {
+    /// Minimum number of lines in the function (default 50)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_lines: Option<u32>,
+    /// Maximum number of results (1-100, default 20)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
 /// `list_graph_stats` takes no parameters.
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ListGraphStatsRequest {}
@@ -156,6 +166,16 @@ impl CodeGraphMCPServer {
         params: Parameters<ListGraphStatsRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("list_graph_stats", &params.0).await
+    }
+
+    #[tool(
+        description = "List functions spanning at least `min_lines` lines (default 50), longest first. Returns node IDs, locations and line counts."
+    )]
+    async fn find_large_functions(
+        &self,
+        params: Parameters<FindLargeFunctionsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("find_large_functions", &params.0).await
     }
 
     #[tool(

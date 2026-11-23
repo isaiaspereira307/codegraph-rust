@@ -138,6 +138,7 @@ async fn test_tool_discovery() -> Result<()> {
         "calculate_coupling_metrics",
         "detect_circular_dependencies",
         "find_complexity_hotspots",
+        "find_large_functions",
         "find_nodes_by_name",
         "get_hub_nodes",
         "get_reverse_dependencies",
