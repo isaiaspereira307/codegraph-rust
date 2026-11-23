@@ -564,7 +564,7 @@ async fn test_function_keeps_its_function_node_id() -> Result<()> {
     assert_eq!(columns[2], "Test");
     let expected = codegraph_core::generate_node_id(
         &dir.path().display().to_string(),
-        columns[1],
+        &codegraph_core::canonical_file_key(dir.path(), columns[1]),
         "test_x",
         "Function",
         columns[3].parse()?,

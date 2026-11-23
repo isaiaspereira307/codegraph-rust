@@ -54,6 +54,15 @@ Paths are stored absolute. A file node's `qualified_name` is its path; any other
 path prefix) or its name. When two distinct Rust nodes produce the same `qualified_name`,
 the later one gets the suffix `@L<line>`.
 
+Node IDs (`cg_nodes.uuid`) hash the project id, the file key, the name, the kind and the start
+line. The file key is the path relative to the project root (`canonical_file_key`), so indexing
+with `.`, a relative path or an absolute path gives the same IDs. Only the ID uses the key:
+`qualified_name` keeps the path as the indexer received it, so a spelling with `..` is stored
+un-normalized in that column (open item).
+
+Edges from `CALLS` and `IMPORTS_FROM` (and `TESTED_BY`, derived from them) carry the 1-based
+line of the call or import in `line`, computed from the extractor's byte span.
+
 Tools report a node by its `cg_nodes.uuid`; nodes CRG wrote (no uuid) are reported by
 `qualified_name`. Both forms are accepted as input.
 

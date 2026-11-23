@@ -41,7 +41,7 @@ use std::collections::HashMap;
 /// The graph shape and resolver this build writes. It feeds the project input fingerprint
 /// and the ready marker, so a graph written by a build with another shape is rebuilt even
 /// when no source changed. Bump it whenever node kinds, edge kinds or resolution change.
-pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-7";
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-8";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {
@@ -112,6 +112,19 @@ impl From<&IndexerConfig> for codegraph_parser::file_collect::FileCollectionConf
             include_patterns: config.include_patterns.clone(),
             exclude_patterns: config.exclude_patterns.clone(),
         }
+    }
+}
+
+/// Name fed into the node ID hash. A `File` node is named by its path as the parser
+/// received it, so it takes the stable file key instead.
+fn stable_name<'a>(
+    node: &'a CodeNode,
+    file_keys: &'a std::collections::HashMap<String, String>,
+) -> &'a str {
+    if node.name.as_str() == node.location.file_path {
+        file_keys[&node.location.file_path].as_str()
+    } else {
+        node.name.as_str()
     }
 }
 
@@ -643,11 +656,24 @@ impl ProjectIndexer {
                 NodeId,
                 std::collections::BTreeSet<String>,
             > = std::collections::HashMap::new();
+            // Stable per-file key (root-relative), so IDs do not depend on how the
+            // project path was spelled on the command line.
+            let mut file_keys: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for node in &nodes {
+                if !file_keys.contains_key(&node.location.file_path) {
+                    let key = codegraph_core::canonical_file_key(
+                        &self.project_root,
+                        &node.location.file_path,
+                    );
+                    file_keys.insert(node.location.file_path.clone(), key);
+                }
+            }
             for node in &nodes {
                 let id = codegraph_core::generate_node_id(
                     &self.project_id,
-                    &node.location.file_path,
-                    node.name.as_str(),
+                    &file_keys[&node.location.file_path],
+                    stable_name(node, &file_keys),
                     &codegraph_parser::languages::crg_shape::id_node_type(node),
                     node.location.line,
                 );
@@ -662,8 +688,8 @@ impl ProjectIndexer {
                 // The pre-shape kind, so test functions keep their ids.
                 node.id = codegraph_core::generate_node_id(
                     &self.project_id,
-                    &node.location.file_path,
-                    node.name.as_str(),
+                    &file_keys[&node.location.file_path],
+                    stable_name(node, &file_keys),
                     &codegraph_parser::languages::crg_shape::id_node_type(node),
                     node.location.line,
                 );
@@ -681,7 +707,7 @@ impl ProjectIndexer {
                     );
                     node.id = codegraph_core::generate_node_id(
                         &self.project_id,
-                        &node.location.file_path,
+                        &file_keys[&node.location.file_path],
                         &identity,
                         &codegraph_parser::languages::crg_shape::id_node_type(node),
                         node.location.line,

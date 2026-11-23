@@ -739,6 +739,7 @@ impl TreeSitterParser {
                     // Adds pattern-based edges and resolves unmatched references (<1ms overhead)
                     let enhanced_result = crate::fast_ml::get_fast_ml_enhancer()
                         .enhance_with_policy(ast_result, &used_content, policy);
+                    let enhanced_result = Self::annotate_edge_lines(enhanced_result, &used_content);
                     Ok(Self::add_directory_nodes(
                         enhanced_result,
                         &file_path,
@@ -778,13 +779,50 @@ impl TreeSitterParser {
 }
 
 impl TreeSitterParser {
+    /// Fill `line` (1-based) on edges that carry only a byte `span`, so the call or
+    /// import site is stored the way code-review-graph stores it. Edges that already
+    /// set `line` keep it.
+    fn annotate_edge_lines(mut result: ExtractionResult, source: &str) -> ExtractionResult {
+        let newlines: Vec<usize> = source
+            .bytes()
+            .enumerate()
+            .filter_map(|(i, b)| (b == b'\n').then_some(i))
+            .collect();
+        for edge in result.edges.iter_mut() {
+            if edge.metadata.contains_key("line") {
+                continue;
+            }
+            let Some(span) = &edge.span else {
+                continue;
+            };
+            let offset = (span.start_byte as usize).min(source.len());
+            let line = newlines.partition_point(|&nl| nl < offset) + 1;
+            edge.metadata.insert("line".into(), line.to_string());
+        }
+        result
+    }
+
     fn add_directory_nodes(
         mut result: ExtractionResult,
         file_path: &str,
         project_root: Option<&Path>,
     ) -> ExtractionResult {
         const MAX_DEPTH: usize = 4;
-        let path = Path::new(file_path);
+        // A root-relative path (`./a.py`) must walk up the same directories as its
+        // absolute spelling, or the directory nodes depend on how the project was given.
+        let resolved = match project_root {
+            Some(root) => {
+                let key = codegraph_core::canonical_file_key(root, file_path);
+                let key = Path::new(&key);
+                if key.is_absolute() {
+                    key.to_path_buf()
+                } else {
+                    root.join(key)
+                }
+            }
+            None => PathBuf::from(file_path),
+        };
+        let path = resolved.as_path();
 
         let mut dirs: Vec<(String, String, usize)> = Vec::new();
         let mut current = path.parent();
@@ -960,5 +998,54 @@ mod pipeline_tests {
                 &source[span.start_byte as usize..span.end_byte as usize]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod edge_line_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn call_edges_carry_the_line_of_the_call_site() {
+        let parser = TreeSitterParser::new().with_project_root("/project");
+        let source = "def helper():\n    return 1\n\ndef go():\n    return helper()\n";
+        let result = parser
+            .parse_source_with_edges(Arc::from(source), "/project/m.py", Language::Python)
+            .await
+            .unwrap();
+        let calls: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|edge| edge.edge_type == EdgeType::Calls)
+            .collect();
+        assert!(!calls.is_empty(), "expected a CALLS edge");
+        assert!(
+            calls
+                .iter()
+                .any(|edge| edge.metadata.get("line").map(String::as_str) == Some("5")),
+            "{:?}",
+            calls.iter().map(|e| &e.metadata).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn relative_and_absolute_spellings_share_directory_nodes() {
+        let parser = TreeSitterParser::new().with_project_root("/project");
+        let mut seen = Vec::new();
+        for file in ["src/a.rs", "./src/a.rs", "/project/src/a.rs"] {
+            let result = parser
+                .parse_source_with_edges(Arc::from("fn foo() {}"), file, Language::Rust)
+                .await
+                .unwrap();
+            let mut dirs: Vec<_> = result
+                .nodes
+                .iter()
+                .filter(|node| node.node_type == Some(NodeType::Directory))
+                .map(|node| node.location.file_path.clone())
+                .collect();
+            dirs.sort();
+            seen.push(dirs);
+        }
+        assert!(seen.windows(2).all(|w| w[0] == w[1]), "{seen:?}");
     }
 }

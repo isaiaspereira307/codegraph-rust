@@ -29,6 +29,7 @@ class NodeRow:
 class Graph:
     nodes: dict = field(default_factory=dict)  # qn (relative) -> NodeRow
     edges: set = field(default_factory=set)  # EdgeKey
+    edge_lines: dict = field(default_factory=dict)  # EdgeKey -> set of line numbers
 
 
 @dataclass
@@ -55,10 +56,12 @@ def load_graph(db, root):
             graph.nodes[_strip(qn, prefix)] = NodeRow(
                 kind, _strip(fp, prefix), ls, le, int(is_test or 0), lang or "unknown"
             )
-        for kind, src, tgt in con.execute(
-            "SELECT kind, source_qualified, target_qualified FROM edges"
+        for kind, src, tgt, line in con.execute(
+            "SELECT kind, source_qualified, target_qualified, line FROM edges"
         ):
-            graph.edges.add((kind, _strip(src, prefix), _strip(tgt, prefix)))
+            key = (kind, _strip(src, prefix), _strip(tgt, prefix))
+            graph.edges.add(key)
+            graph.edge_lines.setdefault(key, set()).add(int(line or 0))
     finally:
         con.close()
     return graph
@@ -131,6 +134,12 @@ def compare(crg, rust):
             "only_crg": [list(e) for e in _cap(a - b)],
             "only_rust": [list(e) for e in _cap(b - a)],
             "resolved_jaccard": _jaccard(len(ra & rb), len(ra | rb)),
+            "line_agreement": (
+                sum(1 for e in both if crg.edge_lines.get(e) == rust.edge_lines.get(e))
+                / len(both)
+                if both
+                else None
+            ),
         }
     return report
 
@@ -145,13 +154,14 @@ def render_markdown(report):
         )
     lines += ["", "## Edges by kind", ""]
     lines += [
-        "| kind | crg | rust | both | jaccard | resolved jaccard |",
-        "|---|---|---|---|---|---|",
+        "| kind | crg | rust | both | jaccard | resolved jaccard | line agreement |",
+        "|---|---|---|---|---|---|---|",
     ]
     for kind, r in report.edges_by_kind.items():
+        agreement = "-" if r["line_agreement"] is None else f"{r['line_agreement']:.3f}"
         lines.append(
             f"| {kind} | {r['crg']} | {r['rust']} | {r['both']} | {r['jaccard']:.3f} "
-            f"| {r['resolved_jaccard']:.3f} |"
+            f"| {r['resolved_jaccard']:.3f} | {agreement} |"
         )
     for lang, r in report.nodes_by_language.items():
         for title, key in (("only in CRG", "only_crg"), ("only in Rust", "only_rust")):

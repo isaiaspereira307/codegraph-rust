@@ -44,6 +44,44 @@ pub fn generate_node_id(
     Uuid::from_slice(&hash[..16]).expect("SHA256 hash should always produce at least 16 bytes")
 }
 
+/// Stable file key for ID derivation: the path relative to `project_root` with `/`
+/// separators, so `.`, `./a.py`, `a.py` and `/abs/root/a.py` all hash the same.
+/// Paths outside the root keep their canonical absolute form.
+pub fn canonical_file_key(project_root: &std::path::Path, file_path: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+
+    fn lexical(path: &Path) -> PathBuf {
+        let mut out = PathBuf::new();
+        for comp in path.components() {
+            match comp {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    }
+
+    let raw = Path::new(file_path);
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        project_root.join(raw)
+    };
+    let abs = std::fs::canonicalize(&joined).unwrap_or_else(|_| lexical(&joined));
+    let root = std::fs::canonicalize(project_root).unwrap_or_else(|_| lexical(project_root));
+    let key = match abs.strip_prefix(&root) {
+        Ok(rel) => rel,
+        Err(_) => abs.as_path(),
+    };
+    key.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, bincode::Encode, bincode::Decode,
 )]
@@ -188,4 +226,46 @@ pub struct UpdatePayload {
 pub struct Delta {
     pub file_path: String,
     pub changes: Vec<String>,
+}
+
+#[cfg(test)]
+mod canonical_file_key_tests {
+    use super::{canonical_file_key, generate_node_id};
+    use std::fs;
+
+    #[test]
+    fn spellings_of_the_same_file_share_one_key_and_id() {
+        let root = std::env::temp_dir().join(format!("cg-file-key-{}", std::process::id()));
+        fs::create_dir_all(root.join("pkg")).unwrap();
+        fs::write(root.join("pkg/a.py"), "x = 1\n").unwrap();
+
+        let abs = root.join("pkg/a.py").to_string_lossy().into_owned();
+        let keys = [
+            canonical_file_key(&root, "pkg/a.py"),
+            canonical_file_key(&root, "./pkg/a.py"),
+            canonical_file_key(&root, &abs),
+            canonical_file_key(&root, "pkg/../pkg/a.py"),
+        ];
+        assert!(keys.iter().all(|k| k == "pkg/a.py"), "{keys:?}");
+
+        let ids: Vec<_> = keys
+            .iter()
+            .map(|k| generate_node_id("p", k, "a.py", "File", 1))
+            .collect();
+        assert!(ids.windows(2).all(|w| w[0] == w[1]));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn paths_outside_the_root_keep_an_absolute_key() {
+        let root = std::env::temp_dir().join(format!("cg-file-key-out-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let outside = std::env::temp_dir().join("cg-file-key-elsewhere.py");
+        fs::write(&outside, "").unwrap();
+        let key = canonical_file_key(&root, &outside.to_string_lossy());
+        assert!(key.starts_with('/') || key.contains(':'), "{key}");
+        fs::remove_dir_all(&root).unwrap();
+        fs::remove_file(&outside).unwrap();
+    }
 }
