@@ -103,6 +103,72 @@ enum Commands {
     #[command(about = "Open the project graph database and print its counts")]
     DbCheck,
 
+    #[command(about = "Build the graph from scratch (full reindex)")]
+    Build {
+        #[arg(default_value = ".", help = "Project directory")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 4, help = "Parallel parser workers")]
+        workers: usize,
+        #[arg(long, value_enum, help = "Indexing tier: fast | balanced | full")]
+        index_tier: Option<IndexTier>,
+    },
+
+    #[command(about = "Incrementally update the graph for changed files")]
+    Update {
+        #[arg(default_value = ".", help = "Project directory")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 4, help = "Parallel parser workers")]
+        workers: usize,
+        #[arg(long, value_enum, help = "Indexing tier: fast | balanced | full")]
+        index_tier: Option<IndexTier>,
+    },
+
+    #[command(about = "Map git changes to the graph nodes they touch")]
+    DetectChanges {
+        #[arg(long, help = "Git ref to diff against (default HEAD)")]
+        base: Option<String>,
+        #[command(flatten)]
+        target: tool_cli::ToolTarget,
+    },
+
+    #[command(about = "List transitive dependents of nodes or files")]
+    Impact {
+        #[arg(long, value_delimiter = ',', help = "Node ids, comma separated")]
+        node_ids: Vec<String>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            help = "Project-relative file paths, comma separated"
+        )]
+        files: Vec<String>,
+        #[command(flatten)]
+        target: tool_cli::ToolTarget,
+    },
+
+    #[command(about = "Run one relationship query from a node")]
+    Query {
+        #[arg(help = "callers_of | callees_of | imports_of | importers_of | tests_for")]
+        pattern: String,
+        #[arg(long, help = "Node id")]
+        node_id: Option<String>,
+        #[arg(long, help = "Symbol name (used when --node-id is absent)")]
+        name: Option<String>,
+        #[arg(long, help = "Maximum results (1-100)")]
+        limit: Option<i64>,
+        #[command(flatten)]
+        target: tool_cli::ToolTarget,
+    },
+
+    #[command(about = "Full-text search over node names")]
+    Search {
+        #[arg(help = "Search text")]
+        query: String,
+        #[arg(long, help = "Maximum results (1-50)")]
+        limit: Option<i64>,
+        #[command(flatten)]
+        target: tool_cli::ToolTarget,
+    },
+
     #[command(about = "Stop running MCP server")]
     Stop {
         #[arg(long, help = "PID file location")]
@@ -463,6 +529,10 @@ fn main() -> Result<()> {
     if let Commands::Hooks { ref action } = cli.command {
         return agent_hooks::run(action);
     }
+    if let Some(action) = quick_tool_call(&cli.command) {
+        // SAFETY: No async runtime or application threads have been started yet.
+        return unsafe { tool_cli::run(&action, cli.verbose, cli.config.as_deref()) };
+    }
     if let Commands::DbCheck = cli.command {
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -522,6 +592,69 @@ fn main() -> Result<()> {
         .block_on(run_cli(cli))
 }
 
+/// Maps the graph shortcut commands to the equivalent `tool run` call, so they share
+/// its project setup, timeout and JSON output.
+fn quick_tool_call(command: &Commands) -> Option<tool_cli::ToolCommand> {
+    let mut params = serde_json::Map::new();
+    let (name, target) = match command {
+        Commands::DetectChanges { base, target } => {
+            if let Some(base) = base {
+                params.insert("base_ref".into(), base.clone().into());
+            }
+            ("detect_changes", target)
+        }
+        Commands::Impact {
+            node_ids,
+            files,
+            target,
+        } => {
+            if !node_ids.is_empty() {
+                params.insert("node_ids".into(), node_ids.clone().into());
+            }
+            if !files.is_empty() {
+                params.insert("files".into(), files.clone().into());
+            }
+            ("get_impact_radius", target)
+        }
+        Commands::Query {
+            pattern,
+            node_id,
+            name,
+            limit,
+            target,
+        } => {
+            params.insert("pattern".into(), pattern.clone().into());
+            if let Some(node_id) = node_id {
+                params.insert("node_id".into(), node_id.clone().into());
+            }
+            if let Some(name) = name {
+                params.insert("name".into(), name.clone().into());
+            }
+            if let Some(limit) = limit {
+                params.insert("limit".into(), (*limit).into());
+            }
+            ("query_graph", target)
+        }
+        Commands::Search {
+            query,
+            limit,
+            target,
+        } => {
+            params.insert("query".into(), query.clone().into());
+            if let Some(limit) = limit {
+                params.insert("limit".into(), (*limit).into());
+            }
+            ("search_nodes", target)
+        }
+        _ => return None,
+    };
+    Some(tool_cli::ToolCommand::Run {
+        name: name.to_string(),
+        params: serde_json::Value::Object(params).to_string(),
+        target: target.clone(),
+    })
+}
+
 async fn run_cli(cli: Cli) -> Result<()> {
     // Initialize debug logger (enabled with CODEGRAPH_DEBUG=1)
     DebugLogger::init();
@@ -532,8 +665,58 @@ async fn run_cli(cli: Cli) -> Result<()> {
     let config = config_mgr.config();
 
     match cli.command {
-        Commands::Init { .. } | Commands::Tool { .. } | Commands::Hooks { .. } => {
+        Commands::Init { .. }
+        | Commands::Tool { .. }
+        | Commands::Hooks { .. }
+        | Commands::DetectChanges { .. }
+        | Commands::Impact { .. }
+        | Commands::Query { .. }
+        | Commands::Search { .. } => {
             unreachable!("handled before configuration")
+        }
+        Commands::Build {
+            path,
+            workers,
+            index_tier,
+        } => {
+            handle_index(
+                config,
+                path,
+                None,
+                Vec::new(),
+                Vec::new(),
+                true,
+                true,
+                false,
+                workers,
+                None,
+                index_tier,
+                None,
+                cli.debug,
+            )
+            .await?;
+        }
+        Commands::Update {
+            path,
+            workers,
+            index_tier,
+        } => {
+            handle_index(
+                config,
+                path,
+                None,
+                Vec::new(),
+                Vec::new(),
+                true,
+                false,
+                false,
+                workers,
+                None,
+                index_tier,
+                None,
+                cli.debug,
+            )
+            .await?;
         }
         Commands::Start {
             transport,

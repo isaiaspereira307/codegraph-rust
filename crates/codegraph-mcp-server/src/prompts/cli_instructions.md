@@ -16,6 +16,7 @@ that ID to the other tools:
 | Resolve a symbol to node IDs | `find_nodes_by_name` | `name`, `limit` |
 | Find code by words (stems, camelCase) | `search_nodes` | `query`, `limit` |
 | Find long functions (refactoring candidates) | `find_large_functions` | `min_lines`, `limit` |
+| Counts of nodes, edges, files and languages | `list_graph_stats` | none |
 | Callers, callees, imports, importers, tests of a node | `query_graph` | `pattern`, `node_id` or `name`, `limit` |
 | Walk dependencies out, in or both, bounded | `traverse_graph` | `node_id` or `name`, `direction`, `edge_type`, `max_depth`, `max_nodes` |
 | Blast radius of changed nodes or files, with tests | `get_impact_radius` | `node_ids` or `files`, `depth`, `max_nodes` |
@@ -38,6 +39,11 @@ codegraph tool run find_nodes_by_name --params '{"name": "parse_file"}'
 codegraph tool run get_reverse_dependencies --params '{"node_id": "<id>", "edge_type": "Calls"}'
 codegraph tool run find_complexity_hotspots --params '{"limit": 10}'
 ```
+
+Shortcuts with the same output as `tool run`: `codegraph search <text>`,
+`codegraph query <pattern> --name <symbol>`, `codegraph impact --files a.rs,b.rs`,
+`codegraph detect-changes --base <ref>`. Build or refresh the graph with
+`codegraph build` (full) or `codegraph update` (changed files only).
 
 Run from the indexed project root, or pass `--project /path/to/project`. For a custom
 indexed identifier, pass `--project-id ID` or retain `CODEGRAPH_PROJECT_ID`. Stdout is

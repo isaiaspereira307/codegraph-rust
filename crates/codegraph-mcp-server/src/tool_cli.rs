@@ -28,17 +28,17 @@ pub enum ToolCommand {
     Instructions,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct ToolTarget {
     /// Indexed project root; configuration is loaded from this directory.
     #[arg(long)]
-    project: Option<PathBuf>,
+    pub project: Option<PathBuf>,
     /// Override CODEGRAPH_PROJECT_ID for projects indexed with a custom identifier.
     #[arg(long)]
-    project_id: Option<String>,
+    pub project_id: Option<String>,
     /// Whole-command deadline in seconds, including database setup.
     #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
-    timeout_secs: u64,
+    pub timeout_secs: u64,
 }
 
 /// Execute a CLI command, preparing process configuration before starting workers.
