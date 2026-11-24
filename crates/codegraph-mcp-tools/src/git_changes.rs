@@ -1,11 +1,11 @@
 // ABOUTME: Changed line ranges per file from `git diff -U0 <base>` and 90-day commit churn per file.
 // ABOUTME: Reads only git's output; a directory that is not a git work tree is an error, never a fallback.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One file of the diff with the new-side line ranges (inclusive) that changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,13 +89,17 @@ pub fn changed_files(root: &Path, base: &str) -> Result<Vec<ChangedFile>, String
 
 const CHURN_BUDGET: Duration = Duration::from_secs(5);
 const CHURN_CACHE_MAX_ENTRIES: usize = 32;
+/// How long a git timeout is remembered before churn is tried again. A long-lived MCP server
+/// would otherwise lose churn for good after one stall (cold disk cache, load spike).
+const CHURN_TIMEOUT_RETRY: Duration = Duration::from_secs(5 * 60);
 
-/// Process-wide churn state: results keyed by (root, HEAD), and roots whose git timed out.
-/// Only a timeout is remembered: no commits or a missing `git` fail fast and may recover.
+/// Process-wide churn state: results keyed by (root, HEAD), and when each root's git last timed
+/// out. Only a timeout is remembered, and only for [`CHURN_TIMEOUT_RETRY`]: no commits or a
+/// missing `git` fail fast and may recover.
 #[derive(Default)]
 struct ChurnState {
     entries: HashMap<(PathBuf, String), HashMap<String, u32>>,
-    timed_out: HashSet<PathBuf>,
+    timed_out: HashMap<PathBuf, Instant>,
     #[cfg(test)]
     log_runs: HashMap<PathBuf, usize>,
 }
@@ -118,6 +122,16 @@ fn forget_root(root: &Path) {
     let mut state = churn_state();
     state.entries.retain(|(r, _), _| r != root);
     state.timed_out.remove(root);
+}
+
+#[cfg(test)]
+fn is_timed_out(root: &Path) -> bool {
+    churn_state().timed_out.contains_key(root)
+}
+
+#[cfg(test)]
+fn mark_timed_out_at(root: &Path, at: Instant) {
+    churn_state().timed_out.insert(root.to_path_buf(), at);
 }
 
 #[cfg(test)]
@@ -169,7 +183,7 @@ async fn run_git(
 /// `git log` run in `root`, cached per (root, HEAD). Keys are the paths relative to `root` and
 /// the same paths joined to `root`, so a node's stored path (relative or absolute) finds its
 /// count. `None` when git fails, times out or the repository has no commits; a timeout is
-/// remembered until [`clear_churn_cache`].
+/// remembered for five minutes (or until [`clear_churn_cache`]).
 pub async fn file_churn(root: &Path) -> Option<HashMap<String, u32>> {
     file_churn_using("git", root, CHURN_BUDGET).await
 }
@@ -179,12 +193,21 @@ async fn file_churn_using(
     root: &Path,
     budget: Duration,
 ) -> Option<HashMap<String, u32>> {
-    if churn_state().timed_out.contains(root) {
-        return None;
+    {
+        let mut state = churn_state();
+        match state.timed_out.get(root) {
+            Some(at) if at.elapsed() < CHURN_TIMEOUT_RETRY => return None,
+            Some(_) => {
+                state.timed_out.remove(root);
+            }
+            None => {}
+        }
     }
     let remember_timeout = |failure: GitFailure| {
         if matches!(failure, GitFailure::Timeout) {
-            churn_state().timed_out.insert(root.to_path_buf());
+            churn_state()
+                .timed_out
+                .insert(root.to_path_buf(), Instant::now());
         }
     };
     let head = match run_git(program, root, &["rev-parse", "HEAD"], budget).await {
@@ -471,15 +494,24 @@ diff --git a/gone.py b/gone.py
         std::fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+        // Executing a just-written file can fail with ETXTBSY while a parallel test forks;
+        // that is a plain failure, not a timeout, so retry until the timeout is recorded.
         let started = std::time::Instant::now();
-        let slow_result = file_churn_using(
-            script.to_str().unwrap(),
-            dir.path(),
-            Duration::from_millis(100),
-        )
-        .await;
-        assert!(slow_result.is_none());
-        assert!(started.elapsed() < Duration::from_secs(4));
+        for _ in 0..20 {
+            let result = file_churn_using(
+                script.to_str().unwrap(),
+                dir.path(),
+                Duration::from_millis(100),
+            )
+            .await;
+            assert!(result.is_none());
+            if is_timed_out(dir.path()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(is_timed_out(dir.path()), "timeout was never recorded");
+        assert!(started.elapsed() < Duration::from_secs(10));
 
         // Remembered: the real git is not tried and no git log runs.
         assert!(file_churn(dir.path()).await.is_none());
@@ -487,6 +519,23 @@ diff --git a/gone.py b/gone.py
 
         forget_root(dir.path());
         assert!(file_churn(dir.path()).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn remembered_timeout_expires_after_the_retry_window() {
+        let dir = repo();
+        commit_file(dir.path(), "a.py");
+
+        mark_timed_out_at(dir.path(), std::time::Instant::now());
+        assert!(file_churn(dir.path()).await.is_none());
+        assert!(is_timed_out(dir.path()));
+
+        let long_ago = std::time::Instant::now()
+            .checked_sub(CHURN_TIMEOUT_RETRY + Duration::from_secs(1))
+            .expect("monotonic clock is older than the retry window");
+        mark_timed_out_at(dir.path(), long_ago);
+        assert_eq!(file_churn(dir.path()).await.unwrap()["a.py"], 1);
+        assert!(!is_timed_out(dir.path()));
     }
 
     #[tokio::test]

@@ -408,8 +408,8 @@ Fica para depois:
 - ✅ Cache de `Arc<AnalysisGraph>` por `data_version` e cache de churn por (raiz, HEAD)
   (plano `docs/superpowers/plans/2026-11-24-cache-analise-churn.md`). `GraphQuery` guarda o
   `AnalysisGraph` por marcador de mudança (`data_version` + `total_changes`); o churn é guardado
-  por (raiz, HEAD), no máximo 32 entradas, e só o timeout do `git log` é lembrado até
-  `clear_churn_cache()` (sem commits ou sem `git` falha rápido e se recupera). As chaves de churn
+  por (raiz, HEAD), no máximo 32 entradas, e só o timeout do `git log` é lembrado, por 5 minutos
+  (ou até `clear_churn_cache()`; sem commits ou sem `git` falha rápido e se recupera). As chaves de churn
   cobrem a raiz canônica, então raiz com symlink não zera mais o churn. Medido neste repo
   (release): `hub_nodes` 172 ms → 6,5 ms na segunda chamada (a carga do grafo, ~165 ms, deixa de
   se repetir entre ferramentas); churn 118 ms → 1,3 ms. O Brandes das ferramentas de bridge
