@@ -34,6 +34,8 @@ pub(crate) struct SymbolCatalog {
     modules: ModuleIndex,
     /// Files each file imports, as mapped by `link_imports`.
     imported_files: HashMap<String, HashSet<String>>,
+    /// Per Rust file, each `use` alias and the path it imports (`cfg` -> `crate::config`).
+    rust_aliases: HashMap<String, HashMap<String, String>>,
 }
 
 fn is_bare(name: &str) -> bool {
@@ -104,6 +106,7 @@ impl SymbolCatalog {
             file_nodes: HashMap::new(),
             modules: ModuleIndex::new([]),
             imported_files: HashMap::new(),
+            rust_aliases: HashMap::new(),
         };
         for node in nodes {
             if node.node_type == Some(NodeType::Other("File".into())) {
@@ -271,12 +274,23 @@ impl SymbolCatalog {
     }
 
     /// Records which indexed files each file's `Imports` edges name, so that a bare name can
-    /// bind into an imported file (`ModuleIndex` maps the import text to the file).
+    /// bind into an imported file (`ModuleIndex` maps the import text to the file), and the
+    /// local alias of each Rust `use` path (`RUST_ALIAS_ATTR`; a glob import has none).
     pub(crate) fn link_imports(&mut self, edges: &[EdgeRelationship]) {
         for edge in edges.iter().filter(|e| e.edge_type == EdgeType::Imports) {
             let Some(importer) = self.symbols.get(&edge.from) else {
                 continue;
             };
+            if let Some(alias) = edge
+                .metadata
+                .get(codegraph_parser::languages::crg_shape::RUST_ALIAS_ATTR)
+                .filter(|alias| !matches!(alias.as_str(), "" | "*" | "_"))
+            {
+                self.rust_aliases
+                    .entry(importer.file.clone())
+                    .or_default()
+                    .insert(alias.clone(), edge.to.clone());
+            }
             if let Some(file) = self.modules.resolve(&importer.file, &edge.to) {
                 self.imported_files
                     .entry(importer.file.clone())
@@ -358,6 +372,71 @@ impl SymbolCatalog {
             format!("{file}::{symbol}")
         };
         self.qualified_symbol(&qualified, false)
+    }
+
+    /// Binds a Rust scoped `CALLS` (`config::load`, `Disk::open`) or an `IMPLEMENTS` trait
+    /// path to the symbol its module path names, through the Cargo layouts and the file's
+    /// `use` aliases (code-review-graph `_resolve_rust_scoped_call` and
+    /// `_resolve_rust_type_target`). Only that exact qualified name binds; anything else
+    /// (`Vec::new`, `fmt::Display`) is `None` and keeps its text.
+    pub(crate) fn rust_path_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        let importer = &self.symbols.get(&edge.from)?.file;
+        if !importer.ends_with(".rs") || self.is_path_qualified(&edge.to) {
+            return None;
+        }
+        let aliases = self.rust_aliases.get(importer);
+        let segments: Vec<&str> = edge.to.split("::").filter(|s| !s.is_empty()).collect();
+        // The first segment through the file's `use` aliases (`cfg` -> `crate::config`).
+        let expand = |segments: &[&str]| -> Option<Vec<String>> {
+            let (first, rest) = segments.split_first()?;
+            let import = aliases?.get(*first)?;
+            Some(
+                import
+                    .split("::")
+                    .chain(rest.iter().copied())
+                    .map(str::to_string)
+                    .collect(),
+            )
+        };
+        match edge.edge_type {
+            EdgeType::Calls => {
+                let (method, prefix) = segments.split_last()?;
+                if prefix.is_empty() || prefix == ["Self"] {
+                    return None;
+                }
+                let prefix: Vec<String> = expand(prefix)
+                    .unwrap_or_else(|| prefix.iter().map(|s| s.to_string()).collect());
+                let file = self.modules.resolve(importer, &prefix.join("::"))?;
+                let parent = (prefix.len() > 1)
+                    .then(|| {
+                        self.modules
+                            .resolve(importer, &prefix[..prefix.len() - 1].join("::"))
+                    })
+                    .flatten();
+                let last = prefix.last()?.as_str();
+                let qualified =
+                    if parent == Some(file) && !matches!(last, "crate" | "self" | "super") {
+                        format!("{file}::{last}.{method}")
+                    } else {
+                        format!("{file}::{method}")
+                    };
+                self.qualified_symbol(&qualified, false)
+            }
+            EdgeType::Implements => {
+                if let Some(imported) = expand(&segments)
+                    && let Some(file) = self.modules.resolve(importer, &imported.join("::"))
+                {
+                    let name = imported.last()?;
+                    return self.qualified_symbol(&format!("{file}::{name}"), false);
+                }
+                if segments.len() < 2 {
+                    return None;
+                }
+                let file = self.modules.resolve(importer, &segments.join("::"))?;
+                self.qualified_symbol(&format!("{file}::{}", segments.last()?), false)
+            }
+            _ => None,
+        }
     }
 
     /// The symbol whose qualified name is exactly `qualified` (a top-level one if asked).
@@ -464,6 +543,7 @@ impl SymbolCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rust_crates::RustCrates;
     use codegraph_core::{EdgeType, Language, Location, NodeType};
 
     fn node(file: &str, name: &str) -> CodeNode {
@@ -735,6 +815,206 @@ mod tests {
         assert_eq!(target("bee", "pkg|b", false), Some(b_file.id));
         // A receiver call still names a symbol inside the module.
         assert_eq!(target("b", "pkg|b", true), None);
+    }
+
+    /// Two Cargo crates: `app` (binary) depends on `util-lib` by path.
+    struct RustFixture {
+        catalog: SymbolCatalog,
+        run: CodeNode,
+        local: CodeNode,
+        load: CodeNode,
+        tr: CodeNode,
+        open: CodeNode,
+        shout: CodeNode,
+    }
+
+    /// `uses` are the `(alias, path)` pairs of `use` declarations in `app/src/main.rs`.
+    fn rust_fixture(uses: &[(&str, &str)]) -> RustFixture {
+        let main = file("app/src/main.rs");
+        let run = py("app/src/main.rs", "run", None);
+        let local = py("app/src/main.rs", "Local", None);
+        let load = py("app/src/config.rs", "load", None);
+        let tr = py("app/src/config.rs", "Tr", None);
+        let disk = py("app/src/store/disk.rs", "Disk", None);
+        let open = py("app/src/store/disk.rs", "Disk.open", Some("Disk"));
+        let shout = py("util-lib/src/text.rs", "shout", None);
+        let paths = [
+            "app/src/main.rs",
+            "app/src/config.rs",
+            "app/src/store.rs",
+            "app/src/store/disk.rs",
+            "util-lib/src/lib.rs",
+            "util-lib/src/text.rs",
+        ];
+        let mut nodes: Vec<CodeNode> = paths[1..].iter().map(|path| file(path)).collect();
+        nodes.extend([
+            main.clone(),
+            run.clone(),
+            local.clone(),
+            load.clone(),
+            tr.clone(),
+            disk,
+            open.clone(),
+            shout.clone(),
+        ]);
+        let mut catalog = SymbolCatalog::new(&nodes);
+        let manifests = BTreeMap::from([
+            (
+                "app".to_string(),
+                "[package]\nname = \"app\"\n[dependencies]\n\
+                 util-lib = { path = \"../util-lib\" }\n"
+                    .to_string(),
+            ),
+            (
+                "util-lib".to_string(),
+                "[package]\nname = \"util-lib\"\n".to_string(),
+            ),
+        ]);
+        let files: BTreeSet<String> = paths.iter().map(|p| p.to_string()).collect();
+        catalog.set_rust_crates(RustCrates::from_manifests(&manifests, &files));
+        let imports: Vec<_> = uses
+            .iter()
+            .map(|(alias, path)| {
+                let mut import = edge(main.id, path);
+                import.edge_type = EdgeType::Imports;
+                import.metadata.insert(
+                    codegraph_parser::languages::crg_shape::RUST_ALIAS_ATTR.into(),
+                    alias.to_string(),
+                );
+                import
+            })
+            .collect();
+        catalog.link_imports(&imports);
+        RustFixture {
+            catalog,
+            run,
+            local,
+            load,
+            tr,
+            open,
+            shout,
+        }
+    }
+
+    fn implements(from: NodeId, to: &str) -> EdgeRelationship {
+        let mut edge = edge(from, to);
+        edge.edge_type = EdgeType::Implements;
+        edge
+    }
+
+    #[test]
+    fn rust_scoped_call_binds_to_the_function_in_the_module_file() {
+        let f = rust_fixture(&[("config", "crate::config")]);
+        assert_eq!(
+            f.catalog.rust_path_target(&edge(f.run.id, "config::load")),
+            Some(f.load.id)
+        );
+        // Written in full, without the alias.
+        assert_eq!(
+            f.catalog
+                .rust_path_target(&edge(f.run.id, "crate::config::load")),
+            Some(f.load.id)
+        );
+        // The module resolves but holds no such function: no edge.
+        assert_eq!(
+            f.catalog
+                .rust_path_target(&edge(f.run.id, "config::missing")),
+            None
+        );
+    }
+
+    #[test]
+    fn rust_associated_call_binds_to_the_type_in_the_module_file() {
+        let f = rust_fixture(&[("Disk", "crate::store::disk::Disk")]);
+        assert_eq!(
+            f.catalog.rust_path_target(&edge(f.run.id, "Disk::open")),
+            Some(f.open.id)
+        );
+        assert_eq!(
+            f.catalog
+                .rust_path_target(&edge(f.run.id, "crate::store::disk::Disk::open")),
+            Some(f.open.id)
+        );
+    }
+
+    #[test]
+    fn rust_alias_import_is_expanded() {
+        let f = rust_fixture(&[("cfg", "crate::config")]);
+        assert_eq!(
+            f.catalog.rust_path_target(&edge(f.run.id, "cfg::load")),
+            Some(f.load.id)
+        );
+        // A glob import names no alias.
+        let g = rust_fixture(&[("*", "crate::config")]);
+        assert_eq!(g.catalog.rust_path_target(&edge(g.run.id, "*::load")), None);
+    }
+
+    #[test]
+    fn rust_trait_impl_binds_to_the_trait_in_another_file() {
+        let f = rust_fixture(&[("Tr", "crate::config::Tr"), ("Trait", "crate::config::Tr")]);
+        assert_eq!(
+            f.catalog.rust_path_target(&implements(f.local.id, "Tr")),
+            Some(f.tr.id)
+        );
+        // `use crate::config::Tr as Trait`: the trait keeps its own name.
+        assert_eq!(
+            f.catalog.rust_path_target(&implements(f.local.id, "Trait")),
+            Some(f.tr.id)
+        );
+        assert_eq!(
+            f.catalog
+                .rust_path_target(&implements(f.local.id, "crate::config::Tr")),
+            Some(f.tr.id)
+        );
+        // Not imported, not a path: stays text.
+        assert_eq!(
+            f.catalog.rust_path_target(&implements(f.local.id, "Other")),
+            None
+        );
+    }
+
+    #[test]
+    fn rust_std_and_unknown_paths_stay_text() {
+        let f = rust_fixture(&[("fmt", "std::fmt"), ("Serialize", "serde::Serialize")]);
+        assert_eq!(
+            f.catalog.rust_path_target(&edge(f.run.id, "Vec::new")),
+            None
+        );
+        assert_eq!(
+            f.catalog.rust_path_target(&edge(f.run.id, "fmt::format")),
+            None
+        );
+        for to in ["fmt::Display", "serde::Serialize", "Serialize"] {
+            assert_eq!(
+                f.catalog.rust_path_target(&implements(f.local.id, to)),
+                None,
+                "{to}"
+            );
+        }
+        // Only CALLS and IMPLEMENTS of `.rs` importers apply.
+        let mut uses = edge(f.run.id, "config::load");
+        uses.edge_type = EdgeType::Uses;
+        assert_eq!(f.catalog.rust_path_target(&uses), None);
+    }
+
+    #[test]
+    fn rust_dependency_crate_call_binds_into_the_other_crate() {
+        let f = rust_fixture(&[]);
+        assert_eq!(
+            f.catalog
+                .rust_path_target(&edge(f.run.id, "util_lib::text::shout")),
+            Some(f.shout.id)
+        );
+        assert_eq!(
+            f.catalog
+                .rust_path_target(&edge(f.run.id, "util-lib::text::shout")),
+            Some(f.shout.id)
+        );
+        // `text` is a module of `util-lib`, not of `app`.
+        assert_eq!(
+            f.catalog.rust_path_target(&edge(f.run.id, "text::shout")),
+            None
+        );
     }
 
     #[test]

@@ -2184,6 +2184,11 @@ impl ProjectIndexer {
         {
             return (catalog.exact_free_function(edge), ("exact", 1.0));
         }
+        // A Rust module path (`config::load`, `impl cfg::Tr for T`) binds through the Cargo
+        // layout and the file's `use` aliases; otherwise it falls through unchanged.
+        if let Some(id) = catalog.rust_path_target(edge) {
+            return (Some(id), ("import", 1.0));
+        }
         let mut target = catalog.exact(edge, &[]);
         let mut provenance = (
             if target.is_some_and(|id| edge.metadata.get("target_node_id") == Some(&id.to_string()))

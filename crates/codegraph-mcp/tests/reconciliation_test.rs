@@ -77,7 +77,10 @@ async fn incremental_catalog_matches_full_graph_and_removes_stale_definitions() 
     // The crate root is the caller, so `crate::target` anchors at `src/`. Rust paths resolve
     // only inside a Cargo package, like code-review-graph.
     std::fs::create_dir(dir.path().join("src"))?;
-    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n")?;
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\n",
+    )?;
     let caller = dir.path().join("src/lib.rs");
     let target = dir.path().join("src/target.rs");
     // `compute()` crosses files through its `use`; `missing()` names nothing and stays text.
@@ -312,10 +315,12 @@ async fn rust_imports_bind_to_files_across_crates() -> Result<()> {
             ),
             (
                 "app/src/main.rs",
-                "mod config;\nuse crate::config::load;\nuse util_lib::text::shout;\n\
-                 use std::fmt;\n\nfn main() { load(); shout(); }\n",
+                "mod config;\nuse crate::config::load;\nuse crate::config::Tr;\n\
+                 use util_lib::text::shout;\nuse std::fmt;\n\nstruct Disk;\nimpl Tr for Disk {}\n\
+                 impl fmt::Display for Disk {}\n\nfn main() { load(); shout(); }\n\
+                 fn run() { config::load(); util_lib::text::shout(); Vec::new(); }\n",
             ),
-            ("app/src/config.rs", "pub fn load() {}\n"),
+            ("app/src/config.rs", "pub fn load() {}\npub trait Tr {}\n"),
             ("util-lib/Cargo.toml", "[package]\nname = \"util-lib\"\n"),
             ("util-lib/src/lib.rs", "pub mod text;\n"),
             ("util-lib/src/text.rs", "pub fn shout() {}\n"),
@@ -334,6 +339,21 @@ async fn rust_imports_bind_to_files_across_crates() -> Result<()> {
         assert!(
             imports.iter().any(|row| row == expected),
             "missing {expected} in {imports:?}"
+        );
+    }
+    // Scoped calls and `impl Trait for T` bind across files; `std` paths stay text.
+    let store = indexer.graph_store();
+    let bound = edges_of(&store, dir.path(), "'CALLS', 'IMPLEMENTS'")?;
+    for expected in [
+        "CALLS|app/src/main.rs::run|app/src/config.rs::load",
+        "CALLS|app/src/main.rs::run|util-lib/src/text.rs::shout",
+        "CALLS|app/src/main.rs::run|Vec::new",
+        "IMPLEMENTS|app/src/main.rs::Disk|app/src/config.rs::Tr",
+        "IMPLEMENTS|app/src/main.rs::Disk|fmt::Display",
+    ] {
+        assert!(
+            bound.iter().any(|row| row == expected),
+            "missing {expected} in {bound:?}"
         );
     }
     Ok(())
