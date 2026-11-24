@@ -401,17 +401,21 @@ Fica para depois:
   parser Rust nunca grava `edges.extra.import_context`,
   então não há filtro de import type-only/pacote-pai/deferred, `load_time` é sempre true e nós
   `extra.virtual` não são excluídos do conjunto de arquivos dos ciclos.
-- Risco: não portados o cache de churn por HEAD e o "unavailable" persistente do CRG (um
-  `git log` lento custa até 5 s por chamada de review); falhas de churn só vão para o log em
-  nível debug; as
-  chaves de caminho do churn não são normalizadas (raiz com symlink pode zerar o churn em
-  silêncio); faltam o fallback de TESTED_BY por nome solto, a isenção de arquivos de migration
-  na checagem de testes e o fallback 0.05·flow_count.
+- Risco: o cache de churn por HEAD e o timeout persistente foram portados (ver abaixo); falhas
+  de churn só vão para o log em nível debug. Seguem pendentes, num plano próprio com medição de
+  paridade contra o CRG antes e depois (mudam score): o fallback de TESTED_BY por nome solto, a
+  isenção de arquivos de migration na checagem de testes e o fallback 0.05·flow_count.
+- ✅ Cache de `Arc<AnalysisGraph>` por `data_version` e cache de churn por (raiz, HEAD)
+  (plano `docs/superpowers/plans/2026-11-24-cache-analise-churn.md`). `GraphQuery` guarda o
+  `AnalysisGraph` por marcador de mudança (`data_version` + `total_changes`); o churn é guardado
+  por (raiz, HEAD), no máximo 32 entradas, e só o timeout do `git log` é lembrado até
+  `clear_churn_cache()` (sem commits ou sem `git` falha rápido e se recupera). As chaves de churn
+  cobrem a raiz canônica, então raiz com symlink não zera mais o churn. Medido neste repo
+  (release): `hub_nodes` 172 ms → 6,5 ms na segunda chamada (a carga do grafo, ~165 ms, deixa de
+  se repetir entre ferramentas); churn 118 ms → 1,3 ms. O Brandes das ferramentas de bridge
+  continua rodando a cada chamada que não bate no cache de resultado do executor.
 - `crates/codegraph-graph/src/analysis/insights.rs` tem 676 linhas (hubs, bridges, gaps, ciclos,
   surprising, questions): candidato a dividir.
-- Cache de `Arc<AnalysisGraph>` por `data_version`: toda ferramenta de análise recarrega o
-  grafo (e as de bridge rodam Brandes) dentro do `with_conn` de conexão única, serializando as
-  outras chamadas de ferramenta enquanto isso.
 - `nodes.extra` sobrescrito no re-parse: `write.rs` faz `extra = excluded.extra`, o que apaga
   chaves do CRG em bancos escritos pelas duas ferramentas.
 - `GraphQuery::get_hub_nodes(min_degree)` legado agora só é usado em teste: remover ou migrar.
