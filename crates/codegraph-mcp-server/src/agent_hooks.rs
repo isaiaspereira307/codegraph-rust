@@ -144,6 +144,28 @@ fn git_block() -> String {
     format!("{GIT_BLOCK_START}\n{GIT_BLOCK_BODY}\n{GIT_BLOCK_END}\n")
 }
 
+/// Refuses a hook whose start marker has no end marker: `strip_git_block` would otherwise
+/// drop every user line after it.
+fn check_git_block(text: &str) -> Result<()> {
+    let mut open = false;
+    for line in text.lines() {
+        match line.trim_end() {
+            GIT_BLOCK_START if open => {
+                bail!("CodeGraph git hook markers are duplicated; repair the block first")
+            }
+            GIT_BLOCK_START => open = true,
+            GIT_BLOCK_END => open = false,
+            _ => {}
+        }
+    }
+    if open {
+        bail!(
+            "CodeGraph git hook block has no end marker ({GIT_BLOCK_END}); repair the post-commit hook first"
+        );
+    }
+    Ok(())
+}
+
 /// Remove the marked block (every occurrence) and keep all other lines unchanged.
 fn strip_git_block(text: &str) -> String {
     let mut out = String::new();
@@ -210,6 +232,7 @@ fn read_hook(path: &Path) -> Result<Option<String>> {
 fn install_git_hook(project: &Path) -> Result<(PathBuf, bool)> {
     let path = post_commit_path(project)?;
     let existing = read_hook(&path)?.unwrap_or_default();
+    check_git_block(&existing)?;
     let updated = with_git_block(&existing);
     if updated == existing {
         return Ok((path, false));
@@ -231,6 +254,7 @@ fn uninstall_git_hook(project: &Path) -> Result<(PathBuf, bool)> {
     let Some(existing) = read_hook(&path)? else {
         return Ok((path, false));
     };
+    check_git_block(&existing)?;
     let stripped = strip_git_block(&existing);
     if stripped == existing {
         return Ok((path, false));
@@ -518,6 +542,7 @@ pub(crate) fn plan_git_hook_removal(
     let Some(existing) = read_hook(&path)? else {
         return Ok(None);
     };
+    check_git_block(&existing)?;
     let stripped = strip_git_block(&existing);
     if stripped == existing {
         return Ok(None);
@@ -720,6 +745,14 @@ mod tests {
         }
         assert_eq!(strip_settings(json!({})).unwrap(), json!({}));
         assert!(strip_settings(json!({"hooks": []})).is_err());
+    }
+
+    #[test]
+    fn git_block_without_end_marker_is_refused() {
+        let broken = format!("#!/bin/sh\necho mine\n{GIT_BLOCK_START}\necho after\n");
+        assert!(check_git_block(&broken).is_err());
+        assert!(check_git_block(&with_git_block("#!/bin/sh\necho mine\n")).is_ok());
+        assert!(check_git_block("#!/bin/sh\necho mine\n").is_ok());
     }
 
     #[test]

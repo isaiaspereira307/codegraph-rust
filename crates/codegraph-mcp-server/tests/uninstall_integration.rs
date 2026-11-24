@@ -293,3 +293,25 @@ fn mcp_only_file_created_by_init_is_deleted_by_uninstall() {
     ok(&run(&["uninstall"], project.path()));
     assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn git_hook_with_a_missing_end_marker_is_left_untouched() {
+    let project = project();
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(project.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let hook = project.path().join(".git/hooks/post-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    let broken = "#!/bin/sh\necho mine\n# >>> codegraph post-commit >>>\necho also mine\n";
+    fs::write(&hook, broken).unwrap();
+
+    let output = run(&["uninstall"], project.path());
+    assert!(!output.status.success());
+    assert_eq!(fs::read_to_string(&hook).unwrap(), broken);
+}

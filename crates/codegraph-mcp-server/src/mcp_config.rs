@@ -92,6 +92,12 @@ pub(crate) fn merge_codex_mcp(original: &str) -> Result<String> {
         text.push('\n');
     }
     text.push_str(&codex_block());
+    if toml::from_str::<toml::Table>(&text).is_err() {
+        bail!(
+            "config.toml defines mcp_servers as an inline table, so a [mcp_servers.codegraph] \
+             table cannot be added; add the codegraph entry to it manually"
+        );
+    }
     Ok(text)
 }
 
@@ -253,5 +259,14 @@ mod tests {
         assert_eq!(merge_codex_mcp(own).unwrap(), own);
         assert_eq!(strip_codex_mcp(own).unwrap(), own);
         assert!(merge_codex_mcp("not = [valid").is_err());
+    }
+
+    #[test]
+    fn codex_inline_mcp_servers_table_is_refused_not_corrupted() {
+        let inline = "mcp_servers = { other = { command = \"y\" } }\n";
+        let error = merge_codex_mcp(inline).unwrap_err().to_string();
+        assert!(error.contains("inline"), "{error}");
+        let inline_own = "mcp_servers = { codegraph = { command = \"/opt/cg\" } }\n";
+        assert_eq!(merge_codex_mcp(inline_own).unwrap(), inline_own);
     }
 }
