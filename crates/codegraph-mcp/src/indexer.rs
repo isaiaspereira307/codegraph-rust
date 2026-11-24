@@ -42,7 +42,8 @@ use std::collections::HashMap;
 /// and the ready marker, so a graph written by a build with another shape is rebuilt even
 /// when no source changed. Bump it whenever node kinds, edge kinds or resolution change.
 /// crg-shape-10: `cg_nodes.base_qualified` lets `finalize` drop stale `@L<line>` suffixes.
-pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-10";
+/// crg-shape-11: Rust `use` paths bind to File nodes through Cargo.toml crate layouts.
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-11";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {
@@ -1218,6 +1219,14 @@ impl ProjectIndexer {
                 info!("   🌱 Spring DI calls resolved: {spring_resolved}");
             }
             let mut catalog = crate::resolution::SymbolCatalog::new(&nodes);
+            // Rust `use` paths resolve through the Cargo.toml layouts above the indexed files.
+            let rust_files = catalog.rust_files();
+            if !rust_files.is_empty() {
+                catalog.set_rust_crates(crate::rust_crates::RustCrates::discover(
+                    &self.project_root,
+                    &rust_files,
+                ));
+            }
             // Python `from M import x` candidates that name no file leave, without text.
             catalog.retain_python_imports(&mut edges);
             catalog.link_imports(&edges);

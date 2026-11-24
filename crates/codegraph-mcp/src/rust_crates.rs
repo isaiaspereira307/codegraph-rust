@@ -1,9 +1,6 @@
 // ABOUTME: Reads Cargo.toml manifests into crate layouts and local path dependencies, following
 // ABOUTME: code-review-graph's Rust project context; feeds cross-file module resolution.
 
-// Consumed by the module resolver (Task 3) and the indexer wiring (Task 4).
-#![allow(dead_code)]
-
 use crate::module_index::normalize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -193,7 +190,8 @@ impl RustCrates {
                 continue;
             };
             for dir in ancestors(start) {
-                if file.starts_with('/') && !dir.starts_with(root_text) {
+                // Component-wise: `/proj-other` is not inside `/proj`.
+                if file.starts_with('/') && !Path::new(&dir).starts_with(root_text) {
                     break;
                 }
                 Self::read_manifest(project_root, &dir, &mut seen, &mut manifests);
@@ -403,5 +401,26 @@ mod tests {
         let files = set(&["app/src/lib.rs"]);
         let crates = RustCrates::discover(root, &files);
         assert_eq!(crates.crate_of("app/src/lib.rs").unwrap().dir, "app");
+    }
+
+    #[test]
+    fn discover_absolute_keys_stay_inside_the_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        let other = tmp.path().join("proj-other");
+        for dir in [&root, &other] {
+            std::fs::create_dir_all(dir.join("src")).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), PKG).unwrap();
+            std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+        }
+        let inside = format!("{}/src/lib.rs", root.to_string_lossy());
+        let sibling = format!("{}/src/lib.rs", other.to_string_lossy());
+        let crates = RustCrates::discover(&root, &set(&[&inside, &sibling]));
+        assert_eq!(
+            crates.crate_of(&inside).unwrap().dir,
+            root.to_string_lossy()
+        );
+        // `/…/proj-other` shares the text prefix of `/…/proj` but is not inside it.
+        assert!(crates.crate_of(&sibling).is_none());
     }
 }

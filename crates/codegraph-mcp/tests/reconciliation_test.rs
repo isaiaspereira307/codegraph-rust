@@ -74,8 +74,10 @@ async fn incremental_catalog_matches_full_graph_and_removes_stale_definitions() 
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
-    // The crate root is the caller, so `crate::target` anchors at `src/`.
+    // The crate root is the caller, so `crate::target` anchors at `src/`. Rust paths resolve
+    // only inside a Cargo package, like code-review-graph.
     std::fs::create_dir(dir.path().join("src"))?;
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"demo\"\n")?;
     let caller = dir.path().join("src/lib.rs");
     let target = dir.path().join("src/target.rs");
     // `compute()` crosses files through its `use`; `missing()` names nothing and stays text.
@@ -293,6 +295,47 @@ async fn unresolved_call_is_kept_as_text() -> Result<()> {
         )?,
         ["CALLS|a.py::f|print", "IMPORTS_FROM|a.py|os"]
     );
+    Ok(())
+}
+
+/// Rust `use` paths bind to File nodes through Cargo layouts: `crate::` inside the importer's
+/// crate, a path dependency's name to that crate's modules; `std` stays text.
+#[tokio::test]
+async fn rust_imports_bind_to_files_across_crates() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(module_path!(), "::rust_imports_bind_to_files_across_crates"),
+        &[
+            (
+                "app/Cargo.toml",
+                "[package]\nname = \"app\"\n\n[dependencies]\n\
+                 util-lib = { path = \"../util-lib\" }\n",
+            ),
+            (
+                "app/src/main.rs",
+                "mod config;\nuse crate::config::load;\nuse util_lib::text::shout;\n\
+                 use std::fmt;\n\nfn main() { load(); shout(); }\n",
+            ),
+            ("app/src/config.rs", "pub fn load() {}\n"),
+            ("util-lib/Cargo.toml", "[package]\nname = \"util-lib\"\n"),
+            ("util-lib/src/lib.rs", "pub mod text;\n"),
+            ("util-lib/src/text.rs", "pub fn shout() {}\n"),
+        ],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let imports = edges_of(&indexer.graph_store(), dir.path(), "'IMPORTS_FROM'")?;
+    for expected in [
+        "IMPORTS_FROM|app/src/main.rs|app/src/config.rs",
+        "IMPORTS_FROM|app/src/main.rs|util-lib/src/text.rs",
+        "IMPORTS_FROM|app/src/main.rs|std::fmt",
+    ] {
+        assert!(
+            imports.iter().any(|row| row == expected),
+            "missing {expected} in {imports:?}"
+        );
+    }
     Ok(())
 }
 

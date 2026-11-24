@@ -2,6 +2,7 @@
 // ABOUTME: Preserves ambiguous aliases and indexes lexical candidates by character trigrams.
 
 use crate::module_index::ModuleIndex;
+use crate::rust_crates::RustCrates;
 use codegraph_core::{CodeNode, EdgeRelationship, EdgeType, NodeId, NodeType};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -79,6 +80,21 @@ fn trigrams(name: &str) -> BTreeSet<String> {
 }
 
 impl SymbolCatalog {
+    /// Rebuilds the module index so Rust `use` paths resolve through these Cargo layouts.
+    pub(crate) fn set_rust_crates(&mut self, crates: RustCrates) {
+        self.modules =
+            ModuleIndex::new(self.file_nodes.keys().map(String::as_str)).with_rust_crates(crates);
+    }
+
+    /// Indexed `.rs` files, sorted: the importers `RustCrates::discover` reads manifests for.
+    pub(crate) fn rust_files(&self) -> std::collections::BTreeSet<String> {
+        self.file_nodes
+            .keys()
+            .filter(|file| file.ends_with(".rs"))
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn new(nodes: &[CodeNode]) -> Self {
         let mut catalog = Self {
             aliases: BTreeMap::new(),

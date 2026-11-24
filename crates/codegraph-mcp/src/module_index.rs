@@ -134,8 +134,6 @@ impl ModuleIndex {
     }
 
     /// Supplies the Cargo layouts Rust imports resolve through.
-    // The indexer wiring (Task 4) is the first non-test caller.
-    #[allow(dead_code)]
     pub(crate) fn with_rust_crates(mut self, crates: RustCrates) -> Self {
         self.rust_crates = crates;
         self
