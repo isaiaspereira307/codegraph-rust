@@ -282,7 +282,7 @@ demanda, depois do MVP.
    Feito: `canonical_file_key` (core) gera a chave relativa à raiz para o hash do ID; nós
    `File` usam a chave como nome; o caminho de diretórios (`Directory`) resolve pela mesma
    chave. Fixture de 2 arquivos em `.`, caminho absoluto e `./../fx/.`: mesmos UUIDs.
-   `GRAPH_SHAPE_VERSION` virou `crg-shape-8` (força rebuild de grafos antigos). Pendente:
+   `GRAPH_SHAPE_VERSION` virou `crg-shape-8` (hoje `crg-shape-10`; força rebuild de grafos antigos). Pendente:
    `qualified_name` guarda o caminho cru, então `..` não é normalizado nessa coluna.
 2. ✅ **`line` das arestas**: preencher a linha da chamada/import em CALLS e IMPORTS_FROM (hoje
    0, e o `TESTED_BY` herda o 0), a partir do `source_span`, como o CRG grava. O
@@ -396,10 +396,9 @@ Fica para depois:
   (Decisão 3 do plano).
 - Gaps de import não portados: ciclos de import quase nunca aparecem em bancos indexados pelo
   Rust (resolução de módulo Rust entre arquivos pendente, Fase 2). Medido no ledger da Task 10:
-  8 de 1831 arestas IMPORTS_FROM deste repo ligavam dois `File`. Rebuild de 2026-11-24: 141 de
-  1860, mas 127 delas apontam para nós `File` com sufixo `@L1` (174 dos 200 `File` deste repo
-  têm o sufixo no `qualified_name`, só aqui, não nos corpora; investigar a colisão de
-  `qualified_name` que gera o sufixo). O parser Rust nunca grava `edges.extra.import_context`,
+  8 de 1831 arestas IMPORTS_FROM deste repo ligavam dois `File`; depois do rebuild de 2026-11-24,
+  141 de 1860 (o sufixo `@L1` que sujava 174 dos 200 nós `File` foi corrigido, ver abaixo). O
+  parser Rust nunca grava `edges.extra.import_context`,
   então não há filtro de import type-only/pacote-pai/deferred, `load_time` é sempre true e nós
   `extra.virtual` não são excluídos do conjunto de arquivos dos ciclos.
 - Risco: não portados o cache de churn por HEAD e o "unavailable" persistente do CRG (um
@@ -417,8 +416,10 @@ Fica para depois:
   chaves do CRG em bancos escritos pelas duas ferramentas.
 - `GraphQuery::get_hub_nodes(min_degree)` legado agora só é usado em teste: remover ou migrar.
 - Tempo e memória do pós-processo em corpus grande (50k+ nós) não medidos.
-- Investigar como bug da Fase 2 o sufixo `@L1` nos nós `File` (ver o item de gaps de import
-  acima).
+- ✅ Sufixo `@L1` nos nós `File` (plano `docs/superpowers/plans/2026-11-24-higiene-licenca-e-sufixo-l1.md`):
+  o writer dava `base@L<linha>` enquanto um UUID antigo ainda ocupava o nome e o mantinha para
+  sempre. `cg_nodes.base_qualified` + normalização no `finalize` (nós, `cg_nodes` e arestas);
+  `GRAPH_SHAPE_VERSION` virou `crg-shape-10`. Este repo: 0 nós `File` com `@L`.
 - Não relacionado à Fase 4: o Rust grava nós `Directory` e CONTAINS raiz → subdiretório que o
   CRG não tem (CONTAINS da sonda python 0.958 → 0.902, sonda python-imports 1.000 → 0.909).
 
