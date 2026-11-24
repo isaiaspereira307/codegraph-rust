@@ -219,6 +219,9 @@ impl<'a> Collector<'a> {
                 // REVOLUTIONARY: Extract import edges during same AST traversal
                 let import_node_id = code.id;
                 let import_span = self.span_for(&node);
+                // Like code-review-graph's import map, only a file-level `use` sets the alias
+                // that scoped calls expand through; one in a `mod { }` or function body does not.
+                let top_level = node.parent().is_some_and(|p| p.kind() == "source_file");
                 for (alias, import) in &pairs {
                     let edge = EdgeRelationship {
                         from: import_node_id,
@@ -228,7 +231,9 @@ impl<'a> Collector<'a> {
                             let mut meta = HashMap::new();
                             meta.insert("import_type".to_string(), "use_declaration".to_string());
                             meta.insert("source_file".to_string(), self.file_path.to_string());
-                            meta.insert(crg_shape::RUST_ALIAS_ATTR.to_string(), alias.clone());
+                            if top_level {
+                                meta.insert(crg_shape::RUST_ALIAS_ATTR.to_string(), alias.clone());
+                            }
                             meta
                         },
                         span: Some(import_span.clone()),
@@ -1259,6 +1264,37 @@ mod tests {
         ]
         .iter()
         .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        assert_eq!(pairs, want);
+    }
+
+    /// code-review-graph builds its import map from the file's top-level items only, so a
+    /// `use` inside an inline `mod` or a function body imports but sets no alias.
+    #[test]
+    fn nested_use_edges_record_no_alias() {
+        let r = extract_rust(
+            "use a::B;\nmod t {\n    use c::D;\n}\nfn f() {\n    use e::F;\n}\n",
+            "m.rs",
+        );
+        let pairs: BTreeSet<(String, Option<String>)> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Imports)
+            .map(|e| {
+                (
+                    e.to.clone(),
+                    e.metadata
+                        .get(crate::languages::crg_shape::RUST_ALIAS_ATTR)
+                        .cloned(),
+                )
+            })
+            .collect();
+        let want: BTreeSet<(String, Option<String>)> = [
+            ("a::B".to_string(), Some("B".to_string())),
+            ("c::D".to_string(), None),
+            ("e::F".to_string(), None),
+        ]
+        .into_iter()
         .collect();
         assert_eq!(pairs, want);
     }
