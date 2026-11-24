@@ -1302,9 +1302,10 @@ impl ProjectIndexer {
                             CodeEdge::unresolved(edge.from, &text, edge.edge_type.clone());
                         record.metadata.extend(edge.metadata.clone());
                         if text != edge.to {
-                            record
-                                .metadata
-                                .insert("claimed_endpoint".into(), edge.to.clone());
+                            let claimed = catalog
+                                .rust_path_claim(edge)
+                                .unwrap_or_else(|| edge.to.clone());
+                            record.metadata.insert("claimed_endpoint".into(), claimed);
                         }
                         record
                     }
@@ -2245,6 +2246,14 @@ impl ProjectIndexer {
                 .to
                 .split_once("::")
                 .and_then(|(_, symbol)| symbol.rsplit(['.', ':']).find(|part| !part.is_empty()))
+        {
+            return plain.to_string();
+        }
+        // A Rust scoped call whose module path names a file is qualified into it, so a
+        // missing item settles the same way (`config::load` -> `load`).
+        if edge.edge_type == EdgeType::Calls
+            && catalog.rust_path_claim(edge).is_some()
+            && let Some(plain) = edge.to.rsplit("::").find(|part| !part.is_empty())
         {
             return plain.to_string();
         }

@@ -380,6 +380,13 @@ impl SymbolCatalog {
     /// `_resolve_rust_type_target`). Only that exact qualified name binds; anything else
     /// (`Vec::new`, `fmt::Display`) is `None` and keeps its text.
     pub(crate) fn rust_path_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        self.qualified_symbol(&self.rust_path_claim(edge)?, false)
+    }
+
+    /// The qualified name a Rust scoped call or trait path claims (`<file>::load`,
+    /// `<file>::Disk.open`, `<file>::Tr`) once its module path names an indexed file, whether
+    /// or not that symbol exists. `None` when the path names no file.
+    pub(crate) fn rust_path_claim(&self, edge: &EdgeRelationship) -> Option<String> {
         let importer = &self.symbols.get(&edge.from)?.file;
         if !importer.ends_with(".rs") || self.is_path_qualified(&edge.to) {
             return None;
@@ -420,20 +427,20 @@ impl SymbolCatalog {
                     } else {
                         format!("{file}::{method}")
                     };
-                self.qualified_symbol(&qualified, false)
+                Some(qualified)
             }
             EdgeType::Implements => {
                 if let Some(imported) = expand(&segments)
                     && let Some(file) = self.modules.resolve(importer, &imported.join("::"))
                 {
                     let name = imported.last()?;
-                    return self.qualified_symbol(&format!("{file}::{name}"), false);
+                    return Some(format!("{file}::{name}"));
                 }
                 if segments.len() < 2 {
                     return None;
                 }
                 let file = self.modules.resolve(importer, &segments.join("::"))?;
-                self.qualified_symbol(&format!("{file}::{}", segments.last()?), false)
+                Some(format!("{file}::{}", segments.last()?))
             }
             _ => None,
         }
@@ -920,6 +927,29 @@ mod tests {
             f.catalog
                 .rust_path_target(&edge(f.run.id, "config::missing")),
             None
+        );
+    }
+
+    /// code-review-graph qualifies the call into the module file anyway, then
+    /// `_settle_unbound_endpoints` turns the missing endpoint back into the plain name.
+    #[test]
+    fn rust_scoped_call_to_a_missing_item_keeps_the_plain_name() {
+        let f = rust_fixture(&[("config", "crate::config")]);
+        let missing = edge(f.run.id, "config::missing");
+        assert_eq!(
+            f.catalog.rust_path_claim(&missing).as_deref(),
+            Some("app/src/config.rs::missing")
+        );
+        assert_eq!(
+            crate::indexer::ProjectIndexer::unbound_target(&f.catalog, &missing),
+            "missing"
+        );
+        // A prefix that names no module file keeps the text.
+        let vec = edge(f.run.id, "Vec::new");
+        assert_eq!(f.catalog.rust_path_claim(&vec), None);
+        assert_eq!(
+            crate::indexer::ProjectIndexer::unbound_target(&f.catalog, &vec),
+            "Vec::new"
         );
     }
 
