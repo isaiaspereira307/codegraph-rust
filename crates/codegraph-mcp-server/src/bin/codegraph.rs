@@ -64,6 +64,11 @@ enum Commands {
         hooks: Option<project_init::HookSelection>,
         #[arg(
             long,
+            help = "Also register the MCP server (.mcp.json for Claude, .codex/config.toml for Codex)"
+        )]
+        mcp: bool,
+        #[arg(
+            long,
             help = "Set up hooks/instructions without loading providers or indexing"
         )]
         no_index: bool,
@@ -594,13 +599,14 @@ fn main() -> Result<()> {
     if let Commands::Init {
         ref path,
         hooks,
+        mcp,
         no_index,
         index_tier,
         workers,
     } = cli.command
     {
         let invoking_directory = std::env::current_dir()?;
-        let project = project_init::prepare(path, hooks)?;
+        let project = project_init::prepare(path, hooks, mcp)?;
         if no_index {
             eprintln!("Project setup complete; indexing skipped (--no-index).");
             return Ok(());

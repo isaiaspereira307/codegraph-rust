@@ -224,3 +224,72 @@ fn a_users_own_skill_with_the_same_name_is_kept() {
             .exists()
     );
 }
+
+#[test]
+fn mcp_flag_registers_servers_and_uninstall_removes_only_ours() {
+    let project = project();
+    fs::write(
+        project.path().join(".mcp.json"),
+        r#"{"mcpServers":{"other":{"command":"x"}}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(project.path().join(".codex")).unwrap();
+    fs::write(
+        project.path().join(".codex/config.toml"),
+        "# mine\nmodel = \"m\"\n",
+    )
+    .unwrap();
+
+    ok(&run(
+        &["init", "--hooks", "both", "--mcp", "--no-index"],
+        project.path(),
+    ));
+    let mcp: Value = serde_json::from_str(&read(project.path(), ".mcp.json")).unwrap();
+    assert_eq!(mcp["mcpServers"]["codegraph"]["args"][0], "start");
+    assert_eq!(mcp["mcpServers"]["other"]["command"], "x");
+    let toml = read(project.path(), ".codex/config.toml");
+    assert!(toml.starts_with("# mine\n") && toml.contains("[mcp_servers.codegraph]"));
+
+    ok(&run(&["uninstall"], project.path()));
+    let mcp: Value = serde_json::from_str(&read(project.path(), ".mcp.json")).unwrap();
+    assert_eq!(
+        mcp,
+        serde_json::json!({"mcpServers":{"other":{"command":"x"}}})
+    );
+    assert_eq!(
+        read(project.path(), ".codex/config.toml"),
+        "# mine\nmodel = \"m\"\n"
+    );
+}
+
+#[test]
+fn mcp_files_are_not_created_without_the_flag_and_mcp_needs_a_harness() {
+    let project = project();
+    ok(&run(
+        &["init", "--hooks", "both", "--no-index"],
+        project.path(),
+    ));
+    assert!(!project.path().join(".mcp.json").exists());
+    assert!(!project.path().join(".codex/config.toml").exists());
+
+    let other = tempfile::tempdir().unwrap();
+    let output = run(
+        &["init", "--hooks", "none", "--mcp", "--no-index"],
+        other.path(),
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--hooks"));
+    assert_eq!(fs::read_dir(other.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn mcp_only_file_created_by_init_is_deleted_by_uninstall() {
+    let project = tempfile::tempdir().unwrap();
+    ok(&run(
+        &["init", "--hooks", "both", "--mcp", "--no-index"],
+        project.path(),
+    ));
+    assert!(project.path().join(".mcp.json").exists());
+    ok(&run(&["uninstall"], project.path()));
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+}

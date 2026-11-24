@@ -6,6 +6,7 @@ pub mod agent_hooks;
 pub mod http_config;
 #[cfg(feature = "server-http")]
 pub mod http_server;
+pub mod mcp_config;
 pub mod official_server;
 pub mod project_init;
 pub mod prompts;

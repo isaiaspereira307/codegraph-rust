@@ -2,7 +2,7 @@
 // ABOUTME: Setup is provider-independent, preserves unrelated content, and is repeatable.
 
 use crate::agent_hooks::{self, Harness};
-use crate::{skills, uninstall};
+use crate::{mcp_config, skills, uninstall};
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use std::{
@@ -49,7 +49,7 @@ struct GuidanceChange {
 }
 
 /// Finish all project-local setup before the caller loads providers or starts indexing.
-pub fn prepare(project: &Path, requested: Option<HookSelection>) -> Result<PathBuf> {
+pub fn prepare(project: &Path, requested: Option<HookSelection>, mcp: bool) -> Result<PathBuf> {
     let project = agent_hooks::project_directory(project)?;
     eprintln!("Step 1: Project-local Claude/Codex hooks");
     let selection = if let Some(selection) = requested {
@@ -72,6 +72,9 @@ pub fn prepare(project: &Path, requested: Option<HookSelection>) -> Result<PathB
         prompt_selection(&mut io::stdin().lock(), &mut io::stderr().lock())?
     };
 
+    if mcp && selection == HookSelection::None {
+        bail!("--mcp needs a harness: pass --hooks claude|codex|both. No files were changed.");
+    }
     // Validate every selected setting and both instruction files before any writes.
     let hooks = selection
         .harness()
@@ -81,6 +84,11 @@ pub fn prepare(project: &Path, requested: Option<HookSelection>) -> Result<PathB
     let guidance = guidance_changes(&project)?;
     let skills = if selection.includes_claude() {
         skills::plan_install(&project)?
+    } else {
+        Vec::new()
+    };
+    let mcp_edits = if mcp {
+        mcp_config::plan_install(&project, selection)?
     } else {
         Vec::new()
     };
@@ -117,6 +125,16 @@ pub fn prepare(project: &Path, requested: Option<HookSelection>) -> Result<PathB
             uninstall::apply(path, edit)?;
             eprintln!("Updated {}", path.display());
         }
+    }
+    if !mcp_edits.is_empty() {
+        eprintln!("Step 4: MCP server registration");
+        for (path, edit) in &mcp_edits {
+            uninstall::apply(path, edit)?;
+            eprintln!("Updated {}", path.display());
+        }
+    }
+    if mcp && selection.includes_codex() {
+        eprintln!("Note: Codex reads project .codex/config.toml only for trusted projects.");
     }
     Ok(project)
 }
@@ -380,7 +398,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         fs::write(project.path().join("AGENTS.md"), "Team instructions\n").unwrap();
         fs::write(project.path().join("CLAUDE.md"), BEGIN).unwrap();
-        assert!(prepare(project.path(), Some(HookSelection::Both)).is_err());
+        assert!(prepare(project.path(), Some(HookSelection::Both), false).is_err());
         assert!(!project.path().join(".claude").exists());
         assert!(!project.path().join(".codex").exists());
         assert_eq!(
@@ -397,7 +415,7 @@ mod tests {
         let target = outside.path().join("CLAUDE.md");
         fs::write(&target, "Outside instructions\n").unwrap();
         std::os::unix::fs::symlink(&target, project.path().join("CLAUDE.md")).unwrap();
-        assert!(prepare(project.path(), Some(HookSelection::Both)).is_err());
+        assert!(prepare(project.path(), Some(HookSelection::Both), false).is_err());
         assert_eq!(
             fs::read_to_string(target).unwrap(),
             "Outside instructions\n"

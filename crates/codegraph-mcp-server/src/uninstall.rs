@@ -3,7 +3,7 @@
 
 use crate::agent_hooks;
 use crate::project_init::{self, HookSelection};
-use crate::skills;
+use crate::{mcp_config, skills};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::fs;
@@ -47,6 +47,7 @@ pub fn run(
     if selection.includes_claude() {
         plan.extend(skills::plan_uninstall(&project)?);
     }
+    plan.extend(mcp_config::plan_uninstall(&project, selection)?);
     plan.extend(agent_hooks::plan_git_hook_removal(&project)?);
     if purge_index {
         let index = project.join(".code-review-graph");
