@@ -533,6 +533,14 @@ impl CodeGraphMCPServer {
     }
 
     #[tool(
+        description = "Review questions generated from the graph: bridge nodes, untested hubs, cross-community surprises, thin communities and untested hotspots."
+    )]
+    async fn get_suggested_questions(&self) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_suggested_questions", &serde_json::json!({}))
+            .await
+    }
+
+    #[tool(
         description = "List communities: clusters of closely related functions and classes with size, cohesion and a sample of members."
     )]
     async fn list_communities(

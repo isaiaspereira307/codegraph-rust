@@ -80,6 +80,7 @@ impl GraphToolSchemas {
             Self::get_bridge_nodes(),
             Self::get_knowledge_gaps(),
             Self::get_surprising_connections(),
+            Self::get_suggested_questions(),
         ]
     }
 
@@ -741,6 +742,18 @@ impl GraphToolSchemas {
         }
     }
 
+    /// Schema for get_suggested_questions (review prompts)
+    pub fn get_suggested_questions() -> ToolSchema {
+        ToolSchema {
+            name: "get_suggested_questions".to_string(),
+            description: "Review questions generated from the graph: bridge nodes (up to 3), \
+                untested hubs (3), cross-community surprises (3), thin communities (2) and \
+                untested hotspots (2). Each has category, question, target and priority."
+                .to_string(),
+            parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+        }
+    }
+
     /// Schema for get_reverse_dependencies function
     pub fn get_reverse_dependencies() -> ToolSchema {
         ToolSchema {
@@ -821,7 +834,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 26, "Should have exactly 26 tool schemas");
+        assert_eq!(schemas.len(), 27, "Should have exactly 27 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -849,7 +862,7 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 26);
+        assert_eq!(names.len(), 27);
         for flow_tool in [
             "list_flows",
             "get_flow",
@@ -860,6 +873,7 @@ mod tests {
             "get_bridge_nodes",
             "get_knowledge_gaps",
             "get_surprising_connections",
+            "get_suggested_questions",
         ] {
             assert!(names.contains(&flow_tool.to_string()), "{flow_tool}");
         }

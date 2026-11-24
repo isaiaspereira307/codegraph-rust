@@ -513,3 +513,97 @@ fn import_context_is_read_from_edge_extra() {
     assert_eq!(g.edges[0].import_context.as_deref(), Some("type_only"));
     assert_eq!(g.edges[1].import_context, None);
 }
+
+// ---- suggested questions ----
+
+use codegraph_graph::analysis::insights::suggested_questions;
+
+#[test]
+fn questions_in_crg_order_with_literal_text() {
+    let mut nodes: Vec<N> = vec![
+        (1, "Function", "a.py::c", "a.py", false, Some(1)),
+        (2, "Function", "a.py::h", "a.py", false, Some(1)),
+        (3, "Function", "a.py::t", "a.py", true, Some(1)),
+    ];
+    let leaves = ["l1", "l2", "l3", "l4", "l5"];
+    let qns: Vec<String> = leaves.iter().map(|l| format!("b.py::{l}")).collect();
+    for (i, qn) in qns.iter().enumerate() {
+        nodes.push((
+            4 + i as i64,
+            "Function",
+            qn.as_str(),
+            "b.py",
+            false,
+            Some(2),
+        ));
+    }
+    let mut edges = vec![
+        edge("CALLS", "a.py::c", "a.py::h"),
+        edge("TESTED_BY", "a.py::c", "a.py::t"),
+    ];
+    edges.extend(qns.iter().map(|q| edge("CALLS", "a.py::h", q)));
+    let g = mem_graph(&nodes, edges);
+    let communities = [
+        community(1, "core"),
+        community(2, "leaves"),
+        community(3, "tiny"),
+    ];
+    let got: Vec<(String, String, String, String)> = suggested_questions(&g, &communities)
+        .into_iter()
+        .map(|q| (q.category.into(), q.question, q.target, q.priority.into()))
+        .collect();
+    let row = |c: &str, q: &str, t: &str, p: &str| {
+        (c.to_string(), q.to_string(), t.to_string(), p.to_string())
+    };
+    let want = vec![
+        row(
+            "bridge_node",
+            "'h' is a critical connector between multiple code regions. Is it adequately tested and documented?",
+            "a.py::h",
+            "high",
+        ),
+        row(
+            "hub_risk",
+            "Hub node 'h' has 6 connections but no direct test coverage. Should it be tested?",
+            "a.py::h",
+            "high",
+        ),
+        row(
+            "hub_risk",
+            "Hub node 't' has 1 connections but no direct test coverage. Should it be tested?",
+            "a.py::t",
+            "high",
+        ),
+        row(
+            "surprising_connection",
+            "'h' (community 1) calls 'l1' (community 2). Is this coupling intentional?",
+            "a.py::h",
+            "medium",
+        ),
+        row(
+            "surprising_connection",
+            "'h' (community 1) calls 'l2' (community 2). Is this coupling intentional?",
+            "a.py::h",
+            "medium",
+        ),
+        row(
+            "surprising_connection",
+            "'h' (community 1) calls 'l3' (community 2). Is this coupling intentional?",
+            "a.py::h",
+            "medium",
+        ),
+        row(
+            "thin_community",
+            "Community 'tiny' has only 0 member(s). Should it be merged with a neighbor?",
+            "community:3",
+            "low",
+        ),
+        row(
+            "untested_hotspot",
+            "'h' has 6 connections but no test coverage. Is this a risk?",
+            "a.py::h",
+            "medium",
+        ),
+    ];
+    assert_eq!(got, want);
+}

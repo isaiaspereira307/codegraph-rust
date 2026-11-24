@@ -398,6 +398,7 @@ impl GraphToolExecutor {
                 "get_hub_nodes" => self.execute_get_hub_nodes(parameters.clone()).await?,
                 "get_bridge_nodes" => self.execute_get_bridge_nodes(parameters.clone()).await?,
                 "get_knowledge_gaps" => self.execute_get_knowledge_gaps(parameters.clone()).await?,
+                "get_suggested_questions" => self.execute_get_suggested_questions().await?,
                 "get_surprising_connections" => {
                     self.execute_get_surprising_connections(parameters.clone())
                         .await?
@@ -1281,6 +1282,27 @@ impl GraphToolExecutor {
         }))
     }
 
+    /// Execute get_suggested_questions - review prompts from the graph analyses
+    async fn execute_get_suggested_questions(&self) -> Result<JsonValue> {
+        let questions =
+            self.graph_query.suggested_questions().await.map_err(|e| {
+                McpError::Protocol(format!("get_suggested_questions failed: {e:#}"))
+            })?;
+        let count_of = |p: &str| questions.iter().filter(|q| q.priority == p).count();
+        Ok(json!({
+            "tool": "get_suggested_questions",
+            "parameters": {},
+            "result": {
+                "status": "ok",
+                "summary": format!("{} review question(s)", questions.len()),
+                "questions": questions,
+                "count": questions.len(),
+                "by_priority": { "high": count_of("high"), "medium": count_of("medium"),
+                                 "low": count_of("low") },
+            }
+        }))
+    }
+
     /// Execute get_surprising_connections - edges ranked by surprise score
     async fn execute_get_surprising_connections(&self, params: JsonValue) -> Result<JsonValue> {
         let top_n = params["top_n"].as_i64().unwrap_or(15).clamp(1, 100) as usize;
@@ -1463,13 +1485,13 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 26);
+        assert_eq!(schemas.len(), 27);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 26);
+        assert_eq!(names.len(), 27);
         assert!(names.contains(&"get_review_context".to_string()));
         assert!(names.contains(&"detect_changes".to_string()));
         assert!(names.contains(&"get_impact_radius".to_string()));

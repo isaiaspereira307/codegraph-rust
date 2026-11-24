@@ -162,6 +162,7 @@ async fn test_tool_discovery() -> Result<()> {
         "get_bridge_nodes",
         "get_knowledge_gaps",
         "get_surprising_connections",
+        "get_suggested_questions",
     ];
     expected.sort();
     assert_eq!(discovered, expected);

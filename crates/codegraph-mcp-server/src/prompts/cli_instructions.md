@@ -32,6 +32,7 @@ that ID to the other tools:
 | Chokepoints between code regions | `get_bridge_nodes` | `top_n`, `detail_level` |
 | Structural weaknesses: isolated, untested, thin, import cycles | `get_knowledge_gaps` | `max_per_category`, `detail_level` |
 | Unexpected coupling between regions | `get_surprising_connections` | `top_n`, `detail_level` |
+| Review questions (bridges, untested hubs, surprises, thin communities) | `get_suggested_questions` | none |
 | Risky functions to review | `find_complexity_hotspots` | `min_complexity`, `limit` |
 | Execution flows from entry points, most critical first | `list_flows` | `sort_by`, `limit`, `kind`, `detail_level` |
 | One flow with its steps (and source) | `get_flow` | `flow_id` or `flow_name`, `include_source`, `max_steps` |

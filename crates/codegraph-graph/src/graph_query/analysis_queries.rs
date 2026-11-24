@@ -477,6 +477,20 @@ impl GraphQuery {
             .await
     }
 
+    /// Review questions generated from bridges, hubs, surprises and gaps.
+    pub async fn suggested_questions(&self) -> Result<Vec<crate::analysis::insights::Question>> {
+        self.store()
+            .with_conn(|conn| {
+                let graph = crate::analysis::AnalysisGraph::load(conn)?;
+                let communities = read_communities(conn, "size", 0)?;
+                Ok(crate::analysis::insights::suggested_questions(
+                    &graph,
+                    &communities,
+                ))
+            })
+            .await
+    }
+
     /// Every edge with a positive surprise score, highest first.
     pub async fn surprising_connections(
         &self,

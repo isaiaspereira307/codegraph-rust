@@ -25,6 +25,7 @@ the server side.
 | "Which nodes are chokepoints between regions?" | `get_bridge_nodes` |
 | "Where are the weak spots (untested hotspots, import cycles)?" | `get_knowledge_gaps` |
 | "Which dependencies are unexpected?" | `get_surprising_connections` |
+| "What should a reviewer ask about this codebase?" | `get_suggested_questions` |
 | "Which execution flows exist, and which matter most?" | `list_flows`, `get_flow` |
 | "Which flows does this change reach?" | `get_affected_flows` |
 | "How is the code clustered?" | `list_communities`, `get_community` |
