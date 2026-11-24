@@ -1095,7 +1095,9 @@ Tres defeitos achados na medicao e corrigidos antes destes numeros:
 
 Corpus: a linha rust segue 1.000 em nos, CALLS, CONTAINS, IMPLEMENTS, IMPORTS_FROM, TESTED_BY,
 flows e ARI. Nas outras linguagens so mudou o ARI de python (0.403 -> 0.909, mesmas 8/5
-comunidades; o Leiden do Rust nao e deterministico ali e o parser python nao mudou).
+comunidades; o parser python nao mudou e a causa nao foi atribuida: nao se verificou se
+vem de variacao do Leiden de um dos lados, entao indexar duas vezes e comparar `community_id`
+fica pendente).
 
 Grafo inteiro deste repositorio (HEAD `3840ab1`, inclui a sonda):
 
@@ -1117,6 +1119,6 @@ O que resta:
   `coordination/mod.rs` ficam texto no CRG e o Rust liga ao no do mesmo arquivo (4).
 - CALLS (393 so no CRG, 281 so no Rust): a maior parte vem dos 32 nos com sufixo divergente
   (`@L<linha>` no Rust, `:S<hash>` no CRG, funcoes duplicadas por `cfg`) e da resolucao por nome
-  solto/lexica (100 chamadas que o CRG deixa texto e o Rust liga; 58 que so o CRG liga). Ligadas a
+  solto/lexica (100 chamadas que o CRG deixa texto e o Rust liga; das 393 so no CRG, so 12 o CRG liga e o Rust deixa como texto, o resto tem alvo de no divergente). Ligadas a
   caminhos Rust: 59 `Tipo::m` que o CRG deixa texto e o Rust liga por busca exata (fora deste
   plano), mais os limites de `pub use`, glob e `mod` listados no PLANO.md.
