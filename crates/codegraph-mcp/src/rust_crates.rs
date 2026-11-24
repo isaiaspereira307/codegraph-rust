@@ -121,10 +121,13 @@ impl RustCrates {
                 Some((normalize(dir), table))
             })
             .collect();
+        // Layout paths are normalized like the manifest dirs: `./app/src/main.rs` is
+        // `app/src/main.rs`.
+        let files: BTreeSet<String> = files.iter().map(|file| normalize(file)).collect();
         let mut crates: BTreeMap<String, CrateLayout> = parsed
             .iter()
             .filter_map(|(dir, table)| {
-                layout_of(dir, table, files).map(|layout| (dir.clone(), layout))
+                layout_of(dir, table, &files).map(|layout| (dir.clone(), layout))
             })
             .collect();
         let known: BTreeSet<String> = crates.keys().cloned().collect();
@@ -412,6 +415,21 @@ mod tests {
         let files = set(&["app/src/lib.rs"]);
         let crates = RustCrates::discover_from(root, root, &files);
         assert_eq!(crates.crate_of("app/src/lib.rs").unwrap().dir, "app");
+    }
+
+    /// `codegraph index .` spells keys `./app/src/main.rs`; the layout still finds its root.
+    #[test]
+    fn discover_dot_prefixed_keys_find_the_crate_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("app/src")).unwrap();
+        std::fs::write(root.join("app/Cargo.toml"), PKG).unwrap();
+        std::fs::write(root.join("app/src/main.rs"), "").unwrap();
+        let files = set(&["./app/src/main.rs"]);
+        let crates = RustCrates::discover_from(root, root, &files);
+        let layout = crates.crate_of("app/src/main.rs").unwrap();
+        assert_eq!(layout.dir, "app");
+        assert_eq!(layout.root_file, "app/src/main.rs");
     }
 
     /// `codegraph index sub/dir` run from `base`: keys are relative to `base`, not the root.
