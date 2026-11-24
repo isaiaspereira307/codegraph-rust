@@ -1,5 +1,7 @@
 # CodeGraph AI providers: embeddings + LLMs
 
+> **Legacy:** this guide describes the previous CodeGraph (SurrealDB, embeddings, LLM providers, agentic tools) and is pending a rewrite. See the [README](../README.md) and `codegraph --help` for the current product.
+
 This document explains how to configure CodeGraph’s embedding providers (for indexing/search) and LLM providers (for the built-in agentic tools).
 
 It is based on the runtime configuration loader in `crates/codegraph-core/src/config_manager.rs` and provider implementations in:

@@ -1,5 +1,7 @@
 # Agentic CLI and code-agent hooks
 
+> **Legacy:** this guide describes the previous CodeGraph (SurrealDB, embeddings, LLM providers, agentic tools) and is pending a rewrite. See the [README](../README.md) and `codegraph --help` for the current product.
+
 CodeGraph exposes the same four public agentic tools through MCP and one-shot CLI
 commands. The built-in agents gather graph evidence, reason over it, and synthesize
 answers. The CLI does not expose their internal graph analysis tools.

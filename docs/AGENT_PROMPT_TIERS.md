@@ -1,5 +1,7 @@
 # CodeGraph agentic tools: 4-tier prompt system
 
+> **Legacy:** this guide describes the previous CodeGraph (SurrealDB, embeddings, LLM providers, agentic tools) and is pending a rewrite. See the [README](../README.md) and `codegraph --help` for the current product.
+
 This document explains how CodeGraph’s built-in agent chooses prompt “tiers” (verbosity/strategy) based on your configured LLM context window, and why this makes small local models viable.
 
 ## What “tier” means in CodeGraph

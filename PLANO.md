@@ -440,14 +440,18 @@ Fica para depois:
 - Multi-repo: `register`, `unregister`, `repos`, `list_repos`, `cross_repo_search`.
 - Wiki: `generate_wiki`, `get_wiki_page`, `get_docs_section` (sem LLM por padrão).
 - Visualização HTML (reaproveitar `code_review_graph/assets`), `export`.
-- Instalador para as plataformas do CRG (`skills.py:PLATFORMS`): codex, claude, cursor,
-  windsurf, zed, continue, opencode, gemini-cli, qwen, kiro, copilot, copilot-cli e outras;
-  `install`, `uninstall`, `doctor`.
+- ✅ Instalação para Claude Code e Codex, por projeto (plano
+  `docs/superpowers/plans/2026-11-24-install-doctor-readme.md`): `init` instala hooks,
+  instruções e as skills de revisão (`.claude/skills/`), `init --mcp` registra o MCP (`.mcp.json`,
+  `.codex/config.toml`), `codegraph uninstall` desfaz só o reconhecível e `codegraph doctor`
+  diagnostica (8 verificações, `--json`, exit 1 com `fail`). Fica para depois: as demais
+  plataformas do CRG (`skills.py:PLATFORMS`: cursor, windsurf, zed, continue, opencode,
+  gemini-cli, qwen, kiro, copilot…), skills para o Codex e instalação global.
 - Embeddings opcionais (feature desligada por padrão) via ONNX local, se a busca FTS5 se
   mostrar insuficiente.
 - Distribuição: release com binários (Linux/macOS/Windows), Homebrew, GitHub Action
   equivalente ao `action.yml` do CRG.
-- Reescrever `README.md`/`docs/`, renomear o binário/crates e definir o nome do projeto.
+- ✅ `README.md` reescrito e `install-codegraph.sh` simplificado (as 3 variantes saíram); os guias legados de `docs/` ganharam aviso e seguem pendentes de reescrita. Falta renomear o binário/crates e definir o nome do projeto.
 
 ---
 

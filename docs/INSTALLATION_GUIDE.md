@@ -1,5 +1,7 @@
 # CodeGraph Installation & Setup Guide
 
+> **Legacy:** this guide describes the previous CodeGraph (SurrealDB, embeddings, LLM providers, agentic tools) and is pending a rewrite. See the [README](../README.md) and `codegraph --help` for the current product.
+
 This guide covers installing CodeGraph and setting up a project. The short version is three steps: build the binary, configure a model provider, and run `codegraph init` in your project. There is no database to install or start.
 
 ## Table of Contents

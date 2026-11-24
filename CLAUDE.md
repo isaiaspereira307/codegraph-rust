@@ -42,8 +42,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings   # what CI
 - `docs/TESTING.md` uses feature names (`onnx`, `ollama`, `cloud-jina`, ...) and a `test_mcp_tools.py` that don't match the current tree.
 - The feature flags are on `codegraph-mcp-server`: `daemon` (default), `server-http`, `full`.
 - The indexer still carries the always-off inference stages (`policy.rs`, `embeddings`/`inference_*` stats fields, `CODEGRAPH_EMBEDDING_POLICY`). Old `[embedding]`/`[rerank]` TOML sections are ignored; from `[llm]` only `context_window` is read.
-- `docs/`, `README.md` and the `install-codegraph*.sh` banners still describe the removed agentic tools and embedding providers.
-- `docs/README.md` mentions a `codegraph-cache` crate that has been removed.
+- The guides listed under "Legacy" in `docs/README.md` (installation, usage, agentic CLI, AI providers, prompt tiers, testing) still describe the removed agentic tools and embedding providers; the root `README.md` and `install-codegraph.sh` are current.
 
 ### Tests that need external services
 
@@ -57,6 +56,9 @@ There are no `#[ignore]` tests; DB-dependent tests are gated by env vars and sil
 codegraph db-check                      # opens the store (creating the v15 schema if new) and prints counts
 codegraph init /path/to/project         # choose project hooks, merge agent instructions, then index recursively
 codegraph init . --hooks none --no-index # instruction setup only; no providers or database
+codegraph init . --hooks both --mcp      # also register the MCP server (.mcp.json, .codex/config.toml)
+codegraph doctor .                       # read-only health check (exit 1 on any fail)
+codegraph uninstall .                    # remove hooks, instruction blocks, skills, MCP entries (--purge-index also deletes the graph)
 codegraph index /path/to/project -r -l rust,typescript --index-tier fast|balanced|full
 codegraph build . [--skip-flows|--skip-postprocess]   # full rebuild (update: changed files only)
 codegraph start stdio --watch           # MCP server over stdio, with re-index-on-change daemon

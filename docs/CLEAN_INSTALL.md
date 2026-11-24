@@ -1,5 +1,7 @@
 # Clean Install Guide
 
+> **Legacy:** this guide describes the previous CodeGraph (SurrealDB, embeddings, LLM providers, agentic tools) and is pending a rewrite. See the [README](../README.md) and `codegraph --help` for the current product.
+
 Follow these steps to remove every trace of a previous CodeGraph MCP installation and rebuild from scratch.
 
 1. **Stop running servers**  

@@ -1,5 +1,7 @@
 # Testing CodeGraph MCP Server
 
+> **Legacy:** this guide describes the previous CodeGraph (SurrealDB, embeddings, LLM providers, agentic tools) and is pending a rewrite. See the [README](../README.md) and `codegraph --help` for the current product.
+
 This guide explains how to test the CodeGraph MCP server after indexing your project.
 
 For the CLI equivalent of `test_http_mcp.py`, run `python3 test_cli_agentic.py`

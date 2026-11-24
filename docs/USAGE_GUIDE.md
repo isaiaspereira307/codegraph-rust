@@ -1,5 +1,7 @@
 # CodeGraph Usage Guide
 
+> **Legacy:** this guide describes the previous CodeGraph (SurrealDB, embeddings, LLM providers, agentic tools) and is pending a rewrite. See the [README](../README.md) and `codegraph --help` for the current product.
+
 How to get the most out of CodeGraph when working with AI coding assistants.
 
 ---
