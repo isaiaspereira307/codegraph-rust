@@ -1042,3 +1042,21 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 - `SpringDI.java::NotificationService` -> `OrderRepository`
 - `SpringDI.java::OrderService` -> `NotificationService`
 - `SpringDI.java::OrderService` -> `OrderRepository`
+
+## Rust imports probe (antes)
+
+Sonda `scripts/parity/probes/rust-imports` (workspace `app` + `util-lib`: `crate::`, `self::`,
+`super::`, crate externa, primeiro segmento sem ancora, tipo de outro arquivo, `impl Tr for`,
+`std::fmt`/`Vec::new()`, modulos `Glob`/`glob`), antes da resolucao de modulos Rust entre
+arquivos. CRG em `bbdda4b`. Nos 22/22 (1.000); CONTAINS 0.737 (so a hierarquia de diretorios
+existe apenas no Rust); CALLS 0.267 (resolvido 0.429); IMPORTS_FROM 0.500 (resolvido 0.667);
+IMPLEMENTS 1.000; TESTED_BY n/a (sem testes na sonda).
+
+Arestas so no CRG:
+- CALLS: `main.rs::main` -> `Glob.rs::upper`, `glob.rs::lower`, `store/disk.rs::Disk.open`,
+  `util-lib/src/text.rs::shout`; `store/disk.rs::Disk.open` -> `load` (texto).
+- IMPORTS_FROM: `main.rs` -> `store/mod.rs`, `main.rs` -> `util-lib/src/text.rs`.
+
+Grafo inteiro deste repositorio (mesmo commit do CRG, inclui a propria sonda): IMPORTS_FROM
+0.729 (resolvido 0.534; crg 1597, rust 1860, both 1458), CALLS 0.931 (resolvido 0.859; crg
+18310, rust 18214, both 17614). A Tarefa 7 compara contra estes valores.
