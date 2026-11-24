@@ -397,6 +397,11 @@ impl GraphToolExecutor {
                 }
                 "get_hub_nodes" => self.execute_get_hub_nodes(parameters.clone()).await?,
                 "get_bridge_nodes" => self.execute_get_bridge_nodes(parameters.clone()).await?,
+                "get_knowledge_gaps" => self.execute_get_knowledge_gaps(parameters.clone()).await?,
+                "get_surprising_connections" => {
+                    self.execute_get_surprising_connections(parameters.clone())
+                        .await?
+                }
                 "get_reverse_dependencies" => {
                     self.execute_get_reverse_dependencies(parameters.clone())
                         .await?
@@ -1218,6 +1223,100 @@ impl GraphToolExecutor {
         }))
     }
 
+    /// Execute get_knowledge_gaps - structural weaknesses by category, CRG-shaped
+    async fn execute_get_knowledge_gaps(&self, params: JsonValue) -> Result<JsonValue> {
+        const MINIMAL_FIELDS: [&str; 6] = [
+            "name",
+            "qualified_name",
+            "community_id",
+            "size",
+            "degree",
+            "load_time",
+        ];
+        let max = params["max_per_category"]
+            .as_i64()
+            .unwrap_or(15)
+            .clamp(1, 50) as usize;
+        let minimal = params["detail_level"].as_str() == Some("minimal");
+        let raw = self
+            .graph_query
+            .knowledge_gaps()
+            .await
+            .map_err(|e| McpError::Protocol(format!("get_knowledge_gaps failed: {e:#}")))?;
+        let raw = serde_json::to_value(&raw)?;
+        let mut summary = serde_json::Map::new();
+        let mut gaps = serde_json::Map::new();
+        let mut truncated = false;
+        let mut total_gaps = 0usize;
+        for (category, rows) in raw.as_object().into_iter().flatten() {
+            let rows = rows.as_array().cloned().unwrap_or_default();
+            total_gaps += rows.len();
+            summary.insert(category.clone(), json!(rows.len()));
+            truncated |= rows.len() > max;
+            let visible: Vec<JsonValue> = rows
+                .into_iter()
+                .take(max)
+                .map(|row| {
+                    if !minimal {
+                        return row;
+                    }
+                    let kept: serde_json::Map<String, JsonValue> = MINIMAL_FIELDS
+                        .iter()
+                        .filter_map(|k| row.get(*k).map(|v| (k.to_string(), v.clone())))
+                        .collect();
+                    JsonValue::Object(kept)
+                })
+                .collect();
+            gaps.insert(category.clone(), JsonValue::Array(visible));
+        }
+        Ok(json!({
+            "tool": "get_knowledge_gaps",
+            "parameters": { "max_per_category": max,
+                            "detail_level": if minimal { "minimal" } else { "standard" } },
+            "result": {
+                "status": "ok",
+                "summary": summary, "gaps": gaps, "total_gaps": total_gaps,
+                "truncated": truncated,
+            }
+        }))
+    }
+
+    /// Execute get_surprising_connections - edges ranked by surprise score
+    async fn execute_get_surprising_connections(&self, params: JsonValue) -> Result<JsonValue> {
+        let top_n = params["top_n"].as_i64().unwrap_or(15).clamp(1, 100) as usize;
+        let minimal = params["detail_level"].as_str() == Some("minimal");
+        let mut surprises = self
+            .graph_query
+            .surprising_connections()
+            .await
+            .map_err(|e| McpError::Protocol(format!("get_surprising_connections failed: {e:#}")))?;
+        let total = surprises.len();
+        surprises.truncate(top_n);
+        let rows: Vec<JsonValue> = surprises
+            .iter()
+            .map(|s| {
+                if minimal {
+                    json!({"source": s.source, "target": s.target, "edge_kind": s.edge_kind,
+                           "surprise_score": s.surprise_score})
+                } else {
+                    serde_json::to_value(s).unwrap_or(JsonValue::Null)
+                }
+            })
+            .collect();
+        Ok(json!({
+            "tool": "get_surprising_connections",
+            "parameters": { "top_n": top_n,
+                            "detail_level": if minimal { "minimal" } else { "standard" } },
+            "result": {
+                "status": "ok",
+                "summary": format!("{total} surprising connection(s) ranked by surprise score{}",
+                                   shown_of(rows.len(), total)),
+                "surprising_connections": rows, "count": rows.len(), "total": total,
+                "truncated": rows.len() < total,
+            }
+        }))
+    }
+
     /// Execute get_reverse_dependencies
     async fn execute_get_reverse_dependencies(&self, params: JsonValue) -> Result<JsonValue> {
         let node_id = params["node_id"]
@@ -1364,13 +1463,13 @@ mod tests {
     #[test]
     fn test_tool_schemas_available() {
         let schemas = GraphToolExecutor::get_tool_schemas();
-        assert_eq!(schemas.len(), 24);
+        assert_eq!(schemas.len(), 26);
     }
 
     #[test]
     fn test_tool_names() {
         let names = GraphToolExecutor::get_tool_names();
-        assert_eq!(names.len(), 24);
+        assert_eq!(names.len(), 26);
         assert!(names.contains(&"get_review_context".to_string()));
         assert!(names.contains(&"detect_changes".to_string()));
         assert!(names.contains(&"get_impact_radius".to_string()));

@@ -60,6 +60,8 @@ pub struct AnalysisEdge {
     pub target: String,
     pub file_path: String,
     pub line: i64,
+    /// `extra.import_context` of an import edge (`type_only`, `deferred`, `parent_package`).
+    pub import_context: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -102,7 +104,7 @@ impl AnalysisGraph {
             graph.nodes.push(node);
         }
         let mut stmt = conn.prepare(
-            "SELECT kind, source_qualified, target_qualified, file_path, line FROM edges \
+            "SELECT kind, source_qualified, target_qualified, file_path, line, extra FROM edges \
              ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -112,6 +114,9 @@ impl AnalysisGraph {
                 target: r.get(2)?,
                 file_path: r.get(3)?,
                 line: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                import_context: import_context_from_extra(
+                    r.get::<_, Option<String>>(5)?.as_deref(),
+                ),
             })
         })?;
         for row in rows {
@@ -143,6 +148,11 @@ impl AnalysisGraph {
     pub fn by_id(&self, id: i64) -> Option<usize> {
         self.by_node_id.get(&id).copied()
     }
+}
+
+fn import_context_from_extra(extra: Option<&str>) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(extra?).ok()?;
+    value.get("import_context")?.as_str().map(str::to_string)
 }
 
 fn decorators_from_extra(extra: Option<&str>) -> Vec<String> {

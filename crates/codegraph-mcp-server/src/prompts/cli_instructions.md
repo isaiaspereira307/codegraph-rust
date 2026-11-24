@@ -30,6 +30,8 @@ that ID to the other tools:
 | Coupling of a node | `calculate_coupling_metrics` | `node_id` |
 | Central components | `get_hub_nodes` | `top_n`, `detail_level` |
 | Chokepoints between code regions | `get_bridge_nodes` | `top_n`, `detail_level` |
+| Structural weaknesses: isolated, untested, thin, import cycles | `get_knowledge_gaps` | `max_per_category`, `detail_level` |
+| Unexpected coupling between regions | `get_surprising_connections` | `top_n`, `detail_level` |
 | Risky functions to review | `find_complexity_hotspots` | `min_complexity`, `limit` |
 | Execution flows from entry points, most critical first | `list_flows` | `sort_by`, `limit`, `kind`, `detail_level` |
 | One flow with its steps (and source) | `get_flow` | `flow_id` or `flow_name`, `include_source`, `max_steps` |

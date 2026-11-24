@@ -23,6 +23,8 @@ the server side.
 | "How coupled is X?" | `calculate_coupling_metrics` |
 | "What are the central components?" | `get_hub_nodes` |
 | "Which nodes are chokepoints between regions?" | `get_bridge_nodes` |
+| "Where are the weak spots (untested hotspots, import cycles)?" | `get_knowledge_gaps` |
+| "Which dependencies are unexpected?" | `get_surprising_connections` |
 | "Which execution flows exist, and which matter most?" | `list_flows`, `get_flow` |
 | "Which flows does this change reach?" | `get_affected_flows` |
 | "How is the code clustered?" | `list_communities`, `get_community` |

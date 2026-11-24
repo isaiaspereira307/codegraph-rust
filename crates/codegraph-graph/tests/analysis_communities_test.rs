@@ -179,6 +179,7 @@ fn cohesion_counts_external_both_sides() {
                 target: t.to_string(),
                 file_path: String::new(),
                 line: 0,
+                import_context: None,
             })
             .collect()
     };

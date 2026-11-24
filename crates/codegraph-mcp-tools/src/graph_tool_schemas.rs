@@ -78,6 +78,8 @@ impl GraphToolSchemas {
             Self::get_community(),
             Self::get_architecture_overview(),
             Self::get_bridge_nodes(),
+            Self::get_knowledge_gaps(),
+            Self::get_surprising_connections(),
         ]
     }
 
@@ -686,6 +688,59 @@ impl GraphToolSchemas {
         }
     }
 
+    /// Schema for get_knowledge_gaps (structural weaknesses)
+    pub fn get_knowledge_gaps() -> ToolSchema {
+        ToolSchema {
+            name: "get_knowledge_gaps".to_string(),
+            description: "Structural weaknesses: isolated nodes (degree <= 1), thin communities \
+                (< 3 members), untested hotspots (degree >= 5, no TESTED_BY), single-file \
+                communities and import cycles (files that import each other; load_time says \
+                whether a loop can fail as the files load). summary and total_gaps report \
+                untruncated counts."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "max_per_category": {
+                        "type": "integer",
+                        "description": "Entries per gap category (1-50, defaults to 15)",
+                        "minimum": 1, "maximum": 50, "default": 15
+                    },
+                    "detail_level": {
+                        "type": "string", "enum": ["standard", "minimal"], "default": "standard",
+                        "description": "minimal drops file paths and keeps identifying fields only"
+                    }
+                },
+                "required": []
+            }),
+        }
+    }
+
+    /// Schema for get_surprising_connections (unexpected coupling)
+    pub fn get_surprising_connections() -> ToolSchema {
+        ToolSchema {
+            name: "get_surprising_connections".to_string(),
+            description: "Unexpected architectural coupling: edges scored by cross-community \
+                (+0.3), cross-language (+0.2), peripheral-to-hub (+0.2), cross-test-boundary \
+                (+0.15) and unusual edge kind (+0.15), highest score first."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "top_n": {
+                        "type": "integer", "description": "Edges to return (1-100, defaults to 15)",
+                        "minimum": 1, "maximum": 100, "default": 15
+                    },
+                    "detail_level": {
+                        "type": "string", "enum": ["standard", "minimal"], "default": "standard",
+                        "description": "minimal returns source, target, edge_kind and surprise_score only"
+                    }
+                },
+                "required": []
+            }),
+        }
+    }
+
     /// Schema for get_reverse_dependencies function
     pub fn get_reverse_dependencies() -> ToolSchema {
         ToolSchema {
@@ -766,7 +821,7 @@ mod tests {
     #[test]
     fn test_all_schemas_valid() {
         let schemas = GraphToolSchemas::all();
-        assert_eq!(schemas.len(), 24, "Should have exactly 24 tool schemas");
+        assert_eq!(schemas.len(), 26, "Should have exactly 26 tool schemas");
 
         for schema in schemas {
             assert!(!schema.name.is_empty(), "Schema name should not be empty");
@@ -794,7 +849,7 @@ mod tests {
     #[test]
     fn test_tool_names() {
         let names = GraphToolSchemas::tool_names();
-        assert_eq!(names.len(), 24);
+        assert_eq!(names.len(), 26);
         for flow_tool in [
             "list_flows",
             "get_flow",
@@ -803,6 +858,8 @@ mod tests {
             "get_community",
             "get_architecture_overview",
             "get_bridge_nodes",
+            "get_knowledge_gaps",
+            "get_surprising_connections",
         ] {
             assert!(names.contains(&flow_tool.to_string()), "{flow_tool}");
         }

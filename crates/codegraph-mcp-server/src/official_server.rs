@@ -321,6 +321,26 @@ pub struct BridgeRequest {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct KnowledgeGapsRequest {
+    /// Entries per gap category (1-50, default 15)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_category: Option<u32>,
+    /// standard (default) or minimal (identifying fields only, no file paths)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_level: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SurprisingRequest {
+    /// Edges to return (1-100, default 15)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_n: Option<u32>,
+    /// standard (default) or minimal (source, target, edge_kind, surprise_score)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_level: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct HotspotRequest {
     /// Minimum cyclomatic complexity (default 5.0)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -489,6 +509,27 @@ impl CodeGraphMCPServer {
         params: Parameters<BridgeRequest>,
     ) -> Result<CallToolResult, McpError> {
         self.call_tool("get_bridge_nodes", &params.0).await
+    }
+
+    #[tool(
+        description = "Structural weaknesses: isolated nodes, thin communities, untested hotspots, single-file communities and import cycles (load_time says whether a loop can fail as the files load)."
+    )]
+    async fn get_knowledge_gaps(
+        &self,
+        params: Parameters<KnowledgeGapsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_knowledge_gaps", &params.0).await
+    }
+
+    #[tool(
+        description = "Unexpected coupling: edges scored by cross-community, cross-language, peripheral-to-hub, cross-test-boundary and unusual edge kind, highest first."
+    )]
+    async fn get_surprising_connections(
+        &self,
+        params: Parameters<SurprisingRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_tool("get_surprising_connections", &params.0)
+            .await
     }
 
     #[tool(

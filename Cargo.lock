@@ -537,6 +537,7 @@ dependencies = [
  "codegraph-core",
  "dashmap",
  "petgraph",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

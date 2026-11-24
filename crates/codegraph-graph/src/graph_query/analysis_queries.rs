@@ -459,4 +459,34 @@ impl GraphQuery {
             })
             .await
     }
+
+    /// Structural weaknesses: isolated nodes, thin and single-file communities, untested
+    /// hotspots and import cycles (paths relative to the project root).
+    pub async fn knowledge_gaps(&self) -> Result<crate::analysis::insights::KnowledgeGaps> {
+        let root = self.store().root().to_string_lossy().into_owned();
+        self.store()
+            .with_conn(move |conn| {
+                let graph = crate::analysis::AnalysisGraph::load(conn)?;
+                let communities = read_communities(conn, "size", 0)?;
+                Ok(crate::analysis::insights::knowledge_gaps(
+                    &graph,
+                    &communities,
+                    Some(&root),
+                ))
+            })
+            .await
+    }
+
+    /// Every edge with a positive surprise score, highest first.
+    pub async fn surprising_connections(
+        &self,
+    ) -> Result<Vec<crate::analysis::insights::SurprisingRow>> {
+        self.store()
+            .with_conn(|conn| {
+                Ok(crate::analysis::insights::surprising_connections(
+                    &crate::analysis::AnalysisGraph::load(conn)?,
+                ))
+            })
+            .await
+    }
 }
