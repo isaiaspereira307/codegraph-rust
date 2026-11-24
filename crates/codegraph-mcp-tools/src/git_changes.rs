@@ -1,9 +1,11 @@
 // ABOUTME: Changed line ranges per file from `git diff -U0 <base>` and 90-day commit churn per file.
 // ABOUTME: Reads only git's output; a directory that is not a git work tree is an error, never a fallback.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
 /// One file of the diff with the new-side line ranges (inclusive) that changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,15 +87,121 @@ pub fn changed_files(root: &Path, base: &str) -> Result<Vec<ChangedFile>, String
     Ok(parse_zero_context_diff(&diff))
 }
 
-/// Commits per file over the last 90 days (at most 2000 commits, 5 s budget), from one
-/// `git log` run in `root`. Keys are the paths relative to `root` and the same paths joined to
-/// `root`, so a node's stored path (relative or absolute) finds its count. `None` when git
-/// fails, times out or the repository has no commits.
-pub async fn file_churn(root: &Path) -> Option<HashMap<String, u32>> {
+const CHURN_BUDGET: Duration = Duration::from_secs(5);
+const CHURN_CACHE_MAX_ENTRIES: usize = 32;
+
+/// Process-wide churn state: results keyed by (root, HEAD), and roots whose git timed out.
+/// Only a timeout is remembered: no commits or a missing `git` fail fast and may recover.
+#[derive(Default)]
+struct ChurnState {
+    entries: HashMap<(PathBuf, String), HashMap<String, u32>>,
+    timed_out: HashSet<PathBuf>,
+    #[cfg(test)]
+    log_runs: HashMap<PathBuf, usize>,
+}
+
+static CHURN: LazyLock<Mutex<ChurnState>> = LazyLock::new(Mutex::default);
+
+fn churn_state() -> std::sync::MutexGuard<'static, ChurnState> {
+    CHURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Forgets every cached churn result and remembered timeout (tests, long-lived processes).
+pub fn clear_churn_cache() {
+    let mut state = churn_state();
+    state.entries.clear();
+    state.timed_out.clear();
+}
+
+#[cfg(test)]
+fn forget_root(root: &Path) {
+    let mut state = churn_state();
+    state.entries.retain(|(r, _), _| r != root);
+    state.timed_out.remove(root);
+}
+
+#[cfg(test)]
+fn git_log_runs(root: &Path) -> usize {
+    churn_state().log_runs.get(root).copied().unwrap_or(0)
+}
+
+enum GitFailure {
+    Timeout,
+    Failed,
+}
+
+/// Runs `git -C root <args>` within `budget`; the reason for a failure goes to the debug log.
+async fn run_git(root: &Path, args: &[&str], budget: Duration) -> Result<Vec<u8>, GitFailure> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("-C")
         .arg(root)
-        .args([
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    // Churn is optional (`churn_status: "unavailable"`); keep the reason in the log.
+    match tokio::time::timeout(budget, cmd.output()).await {
+        Err(_) => {
+            tracing::debug!("churn unavailable: git timed out after {budget:?}");
+            Err(GitFailure::Timeout)
+        }
+        Ok(Err(error)) => {
+            tracing::debug!("churn unavailable: failed to run git: {error}");
+            Err(GitFailure::Failed)
+        }
+        Ok(Ok(output)) if !output.status.success() => {
+            tracing::debug!(
+                "churn unavailable: git exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            Err(GitFailure::Failed)
+        }
+        Ok(Ok(output)) => Ok(output.stdout),
+    }
+}
+
+/// Commits per file over the last 90 days (at most 2000 commits, 5 s budget), from one
+/// `git log` run in `root`, cached per (root, HEAD). Keys are the paths relative to `root` and
+/// the same paths joined to `root`, so a node's stored path (relative or absolute) finds its
+/// count. `None` when git fails, times out or the repository has no commits; a timeout is
+/// remembered until [`clear_churn_cache`].
+pub async fn file_churn(root: &Path) -> Option<HashMap<String, u32>> {
+    file_churn_with(root, CHURN_BUDGET).await
+}
+
+async fn file_churn_with(root: &Path, budget: Duration) -> Option<HashMap<String, u32>> {
+    if churn_state().timed_out.contains(root) {
+        return None;
+    }
+    let remember_timeout = |failure: GitFailure| {
+        if matches!(failure, GitFailure::Timeout) {
+            churn_state().timed_out.insert(root.to_path_buf());
+        }
+    };
+    let head = match run_git(root, &["rev-parse", "HEAD"], budget).await {
+        Ok(out) => String::from_utf8_lossy(&out).trim().to_string(),
+        Err(failure) => {
+            remember_timeout(failure);
+            return None;
+        }
+    };
+    if head.is_empty() {
+        return None;
+    }
+    let key = (root.to_path_buf(), head);
+    if let Some(hit) = churn_state().entries.get(&key) {
+        return Some(hit.clone());
+    }
+    #[cfg(test)]
+    {
+        *churn_state()
+            .log_runs
+            .entry(root.to_path_buf())
+            .or_default() += 1;
+    }
+    let stdout = match run_git(
+        root,
+        &[
             "-c",
             "core.quotePath=false",
             "log",
@@ -105,30 +213,18 @@ pub async fn file_churn(root: &Path) -> Option<HashMap<String, u32>> {
             "--format=",
             "-z",
             "--",
-        ])
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    // Churn is optional (`churn_status: "unavailable"`); keep the reason in the log.
-    let output = match tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output()).await {
-        Err(_) => {
-            tracing::debug!("churn unavailable: git log timed out after 5s");
+        ],
+        budget,
+    )
+    .await
+    {
+        Ok(out) => out,
+        Err(failure) => {
+            remember_timeout(failure);
             return None;
         }
-        Ok(Err(error)) => {
-            tracing::debug!("churn unavailable: failed to run git: {error}");
-            return None;
-        }
-        Ok(Ok(output)) => output,
     };
-    if !output.status.success() {
-        tracing::debug!(
-            "churn unavailable: git log exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = String::from_utf8_lossy(&stdout);
     let mut counts: HashMap<String, u32> = HashMap::new();
     for path in text.split('\0').map(|p| p.trim_matches('\n')) {
         if path.is_empty() {
@@ -139,6 +235,11 @@ pub async fn file_churn(root: &Path) -> Option<HashMap<String, u32>> {
             .entry(root.join(path).to_string_lossy().into_owned())
             .or_default() += 1;
     }
+    let mut state = churn_state();
+    if state.entries.len() >= CHURN_CACHE_MAX_ENTRIES {
+        state.entries.clear();
+    }
+    state.entries.insert(key, counts.clone());
     Some(counts)
 }
 
@@ -279,5 +380,88 @@ diff --git a/gone.py b/gone.py
         assert_eq!(churn.get("b.py"), Some(&1));
         let abs = root.join("a.py").to_string_lossy().into_owned();
         assert_eq!(churn.get(&abs), Some(&2));
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git_ok(dir.path(), &["init", "-q"]);
+        dir
+    }
+
+    fn commit_file(dir: &Path, name: &str) {
+        std::fs::write(dir.join(name), format!("{name}\n{}", rand_suffix())).unwrap();
+        git_ok(dir, &["add", "."]);
+        git_ok(dir, &["commit", "-q", "-m", name]);
+    }
+
+    fn rand_suffix() -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    #[tokio::test]
+    async fn churn_is_cached_per_head() {
+        let dir = repo();
+        commit_file(dir.path(), "a.py");
+        let first = file_churn(dir.path()).await.unwrap();
+        let second = file_churn(dir.path()).await.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first["a.py"], 1);
+        assert_eq!(git_log_runs(dir.path()), 1);
+
+        commit_file(dir.path(), "b.py");
+        let third = file_churn(dir.path()).await.unwrap();
+        assert_eq!(git_log_runs(dir.path()), 2);
+        assert_eq!(third["b.py"], 1);
+    }
+
+    #[tokio::test]
+    async fn two_repositories_do_not_share_entries() {
+        let (one, two) = (repo(), repo());
+        commit_file(one.path(), "only_one.py");
+        commit_file(two.path(), "only_two.py");
+        let a = file_churn(one.path()).await.unwrap();
+        let b = file_churn(two.path()).await.unwrap();
+        assert!(a.contains_key("only_one.py") && !a.contains_key("only_two.py"));
+        assert!(b.contains_key("only_two.py") && !b.contains_key("only_one.py"));
+    }
+
+    #[tokio::test]
+    async fn timeout_is_remembered_and_cleared() {
+        let dir = repo();
+        commit_file(dir.path(), "a.py");
+        assert!(
+            file_churn_with(dir.path(), std::time::Duration::ZERO)
+                .await
+                .is_none()
+        );
+        // Remembered: a normal budget is not tried again and no git log runs.
+        assert!(file_churn(dir.path()).await.is_none());
+        assert_eq!(git_log_runs(dir.path()), 0);
+
+        forget_root(dir.path());
+        assert!(file_churn(dir.path()).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn repository_without_commits_recovers_after_first_commit() {
+        let dir = repo();
+        assert!(file_churn(dir.path()).await.is_none());
+        commit_file(dir.path(), "a.py");
+        assert_eq!(file_churn(dir.path()).await.unwrap()["a.py"], 1);
     }
 }
