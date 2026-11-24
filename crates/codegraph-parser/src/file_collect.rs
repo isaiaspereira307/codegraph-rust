@@ -114,7 +114,7 @@ pub fn collect_source_files_with_config(
         }
 
         total_files += 1;
-        if registry.detect_language(&path.to_string_lossy()).is_none() {
+        if registry.detect_language(&path.to_string_lossy()).is_none() || is_minified_asset(path) {
             continue;
         }
 
@@ -161,6 +161,18 @@ pub fn collect_source_files_with_config(
 
     paths.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     Ok(paths)
+}
+
+/// Minified bundles (`*.min.js`, `*.min.css`, `*.min.json`, …) are generated or vendored code;
+/// code-review-graph ignores them by default (`incremental.py` DEFAULT_IGNORE_PATTERNS).
+pub fn is_minified_asset(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    [".min.js", ".min.mjs", ".min.cjs", ".min.css", ".min.json"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
 }
 
 fn build_globset<S, I>(patterns: I) -> Option<GlobSet>
@@ -288,5 +300,19 @@ mod tests {
         let files = collect_source_files(dir.path()).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].0, dir.path().join("a.rs"));
+    }
+
+    #[test]
+    fn minified_bundles_are_not_collected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+        for file in ["app.js", "assets/d3.v7.min.js", "assets/vendor.MIN.JS"] {
+            std::fs::write(dir.path().join(file), "function f() {}\n").unwrap();
+        }
+        let files = collect_source_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, dir.path().join("app.js"));
+        assert!(!is_minified_asset(Path::new("src/admin.js")));
+        assert!(!is_minified_asset(Path::new("src/min.js")));
     }
 }

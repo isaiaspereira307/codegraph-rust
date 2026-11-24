@@ -1647,6 +1647,10 @@ impl ProjectIndexer {
         let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
         let path_str = path.to_string_lossy();
 
+        if codegraph_parser::file_collect::is_minified_asset(path) {
+            return false;
+        }
+
         // Exclude patterns (simple substring match)
         for pat in &self.config.exclude_patterns {
             if path_str.contains(pat) || file_name.contains(pat) {
