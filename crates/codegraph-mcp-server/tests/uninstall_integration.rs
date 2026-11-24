@@ -170,3 +170,57 @@ fn git_post_commit_block_is_removed_and_user_lines_stay() {
     ok(&run(&["uninstall"], project.path()));
     assert_eq!(fs::read_to_string(&hook).unwrap(), "#!/bin/sh\necho mine\n");
 }
+
+#[test]
+fn init_installs_review_skills_for_claude_only_and_uninstall_removes_them() {
+    let project = project();
+    ok(&run(
+        &["init", "--hooks", "codex", "--no-index"],
+        project.path(),
+    ));
+    assert!(!project.path().join(".claude/skills").exists());
+
+    ok(&run(
+        &["init", "--hooks", "claude", "--no-index"],
+        project.path(),
+    ));
+    for name in ["review-changes", "review-delta", "review-pr"] {
+        let dir = project.path().join(".claude/skills").join(name);
+        assert!(read(project.path(), &format!(".claude/skills/{name}/SKILL.md")).contains(name));
+        assert!(dir.join(".codegraph-managed").exists());
+    }
+
+    ok(&run(&["uninstall"], project.path()));
+    assert!(!project.path().join(".claude/skills").exists());
+    let settings: Value =
+        serde_json::from_str(&read(project.path(), ".claude/settings.json")).unwrap();
+    assert_eq!(settings, serde_json::from_str::<Value>(SETTINGS).unwrap());
+}
+
+#[test]
+fn a_users_own_skill_with_the_same_name_is_kept() {
+    let project = project();
+    let mine = project.path().join(".claude/skills/review-pr");
+    fs::create_dir_all(&mine).unwrap();
+    fs::write(mine.join("SKILL.md"), "mine\n").unwrap();
+
+    let output = run(&["init", "--hooks", "claude", "--no-index"], project.path());
+    ok(&output);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Skipping skill review-pr"));
+    assert_eq!(fs::read_to_string(mine.join("SKILL.md")).unwrap(), "mine\n");
+    assert!(
+        project
+            .path()
+            .join(".claude/skills/review-changes/SKILL.md")
+            .exists()
+    );
+
+    ok(&run(&["uninstall"], project.path()));
+    assert_eq!(fs::read_to_string(mine.join("SKILL.md")).unwrap(), "mine\n");
+    assert!(
+        !project
+            .path()
+            .join(".claude/skills/review-changes")
+            .exists()
+    );
+}

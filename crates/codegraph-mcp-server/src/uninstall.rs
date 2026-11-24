@@ -3,6 +3,7 @@
 
 use crate::agent_hooks;
 use crate::project_init::{self, HookSelection};
+use crate::skills;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::fs;
@@ -42,6 +43,9 @@ pub fn run(
         if included {
             plan.extend(plan_guidance(&project, name)?);
         }
+    }
+    if selection.includes_claude() {
+        plan.extend(skills::plan_uninstall(&project)?);
     }
     plan.extend(agent_hooks::plan_git_hook_removal(&project)?);
     if purge_index {
@@ -107,7 +111,7 @@ fn plan_guidance(project: &Path, name: &str) -> Result<Option<(PathBuf, FileEdit
     }))
 }
 
-fn apply(path: &Path, edit: &FileEdit) -> Result<()> {
+pub(crate) fn apply(path: &Path, edit: &FileEdit) -> Result<()> {
     match edit {
         FileEdit::Write(bytes) => agent_hooks::write_project_file(path, bytes),
         FileEdit::Delete => {
@@ -117,14 +121,19 @@ fn apply(path: &Path, edit: &FileEdit) -> Result<()> {
                 fs::remove_file(path)
                     .with_context(|| format!("Cannot remove {}", path.display()))?;
             }
-            // Drop the config directory only when we emptied it.
-            if let Some(parent) = path.parent()
-                && matches!(
-                    parent.file_name().and_then(|n| n.to_str()),
-                    Some(".claude" | ".codex")
-                )
-            {
-                let _ = fs::remove_dir(parent);
+            // Drop the config directories only when we emptied them (remove_dir fails otherwise).
+            for dir in path.ancestors().skip(1).take(2) {
+                let owned = match dir.file_name().and_then(|n| n.to_str()) {
+                    Some(".claude" | ".codex") => true,
+                    Some("skills") => dir
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|n| n == ".claude"),
+                    _ => false,
+                };
+                if !owned || fs::remove_dir(dir).is_err() {
+                    break;
+                }
             }
             Ok(())
         }

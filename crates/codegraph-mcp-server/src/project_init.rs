@@ -2,6 +2,7 @@
 // ABOUTME: Setup is provider-independent, preserves unrelated content, and is repeatable.
 
 use crate::agent_hooks::{self, Harness};
+use crate::{skills, uninstall};
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use std::{
@@ -78,6 +79,11 @@ pub fn prepare(project: &Path, requested: Option<HookSelection>) -> Result<PathB
         .transpose()?
         .unwrap_or_default();
     let guidance = guidance_changes(&project)?;
+    let skills = if selection.includes_claude() {
+        skills::plan_install(&project)?
+    } else {
+        Vec::new()
+    };
     agent_hooks::apply_changes(&hooks)?;
     for change in &hooks {
         eprintln!(
@@ -104,6 +110,13 @@ pub fn prepare(project: &Path, requested: Option<HookSelection>) -> Result<PathB
             },
             change.path.display()
         );
+    }
+    if !skills.is_empty() {
+        eprintln!("Step 3: Claude Code review skills");
+        for (path, edit) in &skills {
+            uninstall::apply(path, edit)?;
+            eprintln!("Updated {}", path.display());
+        }
     }
     Ok(project)
 }

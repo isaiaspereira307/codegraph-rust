@@ -9,6 +9,7 @@ pub mod http_server;
 pub mod official_server;
 pub mod project_init;
 pub mod prompts;
+pub mod skills;
 pub mod tool_cli;
 pub mod uninstall;
 
