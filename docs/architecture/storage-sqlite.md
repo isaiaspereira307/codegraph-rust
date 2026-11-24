@@ -46,15 +46,19 @@ once is not enough. Two ways out:
 
 ## Derived analysis: flows and communities
 
-At the end of `finalize` (every `index`, `build`, `update` and watch re-index), after the FTS
-refresh, a post-process recomputes the CRG analysis tables in one write transaction
-(`crates/codegraph-graph/src/analysis/`):
+At the end of `finalize`, after the FTS refresh, a post-process recomputes the CRG analysis
+tables in one write transaction (`crates/codegraph-graph/src/analysis/`). `finalize` runs on
+every `index`, `build`, `update` and watch re-index that rebuilds the graph. A run over
+unchanged sources skips the build and `finalize`, except when the requested level is `full`
+and `metadata.postprocess_level` (the level of the last post-process, written by `finalize`)
+is not `full`: a graph built with `--skip-flows`/`--skip-postprocess`, written by an older
+build, or whose last analysis failed then gets `finalize` (and its post-process) on that run.
 
 | Table / column | Written |
 |---|---|
 | `flows` | one row per execution flow traced from a CRG-style entry point (`name`, `entry_point_id`, `depth`, `node_count`, `file_count`, `criticality`, `path_json` = node ids) |
 | `flow_memberships` | `(flow_id, node_id, position)` for every node in a flow |
-| `communities` | Leiden communities (deterministic, fixed seed) with CRG names, `cohesion`, `size`, `dominant_language`; directory-based fallback (detector `file`) when the graph has no edges |
+| `communities` | Leiden communities (deterministic: no RNG, greedy refinement) with CRG names, `cohesion`, `size`, `dominant_language`; directory-based fallback (detector `file`) when the graph has no edges |
 | `nodes.community_id` | each node's community |
 | `metadata.community_detector` | `leiden` or `file`, as CRG records it |
 
@@ -62,7 +66,14 @@ Both are rebuilt from scratch each time (no incremental flows; `flows.id` change
 the `communities` AUTOINCREMENT restarts, so an unchanged graph keeps the same community ids). The level comes
 from `--skip-flows` (`minimal`) / `--skip-postprocess` (`none`) on `index`, `build` and
 `update`, else `CODEGRAPH_POSTPROCESS` (`full` by default; anything else is an error).
-`minimal` and `none` skip the step and leave the previous rows in place. The flow, community,
+`minimal` and `none` skip the step and leave the previous rows in place (they coincide: CRG's
+`minimal` adds resolvers, `nodes.signature` and FTS, and the Rust `finalize` always resolves
+and rebuilds FTS but never computes signatures). Unlike CRG's `none`, `none` here still
+resolves pending edges and rebuilds FTS and TESTED_BY in `finalize` (harmless). The invalid-level
+error is reported when the indexer starts, before any file is parsed. A failing post-process
+does not fail the build: like CRG, it logs a warning, records `postprocess_level = failed`
+and the error in `metadata.postprocess_warning` (removed by the next successful run), and
+the build's ready marker is still written. The flow, community,
 architecture, hub/bridge, knowledge-gap, surprising-connection and suggested-question tools and
 the review `risk_score` read these tables; CRG-written rows are read the same way.
 

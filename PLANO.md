@@ -309,7 +309,7 @@ como resolver) um repositório que já tem banco do CRG.
 ## Fase 3 — Núcleo de revisão (MVP usável)
 
 Plano de implementação (11 tarefas, ordem e decisões): `docs/superpowers/plans/2026-11-23-fase3-nucleo-revisao.md`.
-Tasks 1 (`search_nodes`, FTS5), 2 (`list_graph_stats`), 3 (`find_large_functions`), 4 (`query_graph`), 5 (`traverse_graph`), 6 (`get_impact_radius`), 7 (`detect_changes`), 8 (`get_review_context`) e 9 (`get_minimal_context`) concluídas. Task 10 quase completa: subcomandos CLI `build`, `update`, `detect-changes`, `impact`, `query`, `search` prontos; tool MCP `build_or_update_graph` pronta (roda `codegraph update` em processo filho, saída capturada, para não corromper o stdio do MCP; fora do executor, por isso o teste de exposição inclui essa tool à parte). `codegraph graph-status` (contagens do grafo, via `list_graph_stats`; o `status` continua sendo o do servidor MCP). Task 10 concluída. Task 11 feita com defaults conservadores: `codegraph hooks git install|uninstall` (opt-in, bloco marcado no `.git/hooks/post-commit`, `update` em background, respeita `crg-hooks-off`); `SessionStart` NÃO roda `update` (custo por sessão; continua só com a orientação). Skills `review-changes`, `review-pr` e `review-delta` em `rules-for-claude-code/skills/`. Não instaladas automaticamente em lugar nenhum.
+Tasks 1 (`search_nodes`, FTS5), 2 (`list_graph_stats`), 3 (`find_large_functions`), 4 (`query_graph`), 5 (`traverse_graph`), 6 (`get_impact_radius`), 7 (`detect_changes`), 8 (`get_review_context`) e 9 (`get_minimal_context`) concluídas. Task 10 quase completa: subcomandos CLI `build`, `update`, `detect-changes`, `impact`, `query`, `search` prontos; tool MCP `build_or_update_graph` pronta (roda `codegraph update` em processo filho, saída capturada, para não corromper o stdio do MCP; fora do executor, por isso o teste de exposição inclui essa tool à parte). `codegraph graph-status` (contagens do grafo, via `list_graph_stats`; o `status` continua sendo o do servidor MCP). Task 10 concluída. Task 11 feita com defaults conservadores: `codegraph hooks git install|uninstall` (opt-in, bloco marcado no `.git/hooks/post-commit`, `update` em background; desde a revisão da Fase 4, `update --skip-flows`, como o hook do CRG, respeita `crg-hooks-off`); `SessionStart` NÃO roda `update` (custo por sessão; continua só com a orientação). Skills `review-changes`, `review-pr` e `review-delta` em `rules-for-claude-code/skills/`. Não instaladas automaticamente em lugar nenhum.
 
 Medição (2026-11-23, este repo, `HEAD~3`, `base_ref`): arquivos tocados inteiros 376 KB; `git diff`
 41 KB; `get_review_context` 47 KB (~8x menos que ler os arquivos); `get_minimal_context` 4 KB
@@ -382,12 +382,22 @@ Fica para depois:
   então não há filtro de import type-only/pacote-pai/deferred, `load_time` é sempre true e nós
   `extra.virtual` não são excluídos do conjunto de arquivos dos ciclos.
 - Risco: não portados o cache de churn por HEAD e o "unavailable" persistente do CRG (um
-  `git log` lento custa até 5 s por chamada de review); falhas de churn não são logadas; as
+  `git log` lento custa até 5 s por chamada de review); falhas de churn só vão para o log em
+  nível debug; as
   chaves de caminho do churn não são normalizadas (raiz com symlink pode zerar o churn em
   silêncio); faltam o fallback de TESTED_BY por nome solto, a isenção de arquivos de migration
   na checagem de testes e o fallback 0.05·flow_count.
 - `crates/codegraph-graph/src/analysis/insights.rs` tem 676 linhas (hubs, bridges, gaps, ciclos,
   surprising, questions): candidato a dividir.
+- Cache de `Arc<AnalysisGraph>` por `data_version`: toda ferramenta de análise recarrega o
+  grafo (e as de bridge rodam Brandes) dentro do `with_conn` de conexão única, serializando as
+  outras chamadas de ferramenta enquanto isso.
+- `nodes.extra` sobrescrito no re-parse: `write.rs` faz `extra = excluded.extra`, o que apaga
+  chaves do CRG em bancos escritos pelas duas ferramentas.
+- `GraphQuery::get_hub_nodes(min_degree)` legado agora só é usado em teste: remover ou migrar.
+- Tempo e memória do pós-processo em corpus grande (50k+ nós) não medidos.
+- Investigar como bug da Fase 2 o sufixo `@L1` nos nós `File` (ver o item de gaps de import
+  acima).
 - Não relacionado à Fase 4: o Rust grava nós `Directory` e CONTAINS raiz → subdiretório que o
   CRG não tem (CONTAINS da sonda python 0.958 → 0.902, sonda python-imports 1.000 → 0.909).
 
