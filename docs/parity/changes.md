@@ -61,6 +61,16 @@ são comparados por `qualified_name` relativo à raiz.
   - Só no Rust: chamadas que o CRG não liga (`handle_daemon`, `DaemonManager.run_daemon`).
   - Paridade do grafo inteiro deste repo: nós Rust 0.983, CALLS 0.930, IMPORTS_FROM 0.721,
     TESTED_BY 0.951.
+  - **Depois da resolução de módulos Rust** (2026-11-24, binário debug em `3840ab1`, CRG da
+    fonte em `bbdda4b`, mesmo cenário: clones em `3a786dc`, base `HEAD~3`, d=2): `impacted`
+    0.897 → 0.948 (186/192, 184 em comum); arquivos impactados fora dos alterados 0.857 → 0.976
+    (41/42); flows afetados 0.803 → 0.880 (69/72); arquivos e funções alterados seguem 1.000;
+    risco 1.0 / 1.0. Os `IMPORTS_FROM` que faltavam agora existem nos dois lados. Só no CRG (2):
+    `GraphQuery.node_coverage` e `GraphQuery.get_impact_radius`. Só no Rust (8):
+    `handle_daemon`, `handle_daemon_start`, `handle_estimate`, `handle_index`,
+    `DaemonManager.run_daemon`/`start_background`, `tool_cli.rs::execute`/`run`, chamadas que o
+    CRG não liga. Grafo inteiro deste repo no HEAD `3840ab1`: IMPORTS_FROM 0.991 (resolvido
+    1.000), CALLS 0.964, TESTED_BY 0.974.
 - **Cenário 2, d=2**: 23 nós só no CRG, quase todos `setup_method` de classes de teste. Os 3
   só no Rust vêm de uma chamada a `run_postprocess` que só o Rust resolve.
 - **Flows**:

@@ -1060,3 +1060,63 @@ Arestas so no CRG:
 Grafo inteiro deste repositorio (mesmo commit do CRG, inclui a propria sonda): IMPORTS_FROM
 0.729 (resolvido 0.534; crg 1597, rust 1860, both 1458), CALLS 0.931 (resolvido 0.859; crg
 18310, rust 18214, both 17614). A Tarefa 7 compara contra estes valores.
+
+## Rust imports probe (depois)
+
+Plano `docs/superpowers/plans/2026-11-24-fase2-rust-modulos.md` (Tarefas 2-6 e os fixes
+`3b7ce1c`, `c897a49`, `3840ab1`), CRG em `bbdda4b`, binario debug.
+
+| sonda rust-imports | antes | depois |
+|---|---|---|
+| nos | 1.000 (22/22) | 1.000 (22/22) |
+| CONTAINS | 0.737 | 0.737 |
+| CALLS | 0.267 (resolvido 0.429) | 1.000 (resolvido 1.000; 9/9) |
+| IMPORTS_FROM | 0.500 (resolvido 0.667) | 1.000 (resolvido 1.000; 7/7) |
+| IMPLEMENTS | 1.000 | 1.000 (1/1) |
+
+Nenhuma aresta so de um lado em CALLS, IMPORTS_FROM ou IMPLEMENTS. Os 5 CONTAINS so no Rust sao
+a hierarquia de diretorios (`app` -> `app/src`, `app/src` -> `app/src/store`, `util-lib` ->
+`util-lib/src` e raiz -> `app`/`util-lib`), que o CRG nao grava. A sonda nao foi alterada:
+`use super::config` em `store/disk.rs` nomeia um item inexistente de `store`, e
+`config::load()` dali vira `load` com `claimed_endpoint` `store/mod.rs::config.load` nos dois
+lados.
+
+Tres defeitos achados na medicao e corrigidos antes destes numeros:
+- `3b7ce1c`: com `codegraph index .` as chaves de arquivo sao `./app/src/main.rs`; o layout do
+  crate comparava com `app/src/main.rs` e nao achava a raiz, entao nenhum import Rust resolvia
+  (no HEAD `523a0be` a sonda dava IMPORTS_FROM 0.071, CALLS 0.188, IMPLEMENTS 0.000, pior que o
+  "antes"; os testes unitarios usavam chaves sem `./`).
+- `c897a49`: chamada com escopo cujo caminho nomeia um arquivo mas o item nao existe nele: o CRG
+  qualifica mesmo assim e o `_settle_unbound_endpoints` grava o nome solto; o Rust deixava
+  `config::load`.
+- `3840ab1`: o CRG monta o mapa de imports so com os itens de topo do arquivo; o Rust usava
+  tambem os `use` de dentro de `mod { }`/corpo de funcao para expandir chamadas (11 arestas
+  deste repo). `GRAPH_SHAPE_VERSION` foi a `crg-shape-12`.
+
+Corpus: a linha rust segue 1.000 em nos, CALLS, CONTAINS, IMPLEMENTS, IMPORTS_FROM, TESTED_BY,
+flows e ARI. Nas outras linguagens so mudou o ARI de python (0.403 -> 0.909, mesmas 8/5
+comunidades; o Leiden do Rust nao e deterministico ali e o parser python nao mudou).
+
+Grafo inteiro deste repositorio (HEAD `3840ab1`, inclui a sonda):
+
+| tipo | antes | depois |
+|---|---|---|
+| IMPORTS_FROM | 0.729 (resolvido 0.534; crg 1597, rust 1860, both 1458) | 0.991 (resolvido 1.000; crg 1605, rust 1591, both 1591) |
+| CALLS | 0.931 (resolvido 0.859; crg 18310, rust 18214, both 17614) | 0.964 (resolvido 0.914; crg 18663, rust 18551, both 18270) |
+| IMPLEMENTS | - | 0.891 (resolvido 0.846; crg 124, rust 120, both 115) |
+
+O que resta:
+- IMPORTS_FROM: as 14 arestas so no CRG saem de `schema_v15.sql`/`schema_cg.sql` (o Rust nao
+  indexa SQL). Entre arquivos Rust/Python a igualdade e total; 271 arestas `File` -> `File` nos
+  dois lados. O Rust grava mais linhas repetidas da mesma aresta (1991 linhas para 1591 pares;
+  CRG 1682 para 1605).
+- IMPLEMENTS so no CRG: `impl From<X> for T` (4, traco generico de fora), `impl CounterExt for
+  dashmap::DashMap<..>` (tipo com caminho), `TreeSitterParser` -> `codegraph-core/src/lib.rs::
+  CodeParser` (o CRG grava o alvo qualificado mesmo sem no, pois `CodeParser` vem de `pub use
+  traits::*`; o Rust deixa `CodeParser`); `Scheduler`/`Aggregator` declarados em `mod` inline de
+  `coordination/mod.rs` ficam texto no CRG e o Rust liga ao no do mesmo arquivo (4).
+- CALLS (393 so no CRG, 281 so no Rust): a maior parte vem dos 32 nos com sufixo divergente
+  (`@L<linha>` no Rust, `:S<hash>` no CRG, funcoes duplicadas por `cfg`) e da resolucao por nome
+  solto/lexica (100 chamadas que o CRG deixa texto e o Rust liga; 58 que so o CRG liga). Ligadas a
+  caminhos Rust: 59 `Tipo::m` que o CRG deixa texto e o Rust liga por busca exata (fora deste
+  plano), mais os limites de `pub use`, glob e `mod` listados no PLANO.md.

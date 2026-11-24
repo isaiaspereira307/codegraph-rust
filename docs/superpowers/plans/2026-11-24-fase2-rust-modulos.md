@@ -202,3 +202,9 @@ Goals: IMPORTS_FROM, CALLS, IMPLEMENTS Jaccard 1.000 on the new multi-file probe
 - Spec coverage: Design items 1-3 → Tasks 2-3; item 4 (final-segment rule) → Task 3; item 5 (case) → Task 3 test (no new code, stated in Design); item 6 → Tasks 5-6; measurement and docs → Tasks 1 and 7; shape-version bump → Task 4.
 - Type consistency: `RustCrates`, `CrateLayout`, `set_rust_crates`, `with_rust_crates`, `rust_path_target`, `RUST_ALIAS_ATTR` are used with the same names in every task that mentions them.
 - Known risk, not covered by tasks: editing only `Cargo.toml` leaves old edges until a source file changes (non-goal, documented in Task 7).
+
+## Resultado (2026-11-24)
+
+- Probe `rust-imports`: CALLS, IMPORTS_FROM, IMPLEMENTS 1.000 (from 0.267 / 0.500 / 1.000). This repo: IMPORTS_FROM 0.729 → 0.991 (resolved 1.000; the rest is SQL), CALLS 0.931 → 0.964. Phase 3 Rust scenario `impacted` 0.897 → 0.948. Numbers and remaining edges: `docs/parity/baseline.md` "Rust imports probe (depois)".
+- Measuring found three defects, fixed in separate commits: `./`-prefixed file keys never matched a crate root, so no Rust import resolved under `codegraph index .` (`3b7ce1c`); a scoped call to a missing item did not settle to the plain name as CRG does (`c897a49`); `use` inside `mod { }`/function bodies set aliases CRG ignores (`3840ab1`).
+- `GRAPH_SHAPE_VERSION` lives in `crates/codegraph-mcp/src/indexer.rs`, not `crg_shape.rs`; it went to `crg-shape-11` (Task 4) and then `crg-shape-12` (`3840ab1`, parser output changed).

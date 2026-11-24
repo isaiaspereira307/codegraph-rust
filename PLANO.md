@@ -210,12 +210,24 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    `_settle_unbound_endpoints` do CRG (vale para toda linguagem), CALLS/REFERENCES para
    `<arquivo>::Dono.m` sem nó viram `m` (`self.clone()` derivado), sem busca léxica; chamada com
    receptor sem tipo (`x.m()`, não `self`) só liga a função livre, nunca a método. Corpus: 1.00 em nós, CALLS,
-   CONTAINS, IMPLEMENTS, IMPORTS_FROM e TESTED_BY, e determinístico. Fica para depois: resolução
-   de módulos entre arquivos (`_resolve_rust_module_file`: raiz do crate por `lib.rs`/`main.rs`,
-   `crate::`/`super::`/dependências do `Cargo.toml`, `use m::f` com primeiro segmento solto,
-   busca limitada à raiz do repositório) e, com ela, `IMPLEMENTS`/`X::m` para itens de outro
-   arquivo; `IMPLEMENTS` e CONTAINS de `impl` cujo tipo não está no arquivo (o CRG grava origem
-   `F::Tipo` sem nó); receptor tipado (`let r = Repo::new(); r.save()`).
+   CONTAINS, IMPLEMENTS, IMPORTS_FROM e TESTED_BY, e determinístico.
+   ✅ Resolução de módulos entre arquivos (plano `docs/superpowers/plans/2026-11-24-fase2-rust-modulos.md`,
+   2026-11-24): `RustCrates` lê os `Cargo.toml` (layout `[lib] path`/`src/lib.rs`/`src/main.rs`,
+   dependências por `path` e `workspace = true`), o `ModuleIndex` resolve `crate::`/`self::`/
+   `super::`/nome de dependência/módulo da raiz, o import grava o alias local, e `X::m`/`a::b::T::m`
+   e `impl Tr for T` ligam a itens de outro arquivo; chamada cujo módulo existe mas o item não vira
+   o nome solto, como no CRG. Sonda `rust-imports`: CALLS, IMPORTS_FROM e IMPLEMENTS 1.000. Este
+   repo: IMPORTS_FROM 0.729 → 0.991 (resolvido 1.000; o resto é SQL), CALLS 0.931 → 0.964.
+   Fica para depois: re-exports (`pub use`, o CRG grava o alvo qualificado mesmo sem nó em
+   `IMPLEMENTS`, o Rust deixa texto), imports glob, declarações `mod` (e `#[path]`), receptor
+   tipado (`let r = Repo::new(); r.save()`), editar só o `Cargo.toml` não re-resolve fontes sem
+   mudança, `super::` acima da raiz do crate dá `None` (o CRG não para ali), os ramos de nome
+   definido de um segmento e de `mod` inline do `_resolve_rust_scoped_call` não foram portados
+   (`Scheduler` em `mod` inline: o CRG deixa texto, o Rust liga no mesmo arquivo), arquivos `.rs`
+   soltos sem `Cargo.toml` não ligam mais (antes uma busca por `lib.rs`/`main.rs` acima ligava),
+   `rust_path_target` roda antes do `target_node_id` do LSP, uma alocação de `Vec` por aresta
+   `Calls`; `IMPLEMENTS` e CONTAINS de `impl` cujo tipo não está no arquivo (o CRG grava origem
+   `F::Tipo` sem nó).
 5. ✅ **Python** (plano `docs/superpowers/plans/2026-11-20-fase2-python.md`, commits
    `d637b61..11cbcb5`): extrator reescrito no molde Go/Java/Rust (pré-passe de nomes de topo,
    imports `from`/`import` e `TYPE_CHECKING`; chamador por pilha, corpo de classe e decorators
@@ -282,7 +294,9 @@ demanda, depois do MVP.
    Feito: `canonical_file_key` (core) gera a chave relativa à raiz para o hash do ID; nós
    `File` usam a chave como nome; o caminho de diretórios (`Directory`) resolve pela mesma
    chave. Fixture de 2 arquivos em `.`, caminho absoluto e `./../fx/.`: mesmos UUIDs.
-   `GRAPH_SHAPE_VERSION` virou `crg-shape-8` (hoje `crg-shape-10`; força rebuild de grafos antigos). Pendente:
+   `GRAPH_SHAPE_VERSION` virou `crg-shape-8` (hoje `crg-shape-12`, em
+   `crates/codegraph-mcp/src/indexer.rs`; `-11` com a resolução de módulos Rust e `-12` com o
+   alias só de `use` de topo; força rebuild de grafos antigos). Pendente:
    `qualified_name` guarda o caminho cru, então `..` não é normalizado nessa coluna.
 2. ✅ **`line` das arestas**: preencher a linha da chamada/import em CALLS e IMPORTS_FROM (hoje
    0, e o `TESTED_BY` herda o 0), a partir do `source_span`, como o CRG grava. O
@@ -397,7 +411,8 @@ Fica para depois:
 - Gaps de import não portados: ciclos de import quase nunca aparecem em bancos indexados pelo
   Rust (resolução de módulo Rust entre arquivos pendente, Fase 2). Medido no ledger da Task 10:
   8 de 1831 arestas IMPORTS_FROM deste repo ligavam dois `File`; depois do rebuild de 2026-11-24,
-  141 de 1860 (o sufixo `@L1` que sujava 174 dos 200 nós `File` foi corrigido, ver abaixo). O
+  141 de 1860 (o sufixo `@L1` que sujava 174 dos 200 nós `File` foi corrigido, ver abaixo). Com a
+  resolução de módulos Rust (2026-11-24), 271 pares distintos `File` → `File`, os mesmos do CRG. O
   parser Rust nunca grava `edges.extra.import_context`,
   então não há filtro de import type-only/pacote-pai/deferred, `load_time` é sempre true e nós
   `extra.virtual` não são excluídos do conjunto de arquivos dos ciclos.
@@ -474,10 +489,13 @@ Fica para depois:
 
 Em ordem; cada item ganha plano próprio em `docs/superpowers/plans/`:
 
-1. **Resolução de módulos Rust entre arquivos** (`_resolve_rust_module_file`: raiz do crate por
+1. ✅ **Resolução de módulos Rust entre arquivos** (`_resolve_rust_module_file`: raiz do crate por
    `lib.rs`/`main.rs`, `crate::`/`super::`/dependências do `Cargo.toml`, `use m::f`). Traz
    `IMPLEMENTS`/`X::m` para itens de outro arquivo e fecha o critério da Fase 3 em Rust
-   (0.897) e os ciclos de import da Fase 4.
+   (0.897) e os ciclos de import da Fase 4. Feito em 2026-11-24 (plano
+   `docs/superpowers/plans/2026-11-24-fase2-rust-modulos.md`): `impacted` do cenário Rust da
+   Fase 3 0.897 → 0.948; 271 arestas `File` → `File` iguais ao CRG neste repo. O que resta está
+   na Fase 2, item 4.
 2. **`INHERITS` no `GraphQuery`**: resolver alvos de texto por nome, para as ferramentas
    seguirem herança (TS/JS, Go, Java, Python).
 3. **Distribuição**: release com binários (Linux/macOS/Windows), Homebrew, GitHub Action,

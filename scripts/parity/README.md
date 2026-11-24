@@ -28,6 +28,11 @@ python3 scripts/parity/parity.py run scripts/parity/probes/python --work $TMPDIR
 # `fast` tier drops References).
 python3 scripts/parity/parity.py run scripts/parity/probes/python-imports --work $TMPDIR/pyimports --md $TMPDIR/pyimports.md
 
+# Rust import probe (Cargo workspace: crate::/self::/super::, path dependency, `use` aliases,
+# scoped calls, `impl Tr for T` across files, Glob.rs/glob.rs case). Result: nodes, CALLS,
+# IMPORTS_FROM and IMPLEMENTS 1.000; CONTAINS 0.737 (Rust-only Directory hierarchy).
+python3 scripts/parity/parity.py run scripts/parity/probes/rust-imports --work $TMPDIR/rsimports --md $TMPDIR/rsimports.md
+
 # One arbitrary directory
 python3 scripts/parity/parity.py run <src_dir> --work $TMPDIR/parity-run --md out.md --json out.json
 
