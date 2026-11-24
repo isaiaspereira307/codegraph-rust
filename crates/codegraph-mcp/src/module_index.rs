@@ -1,6 +1,7 @@
 // ABOUTME: Maps an import's text to the indexed file it names, per the importer's language,
 // ABOUTME: following code-review-graph's resolvers; anything else (Go, packages) stays text.
 
+use crate::rust_crates::{CrateLayout, RustCrates};
 use std::collections::HashMap;
 
 /// Extensions code-review-graph appends to a relative TS/JS import, in order.
@@ -93,9 +94,32 @@ pub(crate) fn normalize(path: &str) -> String {
     }
 }
 
+/// The module path of `file` below `source_root`: its directories plus the file stem, except
+/// that `lib.rs`/`main.rs`/`mod.rs` name their directory's module. Outside the root: none.
+fn rust_current_module_parts<'a>(file: &'a str, source_root: &str) -> Vec<&'a str> {
+    let relative = if source_root.is_empty() {
+        Some(file)
+    } else {
+        file.strip_prefix(source_root)
+            .and_then(|rest| rest.strip_prefix('/'))
+    };
+    let Some(relative) = relative else {
+        return Vec::new();
+    };
+    let mut parts: Vec<&str> = relative.split('/').filter(|s| !s.is_empty()).collect();
+    if let Some(name) = parts.pop()
+        && !matches!(name, "lib.rs" | "main.rs" | "mod.rs")
+    {
+        parts.push(name.strip_suffix(".rs").unwrap_or(name));
+    }
+    parts
+}
+
 pub(crate) struct ModuleIndex {
     /// Normalized path → the indexed file path as given.
     files: HashMap<String, String>,
+    /// Cargo layouts that anchor Rust paths; empty means every Rust import stays text.
+    rust_crates: RustCrates,
 }
 
 impl ModuleIndex {
@@ -105,7 +129,16 @@ impl ModuleIndex {
                 .into_iter()
                 .map(|file| (normalize(file), file.to_string()))
                 .collect(),
+            rust_crates: RustCrates::default(),
         }
+    }
+
+    /// Supplies the Cargo layouts Rust imports resolve through.
+    // The indexer wiring (Task 4) is the first non-test caller.
+    #[allow(dead_code)]
+    pub(crate) fn with_rust_crates(mut self, crates: RustCrates) -> Self {
+        self.rust_crates = crates;
+        self
     }
 
     fn file(&self, path: &str) -> Option<&str> {
@@ -187,62 +220,88 @@ impl ModuleIndex {
             .find_map(|extension| self.file(&format!("{base}/index{extension}")))
     }
 
-    /// `crate::` paths start at the crate root (the nearest ancestor directory holding
-    /// `lib.rs` or `main.rs`); `self::`/`super::` at the importer's module. Other first
-    /// segments (std, extern crates) stay text. The last segment may be an item.
+    /// The module file for `parts` below a crate's source root: `<parts>.rs`, then
+    /// `<parts>/mod.rs`; no parts is the crate root file. Lookups are exact-case.
+    fn rust_module_file(&self, layout: &CrateLayout, parts: &[&str]) -> Option<&str> {
+        if parts.is_empty() {
+            return self.file(&layout.root_file);
+        }
+        let path = parts.join("/");
+        let under_root = |tail: String| -> String {
+            if layout.source_root.is_empty() {
+                tail
+            } else {
+                format!("{}/{tail}", layout.source_root)
+            }
+        };
+        self.file(&under_root(format!("{path}.rs")))
+            .or_else(|| self.file(&under_root(format!("{path}/mod.rs"))))
+    }
+
+    /// Follows code-review-graph's `_resolve_rust_module_file`. The importer's Cargo crate
+    /// anchors `crate::` (crate root), `self::` (the importer's module), `super::` (parent
+    /// modules) and path-dependency names (that crate's root). Any other first segment must be
+    /// a module of the crate root. Only the last segment may be an item; without a crate, or
+    /// when a path climbs above the root, the import stays text.
     fn rust(&self, importer: &str, text: &str) -> Option<&str> {
-        let mut remaining: Vec<&str> = text.split("::").filter(|s| !s.is_empty()).collect();
-        let first = *remaining.first()?;
-        if !matches!(first, "crate" | "self" | "super") {
-            return None;
-        }
-        let file = PathParts::new(importer);
-        let mut root = file.parent();
-        let root_file = loop {
-            if let Some(found) = ["lib.rs", "main.rs"]
-                .iter()
-                .find_map(|name| self.file(&root.join(name)))
-            {
-                break found;
-            }
-            root.segments.pop()?;
-        };
-        let module_file = |parts: &[&str]| -> Option<&str> {
-            if parts.is_empty() {
-                return Some(root_file);
-            }
-            let path = parts.join("/");
-            self.file(&root.join(&format!("{path}.rs")))
-                .or_else(|| self.file(&root.join(&format!("{path}/mod.rs"))))
-        };
+        let segments: Vec<&str> = text.split("::").filter(|s| !s.is_empty()).collect();
+        let (&first, rest) = segments.split_first()?;
+        let importer_path = normalize(importer);
+        let own = self.rust_crates.crate_of(&importer_path)?;
+        let mut layout = own;
         let mut current: Vec<&str> = Vec::new();
-        if first == "crate" {
-            remaining.remove(0);
-        } else {
-            // The importer's own module path below the crate root.
-            current = file.segments[root.segments.len()..].to_vec();
-            let stem = current.pop()?.trim_end_matches(".rs");
-            if !matches!(stem, "lib" | "main" | "mod") {
-                current.push(stem);
+        let mut remaining: &[&str] = &segments;
+        let anchored;
+        let mut resolved = match first {
+            "crate" => {
+                anchored = true;
+                remaining = rest;
+                self.rust_module_file(layout, &[])?
             }
-            if first == "self" {
-                remaining.remove(0);
+            "self" => {
+                anchored = true;
+                remaining = rest;
+                current = rust_current_module_parts(&importer_path, &layout.source_root);
+                self.file(&importer_path)?
             }
-            while remaining.first() == Some(&"super") {
-                remaining.remove(0);
-                current.pop()?;
+            "super" => {
+                anchored = true;
+                current = rust_current_module_parts(&importer_path, &layout.source_root);
+                while let Some((&"super", tail)) = remaining.split_first() {
+                    remaining = tail;
+                    current.pop()?;
+                }
+                self.rust_module_file(layout, &current)?
             }
-        }
-        let mut resolved = module_file(&current)?;
+            _ => match self.rust_crates.dependency(own, first) {
+                Some(dependency) => {
+                    // Never follows the dependency's own dependencies: cycles terminate.
+                    anchored = true;
+                    remaining = rest;
+                    layout = dependency;
+                    self.rust_module_file(layout, &[])?
+                }
+                None => {
+                    anchored = false;
+                    self.rust_module_file(layout, &[])?
+                }
+            },
+        };
         for (index, segment) in remaining.iter().enumerate() {
-            current.push(segment);
-            match module_file(&current) {
-                Some(found) => resolved = found,
-                None if index == remaining.len() - 1 => break,
-                None => return None,
+            current.push(*segment);
+            if let Some(found) = self.rust_module_file(layout, &current) {
+                resolved = found;
+                continue;
             }
+            // Only a module the path reached exports the final item: a lone `Vec` reached none.
+            if index != remaining.len() - 1 || (index == 0 && !anchored) {
+                return None;
+            }
+            break;
         }
-        Some(resolved)
+        let resolved_path = normalize(resolved);
+        let inside = |dir: &str| dir.is_empty() || resolved_path.starts_with(&format!("{dir}/"));
+        (inside(&own.dir) || inside(&layout.dir)).then_some(resolved)
     }
 
     /// `com.example.Foo` is `com/example/Foo.java` under some ancestor of the importer;
@@ -268,9 +327,25 @@ impl ModuleIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rust_crates::RustCrates;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// `files` indexed, with `manifests` (directory → `Cargo.toml` text) read as Cargo layouts.
+    fn rust_index(files: &[&str], manifests: &[(&str, &str)]) -> ModuleIndex {
+        let set: BTreeSet<String> = files.iter().map(|f| f.to_string()).collect();
+        let manifests: BTreeMap<String, String> = manifests
+            .iter()
+            .map(|(dir, text)| (dir.to_string(), text.to_string()))
+            .collect();
+        ModuleIndex::new(files.iter().copied())
+            .with_rust_crates(RustCrates::from_manifests(&manifests, &set))
+    }
+
+    const CRATE_FILES: [&str; 3] = ["crate/src/lib.rs", "crate/src/m.rs", "crate/src/m/inner.rs"];
+    const CRATE_MANIFEST: (&str, &str) = ("crate", "[package]\nname = \"krate\"\n");
 
     fn index() -> ModuleIndex {
-        ModuleIndex::new([
+        let files = [
             "app/caller.py",
             "app/sample.py",
             "app/core.py",
@@ -288,10 +363,10 @@ mod tests {
             "crate/src/lib.rs",
             "crate/src/m.rs",
             "crate/src/m/inner.rs",
-            "crate/src/serde.rs",
             "j/src/com/example/Foo.java",
             "j/src/com/example/Main.java",
-        ])
+        ];
+        rust_index(&files, &[CRATE_MANIFEST])
     }
 
     #[test]
@@ -395,6 +470,106 @@ mod tests {
         );
         assert_eq!(index.resolve(lib, "serde::Serialize"), None);
         assert_eq!(index.resolve(lib, "std::fmt"), None);
+    }
+
+    #[test]
+    fn rust_unanchored_first_segment_is_a_crate_root_module() {
+        let index = index();
+        let lib = "crate/src/lib.rs";
+        assert_eq!(index.resolve(lib, "m::f"), Some("crate/src/m.rs"));
+        assert_eq!(
+            index.resolve("crate/src/m/inner.rs", "m::inner"),
+            Some("crate/src/m/inner.rs")
+        );
+        assert_eq!(index.resolve(lib, "Vec::new"), None);
+        assert_eq!(index.resolve(lib, "Vec"), None);
+        assert_eq!(index.resolve(lib, "serde::Serialize"), None);
+    }
+
+    #[test]
+    fn rust_path_dependency_resolves_to_its_lib_rs() {
+        let files = [
+            "app/src/main.rs",
+            "other-lib/src/lib.rs",
+            "other-lib/src/text.rs",
+        ];
+        let index = rust_index(
+            &files,
+            &[
+                (
+                    "app",
+                    "[package]\nname = \"app\"\n[dependencies]\nother-lib = { path = \"../other-lib\" }\n",
+                ),
+                ("other-lib", "[package]\nname = \"other-lib\"\n"),
+            ],
+        );
+        let main = "app/src/main.rs";
+        assert_eq!(
+            index.resolve(main, "other_lib::text::shout"),
+            Some("other-lib/src/text.rs")
+        );
+        assert_eq!(
+            index.resolve(main, "other-lib::text"),
+            Some("other-lib/src/text.rs")
+        );
+        assert_eq!(
+            index.resolve(main, "other_lib::X"),
+            Some("other-lib/src/lib.rs")
+        );
+        assert_eq!(
+            index.resolve(main, "other_lib"),
+            Some("other-lib/src/lib.rs")
+        );
+        assert_eq!(index.resolve(main, "other_lib::missing::X"), None);
+        // The dependency's modules are not the importer's: `text` alone is not in `app`.
+        assert_eq!(index.resolve(main, "text::shout"), None);
+    }
+
+    #[test]
+    fn rust_without_a_manifest_stays_text() {
+        let index = rust_index(&CRATE_FILES, &[]);
+        let lib = "crate/src/lib.rs";
+        assert_eq!(index.resolve(lib, "crate::m"), None);
+        assert_eq!(index.resolve(lib, "m::f"), None);
+        assert_eq!(index.resolve("crate/src/m/inner.rs", "super::f"), None);
+        assert_eq!(index.resolve("crate/src/m.rs", "self::inner"), None);
+    }
+
+    #[test]
+    fn rust_super_above_the_root_and_self_in_root_files() {
+        let index = index();
+        let lib = "crate/src/lib.rs";
+        assert_eq!(index.resolve(lib, "super::x"), None);
+        assert_eq!(index.resolve("crate/src/m.rs", "super::super::x"), None);
+        assert_eq!(index.resolve(lib, "self::m"), Some("crate/src/m.rs"));
+        assert_eq!(
+            index.resolve(lib, "self::m::inner::g"),
+            Some("crate/src/m/inner.rs")
+        );
+        assert_eq!(index.resolve(lib, "self::Item"), Some("crate/src/lib.rs"));
+        assert_eq!(
+            index.resolve("crate/src/m.rs", "super::m"),
+            Some("crate/src/m.rs")
+        );
+    }
+
+    #[test]
+    fn rust_module_files_match_case_exactly() {
+        let upper = rust_index(
+            &["crate/src/lib.rs", "crate/src/Glob.rs"],
+            &[CRATE_MANIFEST],
+        );
+        assert_eq!(upper.resolve("crate/src/lib.rs", "crate::glob::x"), None);
+        assert_eq!(upper.resolve("crate/src/lib.rs", "glob::x"), None);
+        let lower = rust_index(
+            &["crate/src/lib.rs", "crate/src/glob.rs"],
+            &[CRATE_MANIFEST],
+        );
+        assert_eq!(lower.resolve("crate/src/lib.rs", "crate::Glob::x"), None);
+        assert_eq!(
+            lower.resolve("crate/src/lib.rs", "crate::glob::x"),
+            Some("crate/src/glob.rs")
+        );
     }
 
     #[test]
