@@ -5,7 +5,8 @@ use crate::git_changes::changed_files;
 use crate::review::{ReviewOptions, build_review, churn_counts, minimal_view};
 use std::path::PathBuf;
 
-/// Tools whose answer depends on the git work tree, which `data_version` does not track.
+/// Tools whose answer depends on the git work tree, which the database change marker
+/// (`GraphQuery::change_marker`, part of every cache key) does not track.
 const UNCACHED_TOOLS: &[&str] = &[
     "detect_changes",
     "get_review_context",
@@ -308,10 +309,18 @@ impl GraphToolExecutor {
         result
     }
 
-    /// Generate a cache key from project, tool name, and parameters
-    fn cache_key(project_id: &str, tool_name: &str, parameters: &JsonValue) -> String {
-        // Create deterministic key from project + function name + serialized params
-        format!("{}:{}:{}", project_id, tool_name, parameters.to_string())
+    /// Generate a cache key from project, database change marker, tool name and parameters.
+    /// Any commit to the store moves the marker, so entries of an older state never hit.
+    fn cache_key(
+        project_id: &str,
+        marker: (i64, i64),
+        tool_name: &str,
+        parameters: &JsonValue,
+    ) -> String {
+        format!(
+            "{}@{}.{}:{}:{}",
+            project_id, marker.0, marker.1, tool_name, parameters
+        )
     }
 
     /// Execute a tool call from LLM
@@ -332,14 +341,24 @@ impl GraphToolExecutor {
 
             let project_id = self.graph_query.project_id();
 
-            // Check cache if enabled
-            if self.cache_enabled && !is_uncached(tool_name) {
-                let cache_key = Self::cache_key(&project_id, tool_name, &parameters);
-
+            // Check cache if enabled. The key carries the change marker read before the
+            // query runs: a commit during the query only files the entry under a marker
+            // that never comes back, so a stale answer is never served.
+            let cache_key = if self.cache_enabled && !is_uncached(tool_name) {
+                let marker = self
+                    .graph_query
+                    .change_marker()
+                    .await
+                    .map_err(|e| McpError::Protocol(format!("graph store unavailable: {e}")))?;
+                Some(Self::cache_key(&project_id, marker, tool_name, &parameters))
+            } else {
+                None
+            };
+            if let Some(cache_key) = &cache_key {
                 // Try cache lookup
                 {
                     let mut cache = self.cache.lock();
-                    if let Some(cached_result) = cache.get(&cache_key) {
+                    if let Some(cached_result) = cache.get(cache_key) {
                         // Cache hit
                         let mut stats = self.cache_stats.lock();
                         stats.hits += 1;
@@ -424,8 +443,7 @@ impl GraphToolExecutor {
             let result = self.truncate_if_oversized(tool_name, result);
 
             // Cache the result if enabled
-            if self.cache_enabled && !is_uncached(tool_name) {
-                let cache_key = Self::cache_key(&project_id, tool_name, &parameters);
+            if let Some(cache_key) = cache_key {
                 let mut cache = self.cache.lock();
                 let was_evicted = cache.len() >= cache.cap().get();
                 cache.put(cache_key, result.clone());
@@ -1202,7 +1220,13 @@ impl GraphToolExecutor {
             .iter()
             .map(|h| {
                 if minimal {
-                    json!({"name": h.name, "kind": h.kind, "total_degree": h.total_degree})
+                    // qualified_name stays so the answer chains into the node tools.
+                    json!({
+                        "name": h.name,
+                        "qualified_name": h.qualified_name,
+                        "kind": h.kind,
+                        "total_degree": h.total_degree
+                    })
                 } else {
                     serde_json::to_value(h).unwrap_or(JsonValue::Null)
                 }
@@ -1570,9 +1594,12 @@ mod tests {
 
         let project = "proj-a";
 
-        let key1 = GraphToolExecutor::cache_key(project, "get_transitive_dependencies", &params1);
-        let key2 = GraphToolExecutor::cache_key(project, "get_transitive_dependencies", &params2);
-        let key3 = GraphToolExecutor::cache_key(project, "get_transitive_dependencies", &params3);
+        let key1 =
+            GraphToolExecutor::cache_key(project, (1, 0), "get_transitive_dependencies", &params1);
+        let key2 =
+            GraphToolExecutor::cache_key(project, (1, 0), "get_transitive_dependencies", &params2);
+        let key3 =
+            GraphToolExecutor::cache_key(project, (1, 0), "get_transitive_dependencies", &params3);
 
         // Same params should generate same key
         assert_eq!(key1, key2);
@@ -1586,12 +1613,12 @@ mod tests {
             "node_id": "nodes:123"
         });
 
-        let key_a = GraphToolExecutor::cache_key("proj-a", "get_hub_nodes", &params);
-        let key_b = GraphToolExecutor::cache_key("proj-b", "get_hub_nodes", &params);
+        let key_a = GraphToolExecutor::cache_key("proj-a", (1, 0), "get_hub_nodes", &params);
+        let key_b = GraphToolExecutor::cache_key("proj-b", (1, 0), "get_hub_nodes", &params);
 
         assert_ne!(key_a, key_b);
         assert!(
-            key_a.starts_with("proj-a:"),
+            key_a.starts_with("proj-a@"),
             "Project scope should prefix cache key"
         );
     }
@@ -1727,6 +1754,140 @@ mod tests {
         with_default(subscriber, f);
 
         writer.into_string()
+    }
+
+    fn insert_node(store: &codegraph_graph::sqlite_store::SqliteGraphStore, name: &str) {
+        store
+            .with_conn_blocking(|conn| {
+                conn.execute_batch(&format!(
+                    "INSERT INTO nodes (kind, name, qualified_name, file_path, line_start, \
+                     line_end, extra, updated_at) \
+                     VALUES ('Function', '{name}', 'm.py::{name}', 'm.py', 1, 2, '{{}}', 0)"
+                ))?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn hit_names(result: &JsonValue) -> Vec<String> {
+        let mut names: Vec<String> = result["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A cached answer is not served once the store changes, whether the write came
+    /// through the executor's own connection or another one (`codegraph update`).
+    #[tokio::test]
+    async fn cached_results_follow_database_changes() {
+        use codegraph_graph::sqlite_store::SqliteGraphStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteGraphStore::open(dir.path()).unwrap();
+        insert_node(&store, "alpha_one");
+        let executor =
+            GraphToolExecutor::with_cache(Arc::new(GraphQuery::new(store.clone())), true, 10);
+        let params = json!({ "name": "alpha" });
+
+        let first = executor
+            .execute("find_nodes_by_name", params.clone())
+            .await
+            .unwrap();
+        assert_eq!(hit_names(&first), ["alpha_one"]);
+        executor
+            .execute("find_nodes_by_name", params.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            executor.cache_stats().hits,
+            1,
+            "unchanged store answers from cache"
+        );
+
+        // Same connection: data_version stays, total_changes moves.
+        insert_node(&store, "alpha_two");
+        let second = executor
+            .execute("find_nodes_by_name", params.clone())
+            .await
+            .unwrap();
+        assert_eq!(hit_names(&second), ["alpha_one", "alpha_two"]);
+
+        // Another connection: data_version moves.
+        let other = SqliteGraphStore::open(dir.path()).unwrap();
+        insert_node(&other, "alpha_three");
+        let third = executor
+            .execute("find_nodes_by_name", params)
+            .await
+            .unwrap();
+        assert_eq!(hit_names(&third), ["alpha_one", "alpha_three", "alpha_two"]);
+        assert_eq!(executor.cache_stats().hits, 1);
+    }
+
+    #[tokio::test]
+    async fn suggested_questions_on_an_empty_database() {
+        use codegraph_graph::sqlite_store::SqliteGraphStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteGraphStore::open(dir.path()).unwrap();
+        let executor = GraphToolExecutor::with_cache(Arc::new(GraphQuery::new(store)), false, 10);
+        let out = executor
+            .execute("get_suggested_questions", json!({}))
+            .await
+            .unwrap();
+        let result = &out["result"];
+        assert_eq!(result["questions"], json!([]));
+        assert_eq!(result["count"], 0);
+        assert_eq!(
+            result["by_priority"],
+            json!({ "high": 0, "medium": 0, "low": 0 })
+        );
+    }
+
+    /// `detail_level=minimal` keeps `qualified_name`, which the node tools accept as node_id.
+    #[tokio::test]
+    async fn minimal_hubs_keep_a_chainable_qualified_name() {
+        use codegraph_graph::sqlite_store::SqliteGraphStore;
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteGraphStore::open(dir.path()).unwrap();
+        for name in ["hub", "a", "b", "c"] {
+            insert_node(&store, name);
+        }
+        store
+            .with_conn_blocking(|conn| {
+                for caller in ["a", "b", "c"] {
+                    conn.execute_batch(&format!(
+                        "INSERT INTO edges (kind, source_qualified, target_qualified, \
+                         file_path, line, updated_at) \
+                         VALUES ('CALLS', 'm.py::{caller}', 'm.py::hub', 'm.py', 1, 0)"
+                    ))?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let executor = GraphToolExecutor::with_cache(Arc::new(GraphQuery::new(store)), false, 10);
+        let out = executor
+            .execute(
+                "get_hub_nodes",
+                json!({ "detail_level": "minimal", "top_n": 1 }),
+            )
+            .await
+            .unwrap();
+        let hub = &out["result"]["hub_nodes"][0];
+        assert_eq!(hub["qualified_name"], "m.py::hub", "{out}");
+        let callers = executor
+            .execute(
+                "get_reverse_dependencies",
+                json!({ "node_id": hub["qualified_name"], "edge_type": "Calls", "depth": 1 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            callers["result"].as_array().map(Vec::len),
+            Some(3),
+            "{callers}"
+        );
     }
 }
 

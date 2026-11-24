@@ -308,7 +308,7 @@ pub struct HubRequest {
     /// Hubs to return (1-100, default 10)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_n: Option<u32>,
-    /// standard (default) or minimal (name, kind, total_degree)
+    /// standard (default) or minimal (name, qualified_name, kind, total_degree)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail_level: Option<String>,
     /// Optional: only nodes with at least this many incoming + outgoing connections
@@ -626,7 +626,7 @@ impl CodeGraphMCPServer {
     }
 
     #[tool(
-        description = "Most connected nodes (in + out edges), highest total degree first. Finds central components and god objects."
+        description = "Most connected nodes (in + out edges), highest total degree first. Finds central components and god objects. Each hub's qualified_name (kept in detail_level=minimal) is accepted as node_id by the other node tools."
     )]
     async fn get_hub_nodes(
         &self,
@@ -678,6 +678,11 @@ impl CodeGraphMCPServer {
             .output()
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // The child committed through another connection; the cache keys already move with
+        // `data_version`, but drop the old entries rather than let them age out of the LRU.
+        if let Some(executor) = self.executor.get() {
+            executor.clear_cache();
+        }
 
         let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&output.stderr));

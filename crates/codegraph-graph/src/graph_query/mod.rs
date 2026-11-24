@@ -57,6 +57,29 @@ fn is_dependency(kind: &str) -> bool {
     DEPENDENCY_EDGE_KINDS.contains(&kind)
 }
 
+fn change_marker(conn: &rusqlite::Connection) -> Result<(i64, i64)> {
+    Ok((
+        conn.query_row("PRAGMA data_version", [], |r| r.get(0))?,
+        conn.query_row("SELECT total_changes()", [], |r| r.get(0))?,
+    ))
+}
+
+/// The snapshot for `conn`'s current state, from `cache` when the change marker matches.
+/// Callers holding the connection (or a read transaction) can load other data from the
+/// same state right after.
+fn snapshot_in(conn: &rusqlite::Connection, cache: &Mutex<Cached>) -> Result<Arc<Snapshot>> {
+    let key = change_marker(conn)?;
+    let mut cached = cache.lock().expect("snapshot cache poisoned");
+    if let Some((k, snap)) = cached.as_ref()
+        && *k == key
+    {
+        return Ok(snap.clone());
+    }
+    let snap = Arc::new(Snapshot::load(conn)?);
+    *cached = Some((key, snap.clone()));
+    Ok(snap)
+}
+
 fn round(value: f64, places: i32) -> f64 {
     let scale = 10f64.powi(places);
     (value * scale).round() / scale
@@ -84,25 +107,18 @@ impl GraphQuery {
         self.clone()
     }
 
+    /// Change marker of the database: `PRAGMA data_version` (moves when another connection
+    /// commits) paired with `total_changes()` (moves when this connection writes). Equal
+    /// markers mean the same committed state, so callers may key result caches on it.
+    pub async fn change_marker(&self) -> Result<(i64, i64)> {
+        self.store.with_conn(|conn| change_marker(conn)).await
+    }
+
     /// Current snapshot; rebuilt when this connection or any other committed a change.
     async fn snapshot(&self) -> Result<Arc<Snapshot>> {
         let cache = self.cache.clone();
         self.store
-            .with_conn(move |conn| {
-                let key: (i64, i64) = (
-                    conn.query_row("PRAGMA data_version", [], |r| r.get(0))?,
-                    conn.query_row("SELECT total_changes()", [], |r| r.get(0))?,
-                );
-                let mut cached = cache.lock().expect("snapshot cache poisoned");
-                if let Some((k, snap)) = cached.as_ref()
-                    && *k == key
-                {
-                    return Ok(snap.clone());
-                }
-                let snap = Arc::new(Snapshot::load(conn)?);
-                *cached = Some((key, snap.clone()));
-                Ok(snap)
-            })
+            .with_conn(move |conn| snapshot_in(conn, &cache))
             .await
     }
 

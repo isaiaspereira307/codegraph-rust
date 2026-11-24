@@ -654,7 +654,8 @@ impl GraphToolSchemas {
             name: "get_hub_nodes".to_string(),
             description: "Most connected nodes (in + out edges of every kind), highest total \
                 degree first. Hubs are architectural hotspots: changing one has a wide blast \
-                radius. Returns name, qualified name, kind, file, degrees and community id."
+                radius. Returns name, qualified name, kind, file, degrees and community id. \
+                The qualified_name is accepted as node_id by the other node tools."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -666,7 +667,7 @@ impl GraphToolSchemas {
                     },
                     "detail_level": {
                         "type": "string", "enum": ["standard", "minimal"], "default": "standard",
-                        "description": "minimal returns name, kind and total_degree only"
+                        "description": "minimal returns name, qualified_name, kind and total_degree only"
                     },
                     "min_degree": {
                         "type": "integer",

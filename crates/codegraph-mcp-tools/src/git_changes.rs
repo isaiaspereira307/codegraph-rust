@@ -108,11 +108,24 @@ pub async fn file_churn(root: &Path) -> Option<HashMap<String, u32>> {
         ])
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    // Churn is optional (`churn_status: "unavailable"`); keep the reason in the log.
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output()).await {
+        Err(_) => {
+            tracing::debug!("churn unavailable: git log timed out after 5s");
+            return None;
+        }
+        Ok(Err(error)) => {
+            tracing::debug!("churn unavailable: failed to run git: {error}");
+            return None;
+        }
+        Ok(Ok(output)) => output,
+    };
     if !output.status.success() {
+        tracing::debug!(
+            "churn unavailable: git log exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);

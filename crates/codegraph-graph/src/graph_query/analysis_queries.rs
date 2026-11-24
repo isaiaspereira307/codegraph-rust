@@ -446,16 +446,25 @@ impl GraphQuery {
         ids: &[String],
         churn: &std::collections::HashMap<String, u32>,
     ) -> Result<std::collections::HashMap<String, (f64, crate::analysis::risk::RiskSignals)>> {
-        let snap = self.snapshot().await?;
-        let wanted: Vec<(String, String)> = ids
-            .iter()
-            .filter_map(|id| Some((id.clone(), snap.node(snap.resolve(id)?).qualified.clone())))
-            .collect();
-        drop(snap);
+        let ids = ids.to_vec();
         let churn = churn.clone();
+        let cache = self.cache.clone();
         self.store()
             .with_conn(move |conn| {
-                let graph = crate::analysis::AnalysisGraph::load(conn)?;
+                // One read transaction: the id resolution (snapshot) and the analysis graph
+                // see the same committed state, so a commit in between cannot drop nodes.
+                let conn = conn.transaction()?;
+                // A deferred transaction takes its read snapshot on the first read.
+                conn.query_row("SELECT count(*) FROM metadata", [], |r| r.get::<_, i64>(0))?;
+                let snap = super::snapshot_in(&conn, &cache)?;
+                let wanted: Vec<(String, String)> = ids
+                    .iter()
+                    .filter_map(|id| {
+                        Some((id.clone(), snap.node(snap.resolve(id)?).qualified.clone()))
+                    })
+                    .collect();
+                drop(snap);
+                let graph = crate::analysis::AnalysisGraph::load(&conn)?;
                 let mut crits: std::collections::HashMap<i64, Vec<f64>> = Default::default();
                 let mut stmt = conn.prepare(
                     "SELECT m.node_id, f.criticality FROM flow_memberships m \
