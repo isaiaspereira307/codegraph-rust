@@ -44,7 +44,8 @@ Sobras conhecidas (config/embedding e `graph_vector.rs` removidos na Fase 1, Tas
 - **OpenSSL**: resolvido na Fase 1 (Task 7). O workspace não depende mais de `openssl-sys`
   nem `native-tls`; o binário release não linka `libssl`, então `LD_LIBRARY_PATH` não é mais
   necessário.
-- **Watchers no WSL**: 2 testes de `codegraph-core::watch` falham também no código original.
+- **Watchers no WSL**: 2 testes de `codegraph-core::watch` falham também no código original
+  (`test_watcher_detects_create_modify_delete_with_debounce`, `test_watcher_delete_event`).
   3 testes de watcher de `codegraph-parser` travam (`test_file_change_detection`,
   `test_file_monitoring_only`, `test_integration_test_suite`). Rodar a suíte com
   `--skip` nesses testes até investigar (provável limitação de inotify em WSL).
@@ -340,16 +341,55 @@ harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
 
 ---
 
-## Fase 4 — Análise de grafo
+## Fase 4 — Análise de grafo ✅
 
-Plano detalhado: `docs/superpowers/plans/2026-11-23-fase4-analise-grafo.md`. Tasks 1-9 de 13
-concluídas (2026-11-23): `AnalysisGraph`, entry points, flows (`list_flows`, `get_flow`,
-`get_affected_flows`, `flows_s` ≈ 0,5 s neste repo, sem incremental), Leiden determinístico,
-comunidades (+ nomes, split, fallback por diretório; `list_communities`, `get_community`,
-`get_architecture_overview`, ids estáveis entre `finalize`) e `get_hub_nodes` no formato CRG +
-`get_bridge_nodes`. Faltam: Task 10 (`get_knowledge_gaps`, `get_surprising_connections`), 11
-(`get_suggested_questions`), 12 (risk score no review), 13 (paridade com o CRG, docs, fechamento) e a
-revisão final do branch. Ledger local: `.superpowers/sdd/2026-11-23-fase4-analise-grafo/progress.md`.
+Plano detalhado: `docs/superpowers/plans/2026-11-23-fase4-analise-grafo.md`. As 13 tasks
+concluídas (2026-11-24), commits `b705b9b`..`docs: close Fase 4` (`git log 40329ad..`). Ledger
+local: `.superpowers/sdd/2026-11-23-fase4-analise-grafo/progress.md`.
+
+Entregue: pós-processo no fim do `finalize` grava `flows`, `flow_memberships`, `communities`,
+`nodes.community_id` e `metadata.community_detector` (níveis `full|minimal|none`;
+`--skip-flows`/`--skip-postprocess` em `build`/`update`/`index`; env `CODEGRAPH_POSTPROCESS`).
+Ferramentas MCP/CLI novas: `list_flows`, `get_flow`, `get_affected_flows`, `list_communities`,
+`get_community`, `get_architecture_overview`, `get_bridge_nodes`, `get_knowledge_gaps`,
+`get_surprising_connections`, `get_suggested_questions`; `get_hub_nodes` no formato CRG (sem
+`node_id`). `detect_changes`, `get_review_context` e `get_minimal_context` trazem `risk_score`,
+`risk_signals`, nível `risk`, `review_priorities`, `include_churn` e `churn_status` do CRG.
+
+Paridade (`docs/parity/baseline.md`, CRG `bbdda4b` com igraph): onde CALLS é 1.000
+(typescript, go, rust, java, sonda python) entry points, membros de flow e ARI das comunidades
+são 1.000 e |Δ criticality| = 0. Python do corpus (CALLS 0.923): entry points 0.750, membros
+0.833 (mín. 0.500), ARI 0.403; sonda python-imports (CALLS 0.684): entry points 1.000, membros
+0.757, ARI 0.821. A divergência vem só das chamadas que faltam (Fase 2).
+
+Medição (2026-11-24, este repo, binário debug, `codegraph build .`, 3432 nós / 40898 arestas):
+build total 20,7 s; pós-processo `flows_s` 0,48 s (inclui carregar o `AnalysisGraph`) e
+`communities_s` 0,12 s; 305 flows, 162 comunidades (detector `leiden`).
+`get_architecture_overview` `minimal`: 20.174 bytes de JSON (162 comunidades, 45 pares, 5 avisos).
+
+Fica para depois:
+
+- Flows incrementais: o pós-processo recalcula tudo a cada `finalize` (`flows.id` muda a cada
+  build).
+- Igualdade com o igraph: o Leiden à mão não é igual ao do igraph; o ARI fica só registrado
+  (Decisão 3 do plano).
+- Gaps de import não portados: ciclos de import quase nunca aparecem em bancos indexados pelo
+  Rust (resolução de módulo Rust entre arquivos pendente, Fase 2). Medido no ledger da Task 10:
+  8 de 1831 arestas IMPORTS_FROM deste repo ligavam dois `File`. Rebuild de 2026-11-24: 141 de
+  1860, mas 127 delas apontam para nós `File` com sufixo `@L1` (174 dos 200 `File` deste repo
+  têm o sufixo no `qualified_name`, só aqui, não nos corpora; investigar a colisão de
+  `qualified_name` que gera o sufixo). O parser Rust nunca grava `edges.extra.import_context`,
+  então não há filtro de import type-only/pacote-pai/deferred, `load_time` é sempre true e nós
+  `extra.virtual` não são excluídos do conjunto de arquivos dos ciclos.
+- Risco: não portados o cache de churn por HEAD e o "unavailable" persistente do CRG (um
+  `git log` lento custa até 5 s por chamada de review); falhas de churn não são logadas; as
+  chaves de caminho do churn não são normalizadas (raiz com symlink pode zerar o churn em
+  silêncio); faltam o fallback de TESTED_BY por nome solto, a isenção de arquivos de migration
+  na checagem de testes e o fallback 0.05·flow_count.
+- `crates/codegraph-graph/src/analysis/insights.rs` tem 676 linhas (hubs, bridges, gaps, ciclos,
+  surprising, questions): candidato a dividir.
+- Não relacionado à Fase 4: o Rust grava nós `Directory` e CONTAINS raiz → subdiretório que o
+  CRG não tem (CONTAINS da sonda python 0.958 → 0.902, sonda python-imports 1.000 → 0.909).
 
 1. Flows: `list_flows`, `get_flow`, `get_affected_flows` (portar `flows.py`; usar a base de
    call chain).
@@ -396,4 +436,4 @@ revisão final do branch. Ledger local: `.superpowers/sdd/2026-11-23-fase4-anali
 3. Harness da Fase 2 antes de qualquer ferramenta nova, para medir regressões desde o início.
 4. Fase 2.5 (IDs canônicos, `line` das arestas, convivência com o CRG v9).
 5. Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code.
-6. Fases 4 e 5 conforme o uso real pedir.
+6. ~~Fase 4 (análise de grafo)~~ ✅; Fase 5 conforme o uso real pedir.

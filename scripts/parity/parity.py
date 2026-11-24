@@ -1,7 +1,8 @@
 # ABOUTME: Parity harness comparing code-review-graph and Rust graph.db files (schema v15).
-# ABOUTME: Loads nodes/edges with root-relative keys and reports per-language/per-kind Jaccard.
+# ABOUTME: Loads nodes/edges/flows/communities with root-relative keys; reports Jaccard and ARI.
 import argparse
 import json
+import math
 import shutil
 import sqlite3
 import subprocess
@@ -30,12 +31,18 @@ class Graph:
     nodes: dict = field(default_factory=dict)  # qn (relative) -> NodeRow
     edges: set = field(default_factory=set)  # EdgeKey
     edge_lines: dict = field(default_factory=dict)  # EdgeKey -> set of line numbers
+    flows: dict = field(default_factory=dict)  # entry qn -> {"members": set, "criticality"}
+    communities: dict = field(default_factory=dict)  # qn -> community_id
+    community_count: int = 0
+    community_detector: str = None
 
 
 @dataclass
 class Report:
     nodes_by_language: dict = field(default_factory=dict)
     edges_by_kind: dict = field(default_factory=dict)
+    flows_by_language: dict = field(default_factory=dict)
+    communities: dict = field(default_factory=dict)
 
 
 def _strip(value, prefix):
@@ -62,9 +69,84 @@ def load_graph(db, root):
             key = (kind, _strip(src, prefix), _strip(tgt, prefix))
             graph.edges.add(key)
             graph.edge_lines.setdefault(key, set()).add(int(line or 0))
+        _load_analysis(con, graph, prefix)
     finally:
         con.close()
     return graph
+
+
+def _load_analysis(con, graph, prefix):
+    """Load flows, memberships, community ids and the detector; absent tables load as empty."""
+    try:
+        qn_by_id = {
+            i: _strip(qn, prefix) for i, qn in con.execute("SELECT id, qualified_name FROM nodes")
+        }
+        for flow_id, entry_id, crit in con.execute(
+            "SELECT id, entry_point_id, criticality FROM flows"
+        ).fetchall():
+            entry = qn_by_id.get(entry_id)
+            if entry is None:
+                continue
+            members = {
+                qn_by_id[n]
+                for (n,) in con.execute(
+                    "SELECT node_id FROM flow_memberships WHERE flow_id = ?", (flow_id,)
+                )
+                if n in qn_by_id
+            }
+            prev = graph.flows.get(entry)
+            if prev:
+                prev["members"] |= members
+                prev["criticality"] = max(prev["criticality"], float(crit or 0.0))
+            else:
+                graph.flows[entry] = {"members": members, "criticality": float(crit or 0.0)}
+    except sqlite3.OperationalError:
+        pass
+    try:
+        for qn, cid in con.execute(
+            "SELECT qualified_name, community_id FROM nodes WHERE community_id IS NOT NULL"
+        ):
+            graph.communities[_strip(qn, prefix)] = cid
+        graph.community_count = con.execute("SELECT COUNT(*) FROM communities").fetchone()[0]
+    except sqlite3.OperationalError:
+        pass
+    try:
+        row = con.execute(
+            "SELECT value FROM metadata WHERE key = 'community_detector'"
+        ).fetchone()
+        graph.community_detector = row[0] if row else None
+    except sqlite3.OperationalError:
+        pass
+
+
+def _comb2(n):
+    return n * (n - 1) // 2
+
+
+def adjusted_rand_index(labels_a, labels_b):
+    """ARI between two labelings of the same items (Hubert & Arabie); None for < 2 items.
+
+    When the expected index equals its maximum (both partitions trivial), returns 1.0 if the
+    partitions are identical up to relabeling, else 0.0.
+    """
+    if len(labels_a) != len(labels_b):
+        raise ValueError("labelings differ in length")
+    n = len(labels_a)
+    if n < 2:
+        return None
+    cells, rows, cols = {}, {}, {}
+    for a, b in zip(labels_a, labels_b):
+        cells[(a, b)] = cells.get((a, b), 0) + 1
+        rows[a] = rows.get(a, 0) + 1
+        cols[b] = cols.get(b, 0) + 1
+    index = sum(_comb2(v) for v in cells.values())
+    sum_a = sum(_comb2(v) for v in rows.values())
+    sum_b = sum(_comb2(v) for v in cols.values())
+    expected = sum_a * sum_b / _comb2(n)
+    maximum = (sum_a + sum_b) / 2
+    if math.isclose(maximum, expected):
+        return 1.0 if len(cells) == len(rows) == len(cols) else 0.0
+    return (index - expected) / (maximum - expected)
 
 
 def _jaccard(both, union):
@@ -141,7 +223,50 @@ def compare(crg, rust):
                 else None
             ),
         }
+
+    flow_langs = {}
+    for side, g in ((0, crg), (1, rust)):
+        for entry in g.flows:
+            node = crg.nodes.get(entry) or rust.nodes.get(entry)
+            lang = node.language if node else "unknown"
+            flow_langs.setdefault(lang, [set(), set()])[side].add(entry)
+    for lang in sorted(flow_langs):
+        a, b = flow_langs[lang]
+        both = sorted(a & b)
+        member_j, crit_d = [], []
+        for entry in both:
+            ma, mb = crg.flows[entry]["members"], rust.flows[entry]["members"]
+            member_j.append(_jaccard(len(ma & mb), len(ma | mb)))
+            crit_d.append(abs(crg.flows[entry]["criticality"] - rust.flows[entry]["criticality"]))
+        report.flows_by_language[lang] = {
+            "crg": len(a),
+            "rust": len(b),
+            "both": len(both),
+            "entry_jaccard": _jaccard(len(both), len(a | b)),
+            "member_jaccard_mean": sum(member_j) / len(member_j) if member_j else None,
+            "member_jaccard_min": min(member_j) if member_j else None,
+            "criticality_delta_mean": sum(crit_d) / len(crit_d) if crit_d else None,
+            "criticality_delta_max": max(crit_d) if crit_d else None,
+            "only_crg": _cap(a - b),
+            "only_rust": _cap(b - a),
+        }
+
+    common = sorted(set(crg.communities) & set(rust.communities))
+    report.communities = {
+        "crg": crg.community_count,
+        "rust": rust.community_count,
+        "crg_detector": crg.community_detector,
+        "rust_detector": rust.community_detector,
+        "common_nodes": len(common),
+        "ari": adjusted_rand_index(
+            [crg.communities[q] for q in common], [rust.communities[q] for q in common]
+        ),
+    }
     return report
+
+
+def _fmt(value):
+    return "-" if value is None else f"{value:.3f}"
 
 
 def render_markdown(report):
@@ -163,6 +288,27 @@ def render_markdown(report):
             f"| {kind} | {r['crg']} | {r['rust']} | {r['both']} | {r['jaccard']:.3f} "
             f"| {r['resolved_jaccard']:.3f} | {agreement} |"
         )
+    lines += ["", "## Flows by language", ""]
+    lines += [
+        "| language | crg | rust | both | entry jaccard | members jaccard (mean/min) "
+        "| criticality delta (mean/max) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for lang, r in report.flows_by_language.items():
+        lines.append(
+            f"| {lang} | {r['crg']} | {r['rust']} | {r['both']} | {r['entry_jaccard']:.3f} "
+            f"| {_fmt(r['member_jaccard_mean'])} / {_fmt(r['member_jaccard_min'])} "
+            f"| {_fmt(r['criticality_delta_mean'])} / {_fmt(r['criticality_delta_max'])} |"
+        )
+    c = report.communities
+    if c:
+        lines += ["", "## Communities", ""]
+        lines += [
+            "| crg | rust | crg detector | rust detector | common nodes | ARI |",
+            "|---|---|---|---|---|---|",
+            f"| {c['crg']} | {c['rust']} | {c['crg_detector'] or '-'} "
+            f"| {c['rust_detector'] or '-'} | {c['common_nodes']} | {_fmt(c['ari'])} |",
+        ]
     for lang, r in report.nodes_by_language.items():
         for title, key in (("only in CRG", "only_crg"), ("only in Rust", "only_rust")):
             if r[key]:
@@ -178,6 +324,11 @@ def render_markdown(report):
             if r[key]:
                 lines += ["", f"### {kind}: edges {title}", ""]
                 lines += [f"- `{s}` -> `{t}`" for _, s, t in r[key]]
+    for lang, r in report.flows_by_language.items():
+        for title, key in (("only in CRG", "only_crg"), ("only in Rust", "only_rust")):
+            if r[key]:
+                lines += ["", f"### {lang}: flow entry points {title}", ""]
+                lines += [f"- `{q}`" for q in r[key]]
     return "\n".join(lines) + "\n"
 
 
@@ -230,8 +381,10 @@ def run_pair(src, work, crg_repo, codegraph):
     crg_dir, rust_dir = prepare_copies(src, work)
     crg_dir, rust_dir = crg_dir.resolve(), rust_dir.resolve()
     _run_tool(
-        ["uv", "run", "--frozen", "--project", str(Path(crg_repo).resolve()),
-         "code-review-graph", "build"],
+        # `--extra communities` installs igraph so CRG detects communities with Leiden
+        # (metadata community_detector = "leiden") instead of its file-grouping fallback.
+        ["uv", "run", "--frozen", "--extra", "communities", "--project",
+         str(Path(crg_repo).resolve()), "code-review-graph", "build"],
         crg_dir, "code-review-graph build",
     )
     _run_tool([str(Path(codegraph).resolve()), "index", ".", "-r"], rust_dir, "codegraph index")

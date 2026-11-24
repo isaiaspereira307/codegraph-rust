@@ -10,8 +10,8 @@ from pathlib import Path
 import subprocess
 
 from parity import (
-    GIT, Graph, check_crg_commit, compare, load_graph, main, prepare_copies, render_markdown,
-    run_corpus,
+    GIT, Graph, adjusted_rand_index, check_crg_commit, compare, load_graph, main, prepare_copies,
+    render_markdown, run_corpus,
 )
 
 
@@ -36,6 +36,49 @@ def make_db(path, root, nodes, edges=()):
     con.commit()
     con.close()
     return Path(path)
+
+
+def add_analysis(path, flows=(), communities=None, detector=None, community_rows=0):
+    """flows: (entry_qn, [member_qn], criticality); communities: {qn: community_id}."""
+    con = sqlite3.connect(path)
+    con.execute("ALTER TABLE nodes ADD COLUMN id INTEGER")
+    con.execute("ALTER TABLE nodes ADD COLUMN community_id INTEGER")
+    con.execute("UPDATE nodes SET id = rowid")
+    ids = dict(con.execute("SELECT qualified_name, id FROM nodes"))
+    con.execute("CREATE TABLE flows(id INTEGER PRIMARY KEY, entry_point_id, criticality)")
+    con.execute("CREATE TABLE flow_memberships(flow_id, node_id, position)")
+    con.execute("CREATE TABLE communities(id INTEGER PRIMARY KEY)")
+    con.execute("CREATE TABLE metadata(key, value)")
+    for i, (entry, members, crit) in enumerate(flows, start=1):
+        con.execute("INSERT INTO flows VALUES (?,?,?)", (i, ids[entry], crit))
+        for pos, m in enumerate(members):
+            con.execute("INSERT INTO flow_memberships VALUES (?,?,?)", (i, ids[m], pos))
+    for qn, cid in (communities or {}).items():
+        con.execute("UPDATE nodes SET community_id = ? WHERE qualified_name = ?", (cid, qn))
+    for _ in range(community_rows):
+        con.execute("INSERT INTO communities DEFAULT VALUES")
+    if detector:
+        con.execute("INSERT INTO metadata VALUES ('community_detector', ?)", (detector,))
+    con.commit()
+    con.close()
+
+
+class AriTest(unittest.TestCase):
+    def test_identical_partitions_up_to_relabeling(self):
+        self.assertEqual(adjusted_rand_index([1, 1, 2, 2, 3], [7, 7, 5, 5, 9]), 1.0)
+
+    def test_known_value(self):
+        # Classic example (sklearn docs): ARI([0,0,1,1], [0,0,1,2]) = 0.571428...
+        self.assertAlmostEqual(adjusted_rand_index([0, 0, 1, 1], [0, 0, 1, 2]), 4 / 7)
+
+    def test_independent_split_is_negative_or_zero(self):
+        self.assertAlmostEqual(adjusted_rand_index([0, 0, 1, 1], [0, 1, 0, 1]), -0.5)
+
+    def test_degenerate_cases(self):
+        self.assertIsNone(adjusted_rand_index([1], [2]))
+        self.assertEqual(adjusted_rand_index([1, 1, 1], [4, 4, 4]), 1.0)
+        self.assertEqual(adjusted_rand_index([1, 2, 3], [4, 5, 6]), 1.0)
+        self.assertEqual(adjusted_rand_index([1, 1, 1], [1, 2, 3]), 0.0)
 
 
 class ParityTest(unittest.TestCase):
@@ -113,6 +156,51 @@ class ParityTest(unittest.TestCase):
             py["divergent"],
             [{"qn": "m.py::f", "field": "language", "crg": "python", "rust": "unknown"}],
         )
+
+    def test_flows_and_communities_compared(self):
+        def nodes(r):
+            return [("Function", f"{r}/m.py::{n}", "python", 1, 2, 0) for n in "abcde"]
+
+        crg = make_db(self.d / "crg.db", "/a/r1", nodes("/a/r1"))
+        rust = make_db(self.d / "rust.db", "/b/r2", nodes("/b/r2"))
+        q = lambda r, n: f"{r}/m.py::{n}"
+        add_analysis(
+            crg,
+            [(q("/a/r1", "a"), [q("/a/r1", x) for x in "abc"], 0.5),
+             (q("/a/r1", "d"), [q("/a/r1", x) for x in "de"], 0.2)],
+            {q("/a/r1", x): c for x, c in zip("abcde", [1, 1, 2, 2, 3])},
+            "leiden", 3,
+        )
+        add_analysis(
+            rust,
+            [(q("/b/r2", "a"), [q("/b/r2", x) for x in "ab"], 0.4),
+             (q("/b/r2", "e"), [q("/b/r2", "e")], 0.1)],
+            {q("/b/r2", x): c for x, c in zip("abcde", [9, 9, 8, 8, 7])},
+            "leiden-rust", 3,
+        )
+        rep = compare(load_graph(crg, "/a/r1"), load_graph(rust, "/b/r2"))
+        f = rep.flows_by_language["python"]
+        self.assertEqual((f["crg"], f["rust"], f["both"]), (2, 2, 1))
+        self.assertAlmostEqual(f["entry_jaccard"], 1 / 3)
+        self.assertAlmostEqual(f["member_jaccard_mean"], 2 / 3)
+        self.assertAlmostEqual(f["criticality_delta_max"], 0.1)
+        self.assertEqual((f["only_crg"], f["only_rust"]), (["m.py::d"], ["m.py::e"]))
+        c = rep.communities
+        self.assertEqual((c["crg"], c["rust"], c["common_nodes"], c["ari"]), (3, 3, 5, 1.0))
+        self.assertEqual((c["crg_detector"], c["rust_detector"]), ("leiden", "leiden-rust"))
+        md = render_markdown(rep)
+        self.assertIn("## Flows by language", md)
+        self.assertIn("| 3 | 3 | leiden | leiden-rust | 5 | 1.000 |", md)
+        json.dumps(asdict(rep), default=sorted)
+
+    def test_missing_analysis_tables_load_empty(self):
+        rep = self.pair(
+            [("Function", "/a/r1/m.py::f", "python", 1, 2, 0)],
+            [("Function", "/b/r2/m.py::f", "python", 1, 2, 0)],
+        )
+        self.assertEqual(rep.flows_by_language, {})
+        self.assertEqual(rep.communities["ari"], None)
+        self.assertEqual(rep.communities["common_nodes"], 0)
 
     def test_load_graph_path_with_special_chars(self):
         d = self.d / "a b#c"

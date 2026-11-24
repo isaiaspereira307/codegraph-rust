@@ -46,7 +46,35 @@ aninhada ambigua): nos 1.000 (26/26), CONTAINS e IMPORTS_FROM 1.000; CALLS 0.684
 0.786) e REFERENCES 0 no tier padrao (caminho pontuado `q.lib.f()` e `mod.Thing().go()` ainda
 nao portados).
 
-"Depois" abaixo e o relatorio regerado apos o plano Python.
+Fase 4 (`docs/superpowers/plans/2026-11-23-fase4-analise-grafo.md`, 2026-11-24): o harness
+compara flows e comunidades. O CRG roda com `--extra communities` (igraph, detector `leiden`);
+sem igraph ele cai no agrupamento por diretorio (`file`) e o ARI nao diz nada (na primeira
+rodada, sem o extra: ARI 0.101 / 0.340 / 0.206 / 0.445 / 0.304).
+
+| linguagem | CALLS | entry points (CRG/Rust, Jaccard) | membros (media/min) | max \|Δ crit\| | comunidades (CRG/Rust) | ARI |
+|---|---|---|---|---|---|---|
+| python | 0.923 | 3/4, 0.750 | 0.833 / 0.500 | 0.020 | 8/5 | 0.403 |
+| typescript | 1.000 | 2/2, 1.000 | 1.000 / 1.000 | 0.000 | 3/3 | 1.000 |
+| go | 1.000 | 13/13, 1.000 | 1.000 / 1.000 | 0.000 | 10/10 | 1.000 |
+| rust | 1.000 | 5/5, 1.000 | 1.000 / 1.000 | 0.000 | 7/7 | 1.000 |
+| java | 1.000 | 6/6, 1.000 | 1.000 / 1.000 | 0.000 | 7/7 | 1.000 |
+| sonda python | 1.000 | 8/8, 1.000 | 1.000 / 1.000 | 0.000 | 8/9 | 1.000 |
+| sonda python-imports | 0.684 | 2/2, 1.000 | 0.757 / 0.714 | 0.120 | 4/6 | 0.821 |
+
+Criterio (entry points e membros >= 0.95 onde CALLS e 1.00) atendido em typescript, go, rust,
+java e na sonda python. Onde CALLS diverge, flows e comunidades divergem junto: no corpus python
+falta `process_request` -> `AuthService.authenticate` (receptor tipado por anotacao), entao
+`authenticate` vira entry point so no Rust; na sonda python-imports faltam as chamadas por
+caminho pontuado. ARI so registrado (Decisao 3); onde CALLS e igual, a particao Leiden coincide
+com a do igraph nesses corpora pequenos. As contagens de comunidades sao linhas de
+`communities`; o ARI usa so os nos com `community_id` nos dois lados.
+
+Nao relacionado a Fase 4: o Rust grava nos `Directory` (linguagem vazia, aparecem como
+`unknown` abaixo) para a raiz e os subdiretorios, com CONTAINS raiz -> subdiretorio; o CRG nao.
+Por isso CONTAINS da sonda python caiu de 0.958 para 0.902 e o da sonda python-imports de 1.000
+para 0.909 (o parser nao mudou na Fase 4).
+
+"Depois" abaixo e o relatorio regerado na Fase 4 (Task 13).
 
 # Depois
 
@@ -59,17 +87,34 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
 | python | 31 | 31 | 31 | 1.000 | 0 |
+| unknown | 0 | 1 | 0 | 0.000 | 0 |
 
 #### Edges by kind
 
-| kind | crg | rust | both | jaccard | resolved jaccard |
+| kind | crg | rust | both | jaccard | resolved jaccard | line agreement |
+|---|---|---|---|---|---|---|
+| CALLS | 25 | 25 | 24 | 0.923 | 0.833 | 1.000 |
+| CONTAINS | 26 | 26 | 26 | 1.000 | 1.000 | 1.000 |
+| IMPORTS_FROM | 5 | 5 | 5 | 1.000 | 1.000 | 1.000 |
+| INHERITS | 1 | 1 | 1 | 1.000 | 1.000 | 1.000 |
+| REFERENCES | 5 | 0 | 0 | 0.000 | 0.000 | - |
+| TESTED_BY | 6 | 6 | 6 | 1.000 | 1.000 | 1.000 |
+
+#### Flows by language
+
+| language | crg | rust | both | entry jaccard | members jaccard (mean/min) | criticality delta (mean/max) |
+|---|---|---|---|---|---|---|
+| python | 3 | 4 | 3 | 0.750 | 0.833 / 0.500 | 0.007 / 0.020 |
+
+#### Communities
+
+| crg | rust | crg detector | rust detector | common nodes | ARI |
 |---|---|---|---|---|---|
-| CALLS | 25 | 25 | 24 | 0.923 | 0.833 |
-| CONTAINS | 26 | 26 | 26 | 1.000 | 1.000 |
-| IMPORTS_FROM | 5 | 5 | 5 | 1.000 | 1.000 |
-| INHERITS | 1 | 1 | 1 | 1.000 | 1.000 |
-| REFERENCES | 5 | 0 | 0 | 0.000 | 0.000 |
-| TESTED_BY | 6 | 6 | 6 | 1.000 | 1.000 |
+| 8 | 5 | leiden | leiden | 16 | 0.403 |
+
+##### unknown: nodes only in Rust
+
+- `<work>/python/rust`
 
 ##### CALLS: edges only in CRG
 
@@ -87,6 +132,10 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 - `sample_callback_refs.py::trigger_map` -> `sample_callback_refs.py::map_callback`
 - `sample_python.py` -> `sample_python.py::BaseService`
 
+##### python: flow entry points only in Rust
+
+- `sample_python.py::AuthService.authenticate`
+
 ### Language corpus: typescript
 
 #### Nodes by language
@@ -94,17 +143,34 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
 | typescript | 16 | 16 | 16 | 1.000 | 0 |
+| unknown | 0 | 1 | 0 | 0.000 | 0 |
 
 #### Edges by kind
 
-| kind | crg | rust | both | jaccard | resolved jaccard |
+| kind | crg | rust | both | jaccard | resolved jaccard | line agreement |
+|---|---|---|---|---|---|---|
+| CALLS | 11 | 11 | 11 | 1.000 | 1.000 | 1.000 |
+| CONTAINS | 13 | 13 | 13 | 1.000 | 1.000 | 1.000 |
+| IMPORTS_FROM | 4 | 4 | 4 | 1.000 | 1.000 | 1.000 |
+| INHERITS | 1 | 1 | 1 | 1.000 | 1.000 | 1.000 |
+| REFERENCES | 7 | 0 | 0 | 0.000 | 0.000 | - |
+| TESTED_BY | 1 | 1 | 1 | 1.000 | 1.000 | 1.000 |
+
+#### Flows by language
+
+| language | crg | rust | both | entry jaccard | members jaccard (mean/min) | criticality delta (mean/max) |
+|---|---|---|---|---|---|---|
+| typescript | 2 | 2 | 2 | 1.000 | 1.000 / 1.000 | 0.000 / 0.000 |
+
+#### Communities
+
+| crg | rust | crg detector | rust detector | common nodes | ARI |
 |---|---|---|---|---|---|
-| CALLS | 11 | 11 | 11 | 1.000 | 1.000 |
-| CONTAINS | 13 | 13 | 13 | 1.000 | 1.000 |
-| IMPORTS_FROM | 4 | 4 | 4 | 1.000 | 1.000 |
-| INHERITS | 1 | 1 | 1 | 1.000 | 1.000 |
-| REFERENCES | 7 | 0 | 0 | 0.000 | 0.000 |
-| TESTED_BY | 1 | 1 | 1 | 1.000 | 1.000 |
+| 3 | 3 | leiden | leiden | 11 | 1.000 |
+
+##### unknown: nodes only in Rust
+
+- `<work>/typescript/rust`
 
 ##### REFERENCES: edges only in CRG
 
@@ -123,14 +189,31 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
 | go | 45 | 45 | 45 | 1.000 | 0 |
+| unknown | 0 | 1 | 0 | 0.000 | 0 |
 
 #### Edges by kind
 
-| kind | crg | rust | both | jaccard | resolved jaccard |
+| kind | crg | rust | both | jaccard | resolved jaccard | line agreement |
+|---|---|---|---|---|---|---|
+| CALLS | 34 | 34 | 34 | 1.000 | 1.000 | 1.000 |
+| CONTAINS | 43 | 43 | 43 | 1.000 | 1.000 | 1.000 |
+| IMPORTS_FROM | 2 | 2 | 2 | 1.000 | 1.000 | 1.000 |
+
+#### Flows by language
+
+| language | crg | rust | both | entry jaccard | members jaccard (mean/min) | criticality delta (mean/max) |
+|---|---|---|---|---|---|---|
+| go | 13 | 13 | 13 | 1.000 | 1.000 / 1.000 | 0.000 / 0.000 |
+
+#### Communities
+
+| crg | rust | crg detector | rust detector | common nodes | ARI |
 |---|---|---|---|---|---|
-| CALLS | 34 | 34 | 34 | 1.000 | 1.000 |
-| CONTAINS | 43 | 43 | 43 | 1.000 | 1.000 |
-| IMPORTS_FROM | 2 | 2 | 2 | 1.000 | 1.000 |
+| 10 | 10 | leiden | leiden | 37 | 1.000 |
+
+##### unknown: nodes only in Rust
+
+- `<work>/go/rust`
 
 ### Language corpus: rust
 
@@ -139,16 +222,33 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
 | rust | 30 | 30 | 30 | 1.000 | 0 |
+| unknown | 0 | 1 | 0 | 0.000 | 0 |
 
 #### Edges by kind
 
-| kind | crg | rust | both | jaccard | resolved jaccard |
+| kind | crg | rust | both | jaccard | resolved jaccard | line agreement |
+|---|---|---|---|---|---|---|
+| CALLS | 20 | 20 | 20 | 1.000 | 1.000 | 1.000 |
+| CONTAINS | 27 | 27 | 27 | 1.000 | 1.000 | 1.000 |
+| IMPLEMENTS | 1 | 1 | 1 | 1.000 | 1.000 | 1.000 |
+| IMPORTS_FROM | 1 | 1 | 1 | 1.000 | 1.000 | 1.000 |
+| TESTED_BY | 6 | 6 | 6 | 1.000 | 1.000 | 1.000 |
+
+#### Flows by language
+
+| language | crg | rust | both | entry jaccard | members jaccard (mean/min) | criticality delta (mean/max) |
+|---|---|---|---|---|---|---|
+| rust | 5 | 5 | 5 | 1.000 | 1.000 / 1.000 | 0.000 / 0.000 |
+
+#### Communities
+
+| crg | rust | crg detector | rust detector | common nodes | ARI |
 |---|---|---|---|---|---|
-| CALLS | 20 | 20 | 20 | 1.000 | 1.000 |
-| CONTAINS | 27 | 27 | 27 | 1.000 | 1.000 |
-| IMPLEMENTS | 1 | 1 | 1 | 1.000 | 1.000 |
-| IMPORTS_FROM | 1 | 1 | 1 | 1.000 | 1.000 |
-| TESTED_BY | 6 | 6 | 6 | 1.000 | 1.000 |
+| 7 | 7 | leiden | leiden | 23 | 1.000 |
+
+##### unknown: nodes only in Rust
+
+- `<work>/rust/rust`
 
 ### Language corpus: java
 
@@ -157,16 +257,33 @@ CRG commit `bbdda4b`; corpus: fixtures from `tests/fixtures`, one repository per
 | language | crg | rust | both | jaccard | divergent |
 |---|---|---|---|---|---|
 | java | 36 | 36 | 36 | 1.000 | 0 |
+| unknown | 0 | 1 | 0 | 0.000 | 0 |
 
 #### Edges by kind
 
-| kind | crg | rust | both | jaccard | resolved jaccard |
+| kind | crg | rust | both | jaccard | resolved jaccard | line agreement |
+|---|---|---|---|---|---|---|
+| CALLS | 15 | 15 | 15 | 1.000 | 1.000 | 1.000 |
+| CONTAINS | 34 | 34 | 34 | 1.000 | 1.000 | 1.000 |
+| IMPORTS_FROM | 11 | 11 | 11 | 1.000 | 1.000 | 1.000 |
+| INHERITS | 3 | 3 | 3 | 1.000 | 1.000 | 1.000 |
+| INJECTS | 4 | 4 | 4 | 1.000 | 1.000 | 1.000 |
+
+#### Flows by language
+
+| language | crg | rust | both | entry jaccard | members jaccard (mean/min) | criticality delta (mean/max) |
+|---|---|---|---|---|---|---|
+| java | 6 | 6 | 6 | 1.000 | 1.000 / 1.000 | 0.000 / 0.000 |
+
+#### Communities
+
+| crg | rust | crg detector | rust detector | common nodes | ARI |
 |---|---|---|---|---|---|
-| CALLS | 15 | 15 | 15 | 1.000 | 1.000 |
-| CONTAINS | 34 | 34 | 34 | 1.000 | 1.000 |
-| IMPORTS_FROM | 11 | 11 | 11 | 1.000 | 1.000 |
-| INHERITS | 3 | 3 | 3 | 1.000 | 1.000 |
-| INJECTS | 4 | 4 | 4 | 1.000 | 1.000 |
+| 7 | 7 | leiden | leiden | 34 | 1.000 |
+
+##### unknown: nodes only in Rust
+
+- `<work>/java/rust`
 
 # Antes
 

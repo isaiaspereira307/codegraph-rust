@@ -53,7 +53,9 @@ codegraph tool run find_complexity_hotspots --params '{"limit": 10}'
 Shortcuts with the same output as `tool run`: `codegraph search <text>`,
 `codegraph query <pattern> --name <symbol>`, `codegraph impact --files a.rs,b.rs`,
 `codegraph detect-changes --base <ref>`. Build or refresh the graph with
-`codegraph build` (full) or `codegraph update` (changed files only).
+`codegraph build` (full) or `codegraph update` (changed files only). Both recompute flows
+and communities at the end; `--skip-flows` or `--skip-postprocess` skips that step and keeps
+the previous flows/communities (env `CODEGRAPH_POSTPROCESS=full|minimal|none`).
 
 Run from the indexed project root, or pass `--project /path/to/project`. For a custom
 indexed identifier, pass `--project-id ID` or retain `CODEGRAPH_PROJECT_ID`. Stdout is

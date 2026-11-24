@@ -44,6 +44,30 @@ once is not enough. Two ways out:
 | `cg_file_metadata` | `FileMetadataRecord` JSON per `(project_id, file_path)` |
 | `cg_project_metadata` | `ProjectMetadataRecord` JSON (the "index ready" marker) |
 
+## Derived analysis: flows and communities
+
+At the end of `finalize` (every `index`, `build`, `update` and watch re-index), after the FTS
+refresh, a post-process recomputes the CRG analysis tables in one write transaction
+(`crates/codegraph-graph/src/analysis/`):
+
+| Table / column | Written |
+|---|---|
+| `flows` | one row per execution flow traced from a CRG-style entry point (`name`, `entry_point_id`, `depth`, `node_count`, `file_count`, `criticality`, `path_json` = node ids) |
+| `flow_memberships` | `(flow_id, node_id, position)` for every node in a flow |
+| `communities` | Leiden communities (deterministic, fixed seed) with CRG names, `cohesion`, `size`, `dominant_language`; directory-based fallback (detector `file`) when the graph has no edges |
+| `nodes.community_id` | each node's community |
+| `metadata.community_detector` | `leiden` or `file`, as CRG records it |
+
+Both are rebuilt from scratch each time (no incremental flows; `flows.id` changes per build;
+the `communities` AUTOINCREMENT restarts, so an unchanged graph keeps the same community ids). The level comes
+from `--skip-flows` (`minimal`) / `--skip-postprocess` (`none`) on `index`, `build` and
+`update`, else `CODEGRAPH_POSTPROCESS` (`full` by default; anything else is an error).
+`minimal` and `none` skip the step and leave the previous rows in place. The flow, community,
+architecture, hub/bridge, knowledge-gap, surprising-connection and suggested-question tools and
+the review `risk_score` read these tables; CRG-written rows are read the same way.
+
+## Concurrency
+
 The database is opened in WAL mode with a 5 s busy timeout. Writers take the same advisory
 `flock` CRG uses, `.code-review-graph/write.lock`.
 

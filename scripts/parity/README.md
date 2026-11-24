@@ -5,7 +5,15 @@ Compares the `graph.db` (schema v15) written by code-review-graph (CRG, Python) 
 
 Prerequisites: `uv`, `git`, CRG checked out at `../code-review-graph` (run from source with
 `uv run --frozen`; the `code-review-graph` on PATH is 2.3.7 / schema 9 and is never used), and
-`cargo build -p codegraph-mcp-server --bin codegraph`.
+`cargo build -p codegraph-mcp-server --bin codegraph`. CRG runs with `--extra communities`
+(igraph), so both sides detect communities with Leiden; without igraph CRG falls back to
+grouping by directory (`community_detector = file`) and the ARI is meaningless.
+
+Besides nodes and edges, the report compares the post-process tables: flows by entry-point
+language (Jaccard of entry-point `qualified_name`s; for entries on both sides, mean/min Jaccard
+of `flow_memberships` and mean/max |Δ criticality|) and communities (count per side,
+`metadata.community_detector`, Adjusted Rand Index of `nodes.community_id` over the nodes both
+sides assigned).
 
 ```bash
 # Baseline over the per-language fixture corpus (corpus.json)
