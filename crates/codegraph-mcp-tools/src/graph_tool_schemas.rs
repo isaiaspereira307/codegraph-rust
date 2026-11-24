@@ -45,6 +45,11 @@ fn review_parameters() -> JsonValue {
                 "minimum": 1,
                 "maximum": 100,
                 "default": 20
+            },
+            "include_churn": {
+                "type": "boolean",
+                "description": "Add the 90-day git commit churn of each file to the risk score (defaults to true)",
+                "default": true
             }
         }
     })
@@ -255,9 +260,12 @@ impl GraphToolSchemas {
         ToolSchema {
             name: "get_review_context".to_string(),
             description: "Review context for the current git diff in one call: changed files, \
-                   changed nodes ordered by risk (dependents plus one when untested), the \
-                   transitive impact by depth, affected files, covering tests, and a snippet of \
-                   each changed node. Use it instead of reading the changed files."
+                   changed nodes ordered by risk_score (0-1: flows, cross-community callers, \
+                   missing tests, security-sensitive names, callers and file churn, each with \
+                   its risk_signals), the overall risk_score and risk (high > 0.7, medium > \
+                   0.4, else low), the transitive impact by depth, affected files, covering \
+                   tests, and a snippet of each changed node. Use it instead of reading the \
+                   changed files."
                 .to_string(),
             parameters: review_parameters(),
         }
@@ -268,8 +276,9 @@ impl GraphToolSchemas {
         ToolSchema {
             name: "get_minimal_context".to_string(),
             description: "Compact review context for the current git diff: changed node IDs with \
-                   risk, changed and affected files, and counts. Same input as \
-                   get_review_context, without snippets or the impact list."
+                   risk_score (0-1, highest first), the overall risk_score and risk level, \
+                   changed and affected files, and counts. Same input as get_review_context, \
+                   without risk signals, snippets or the impact list."
                 .to_string(),
             parameters: review_parameters(),
         }
@@ -281,8 +290,10 @@ impl GraphToolSchemas {
             name: "detect_changes".to_string(),
             description: "Nodes touched by the current git diff: runs `git diff -U0 <base_ref>` \
                    in the project and returns the changed files, their changed line ranges, and \
-                   the graph nodes whose spans overlap them. Staged and unstaged tracked changes \
-                   count; untracked files do not. Fails when the project is not a git work tree."
+                   the graph nodes whose spans overlap them, each with a risk_score (0-1), the \
+                   overall risk_score and review_priorities (the 10 riskiest nodes). Staged and \
+                   unstaged tracked changes count; untracked files do not. Fails when the \
+                   project is not a git work tree."
                 .to_string(),
             parameters: json!({
                 "type": "object",
@@ -291,6 +302,11 @@ impl GraphToolSchemas {
                         "type": "string",
                         "description": "Commit, branch or tag to diff against (defaults to HEAD)",
                         "default": "HEAD"
+                    },
+                    "include_churn": {
+                        "type": "boolean",
+                        "description": "Add the 90-day git commit churn of each file to the risk score (defaults to false)",
+                        "default": false
                     }
                 }
             }),

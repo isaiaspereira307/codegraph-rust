@@ -1,7 +1,8 @@
 // ABOUTME: Review context for the current git diff: changed nodes ranked by risk, impact radius and snippets.
 // ABOUTME: Shared by get_review_context (full output) and get_minimal_context (ids and counts only).
 
-use crate::git_changes::changed_files;
+use crate::git_changes::{changed_files, file_churn};
+use codegraph_graph::analysis::risk::RiskSignals;
 use codegraph_graph::graph_query::types::{NodeLocation, NodeReference};
 use codegraph_graph::graph_query::{GraphQuery, ImpactedNode, NodeCoverage};
 use serde::Serialize;
@@ -14,14 +15,17 @@ pub struct ReviewOptions {
     pub depth: i32,
     pub max_nodes: usize,
     pub max_snippet_lines: usize,
+    /// Add the 90-day commit churn term to the risk score.
+    pub include_churn: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewNode {
     #[serde(flatten)]
     pub node: NodeReference,
-    /// `dependents` + 1 when the node has no covering test; higher runs first.
-    pub risk: usize,
+    /// CRG risk score (0.0 - 1.0): the sum of `risk_signals`; higher runs first.
+    pub risk_score: f64,
+    pub risk_signals: RiskSignals,
     pub dependents: usize,
     pub tests: usize,
     /// First lines of the node's span, cut at `max_snippet_lines`.
@@ -32,6 +36,12 @@ pub struct ReviewNode {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewContext {
     pub base_ref: String,
+    /// Highest changed-node risk score, 0.0 when nothing changed.
+    pub risk_score: f64,
+    /// `risk_level` of `risk_score`: high, medium or low.
+    pub risk: &'static str,
+    /// `ok`, `unavailable` (git history unreadable, no churn term) or `off`.
+    pub churn_status: &'static str,
     pub changed_files: Vec<String>,
     /// Changed nodes, highest risk first.
     pub changed_nodes: Vec<ReviewNode>,
@@ -39,6 +49,29 @@ pub struct ReviewContext {
     pub affected_files: Vec<String>,
     pub tests: Vec<NodeReference>,
     pub truncated: bool,
+}
+
+/// Names a risk score: high above 0.7, medium above 0.4, otherwise low.
+pub fn risk_level(score: f64) -> &'static str {
+    if score > 0.7 {
+        "high"
+    } else if score > 0.4 {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+/// Per-file commit counts for the churn term and their status (`ok`, `unavailable`, `off`).
+/// Git runs once; an empty map scores no churn.
+pub async fn churn_counts(root: &Path, include: bool) -> (HashMap<String, u32>, &'static str) {
+    if !include {
+        return (HashMap::new(), "off");
+    }
+    match file_churn(root).await {
+        Some(counts) => (counts, "ok"),
+        None => (HashMap::new(), "unavailable"),
+    }
 }
 
 /// Runs the git diff, maps it to nodes, and gathers risk, impact and snippets.
@@ -71,6 +104,11 @@ pub async fn build_review(
         .into_iter()
         .map(|c| (c.id.clone(), c))
         .collect();
+    let (churn, churn_status) = churn_counts(&root, opts.include_churn).await;
+    let risks = graph
+        .risk_scores(&ids, &churn)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
     let radius = graph
         .get_impact_radius(&ids, &[], opts.depth, opts.max_nodes)
         .await
@@ -86,8 +124,10 @@ pub async fn build_review(
                 .location
                 .as_ref()
                 .and_then(|loc| snippet(&root, loc, opts.max_snippet_lines));
+            let (risk_score, risk_signals) = risks.get(&node.id).copied().unwrap_or_default();
             ReviewNode {
-                risk: dependents + usize::from(tests == 0),
+                risk_score,
+                risk_signals,
                 dependents,
                 tests,
                 snippet,
@@ -96,14 +136,18 @@ pub async fn build_review(
         })
         .collect();
     nodes.sort_by(|a, b| {
-        b.risk
-            .cmp(&a.risk)
+        b.risk_score
+            .total_cmp(&a.risk_score)
             .then_with(|| a.node.name.cmp(&b.node.name))
             .then_with(|| a.node.id.cmp(&b.node.id))
     });
 
+    let risk_score = nodes.first().map_or(0.0, |n| n.risk_score);
     Ok(ReviewContext {
         base_ref: opts.base_ref.clone(),
+        risk_score,
+        risk: risk_level(risk_score),
+        churn_status,
         changed_files: files.into_iter().map(|f| f.path).collect(),
         changed_nodes: nodes,
         impacted: radius.impacted,
@@ -113,14 +157,18 @@ pub async fn build_review(
     })
 }
 
-/// Compact view: changed ids with risk, file list and counts; no snippets or impact list.
+/// Compact view: changed ids with risk score, file list and counts; no signals, snippets or
+/// impact list.
 pub fn minimal_view(ctx: &ReviewContext) -> JsonValue {
     json!({
         "base_ref": ctx.base_ref,
+        "risk_score": ctx.risk_score,
+        "risk": ctx.risk,
+        "churn_status": ctx.churn_status,
         "changed_files": ctx.changed_files,
         "changed_nodes": ctx.changed_nodes.iter().map(|n| json!({
             "id": n.node.id,
-            "risk": n.risk,
+            "risk_score": n.risk_score,
         })).collect::<Vec<_>>(),
         "affected_files": ctx.affected_files,
         "counts": {
@@ -255,6 +303,7 @@ mod tests {
             depth: 3,
             max_nodes: 50,
             max_snippet_lines: 20,
+            include_churn: false,
         };
         let ctx = build_review(&graph, &opts).await.unwrap();
 
@@ -262,7 +311,15 @@ mod tests {
         assert_eq!(ctx.changed_nodes.len(), 1);
         let a = &ctx.changed_nodes[0];
         assert_eq!(a.node.name, "a");
-        assert_eq!((a.dependents, a.tests, a.risk), (2, 1, 2));
+        assert_eq!((a.dependents, a.tests), (2, 1));
+        // One test: 0.30 - 0.2 * 0.25; two callers: 2 / 20.
+        assert!(
+            (a.risk_signals.tests - 0.25).abs() < 1e-12,
+            "{:?}",
+            a.risk_signals
+        );
+        assert_eq!(a.risk_signals.callers, 0.10);
+        assert_eq!(ctx.risk_score, a.risk_score);
         assert_eq!(a.snippet.as_deref(), Some("def a():\n    return 2"));
         assert_eq!(ctx.changed_files, vec!["m.py".to_string()]);
         let impacted: Vec<_> = ctx.impacted.iter().map(|n| n.node.name.as_str()).collect();
@@ -274,5 +331,101 @@ mod tests {
         let minimal = serde_json::to_string(&minimal_view(&ctx)).unwrap();
         assert!(minimal.len() < full.len());
         assert_eq!(minimal_view(&ctx)["counts"]["impacted_nodes"], 2);
+    }
+
+    #[test]
+    fn risk_level_thresholds() {
+        assert_eq!(risk_level(1.0), "high");
+        assert_eq!(risk_level(0.7001), "high");
+        assert_eq!(risk_level(0.7), "medium");
+        assert_eq!(risk_level(0.4001), "medium");
+        assert_eq!(risk_level(0.4), "low");
+        assert_eq!(risk_level(0.0), "low");
+    }
+
+    #[tokio::test]
+    async fn nodes_ordered_by_risk_score() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        let source = root.join("m.py");
+        let text = |v: u8| {
+            format!("def a_plain():\n    return {v}\n\ndef z_check_token():\n    return {v}\n")
+        };
+        std::fs::write(&source, text(1)).unwrap();
+        git(root, &["add", "m.py"]);
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+        std::fs::write(&source, text(2)).unwrap();
+
+        let store = SqliteGraphStore::open(root).unwrap();
+        store
+            .upsert_nodes_batch(&[
+                func(10, "a_plain", &source, 1, 2),
+                func(11, "z_check_token", &source, 4, 5),
+            ])
+            .await
+            .unwrap();
+        store.finalize("full").await.unwrap();
+        let graph = GraphQuery::new(store.clone());
+        let mut opts = ReviewOptions {
+            base_ref: "HEAD".to_string(),
+            depth: 3,
+            max_nodes: 50,
+            max_snippet_lines: 20,
+            include_churn: true,
+        };
+
+        let ctx = build_review(&graph, &opts).await.unwrap();
+        // Both untested (0.30); the security keyword adds 0.20 and outranks the name order.
+        let names: Vec<_> = ctx
+            .changed_nodes
+            .iter()
+            .map(|n| n.node.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["z_check_token", "a_plain"]);
+        let top = &ctx.changed_nodes[0];
+        assert_eq!(top.risk_signals.security, 0.20);
+        assert_eq!(top.risk_signals.tests, 0.30);
+        // One commit to m.py in the window: 1 / 10 * 0.15.
+        assert_eq!(ctx.churn_status, "ok");
+        assert!((top.risk_signals.churn - 0.015).abs() < 1e-12);
+        assert!(ctx.changed_nodes[0].risk_score > ctx.changed_nodes[1].risk_score);
+        assert_eq!(ctx.risk_score, top.risk_score);
+        assert_eq!(ctx.risk, risk_level(top.risk_score));
+
+        let minimal = minimal_view(&ctx);
+        assert_eq!(minimal["risk_score"], top.risk_score);
+        assert_eq!(minimal["changed_nodes"][0]["risk_score"], top.risk_score);
+        assert!(minimal["changed_nodes"][0].get("risk_signals").is_none());
+
+        opts.include_churn = false;
+        let ctx = build_review(&graph, &opts).await.unwrap();
+        assert_eq!(ctx.churn_status, "off");
+        assert_eq!(ctx.changed_nodes[0].risk_signals.churn, 0.0);
+
+        // detect_changes keeps node order, scores each node and ranks the priorities.
+        let executor = crate::graph_tool_executor::GraphToolExecutor::new(std::sync::Arc::new(
+            GraphQuery::new(store.clone()),
+        ));
+        let out = executor.execute("detect_changes", json!({})).await.unwrap();
+        let result = &out["result"];
+        assert_eq!(result["churn_status"], "off");
+        assert_eq!(result["changed_nodes"][0]["name"], "a_plain");
+        assert_eq!(result["changed_nodes"][0]["risk_score"], 0.3);
+        assert_eq!(result["review_priorities"][0]["name"], "z_check_token");
+        assert_eq!(result["review_priorities"][0]["risk_score"], 0.5);
+        assert_eq!(result["risk_score"], 0.5);
     }
 }

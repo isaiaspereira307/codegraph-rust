@@ -1,6 +1,7 @@
-// ABOUTME: Changed line ranges per file from `git diff -U0 <base>`, used by detect_changes.
+// ABOUTME: Changed line ranges per file from `git diff -U0 <base>` and 90-day commit churn per file.
 // ABOUTME: Reads only git's output; a directory that is not a git work tree is an error, never a fallback.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -82,6 +83,50 @@ pub fn changed_files(root: &Path, base: &str) -> Result<Vec<ChangedFile>, String
         ],
     )?;
     Ok(parse_zero_context_diff(&diff))
+}
+
+/// Commits per file over the last 90 days (at most 2000 commits, 5 s budget), from one
+/// `git log` run in `root`. Keys are the paths relative to `root` and the same paths joined to
+/// `root`, so a node's stored path (relative or absolute) finds its count. `None` when git
+/// fails, times out or the repository has no commits.
+pub async fn file_churn(root: &Path) -> Option<HashMap<String, u32>> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(root)
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "--since=90.days.ago",
+            "--max-count=2000",
+            "--no-renames",
+            "--relative",
+            "--name-only",
+            "--format=",
+            "-z",
+            "--",
+        ])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for path in text.split('\0').map(|p| p.trim_matches('\n')) {
+        if path.is_empty() {
+            continue;
+        }
+        *counts.entry(path.to_string()).or_default() += 1;
+        *counts
+            .entry(root.join(path).to_string_lossy().into_owned())
+            .or_default() += 1;
+    }
+    Some(counts)
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
@@ -179,5 +224,47 @@ diff --git a/gone.py b/gone.py
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "m.py");
         assert_eq!(files[0].lines, vec![(2, 2), (4, 4)]);
+    }
+
+    #[tokio::test]
+    async fn churn_counts_commits_per_file_or_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(file_churn(root).await, None);
+        let run = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        // A repository without commits has no history to read.
+        assert_eq!(file_churn(root).await, None);
+        for (i, files) in [&["a.py", "b.py"][..], &["a.py"][..]].iter().enumerate() {
+            for f in *files {
+                std::fs::write(root.join(f), format!("{i}\n")).unwrap();
+                run(&["add", f]);
+            }
+            run(&[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "c",
+            ]);
+        }
+        let churn = file_churn(root).await.unwrap();
+        assert_eq!(churn.get("a.py"), Some(&2));
+        assert_eq!(churn.get("b.py"), Some(&1));
+        let abs = root.join("a.py").to_string_lossy().into_owned();
+        assert_eq!(churn.get(&abs), Some(&2));
     }
 }

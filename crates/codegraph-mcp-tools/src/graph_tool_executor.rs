@@ -2,7 +2,7 @@
 // ABOUTME: Validates tool parameters, runs GraphQuery calls and caches their results
 
 use crate::git_changes::changed_files;
-use crate::review::{ReviewOptions, build_review, minimal_view};
+use crate::review::{ReviewOptions, build_review, churn_counts, minimal_view};
 use std::path::PathBuf;
 
 /// Tools whose answer depends on the git work tree, which `data_version` does not track.
@@ -567,6 +567,7 @@ impl GraphToolExecutor {
                 .as_i64()
                 .unwrap_or(20)
                 .clamp(1, 100) as usize,
+            include_churn: params["include_churn"].as_bool().unwrap_or(true),
         };
         let tool = if minimal {
             "get_minimal_context"
@@ -587,7 +588,8 @@ impl GraphToolExecutor {
                 "base_ref": opts.base_ref,
                 "depth": opts.depth,
                 "max_nodes": opts.max_nodes,
-                "max_snippet_lines": opts.max_snippet_lines
+                "max_snippet_lines": opts.max_snippet_lines,
+                "include_churn": opts.include_churn
             },
             "result": result
         }))
@@ -906,9 +908,11 @@ impl GraphToolExecutor {
     /// Execute detect_changes - nodes touched by `git diff -U0 <base_ref>` in the project
     async fn execute_detect_changes(&self, params: JsonValue) -> Result<JsonValue> {
         let base_ref = params["base_ref"].as_str().unwrap_or("HEAD").to_string();
+        let include_churn = params["include_churn"].as_bool().unwrap_or(false);
         let root = PathBuf::from(self.graph_query.project_id());
         let base = base_ref.clone();
-        let files = tokio::task::spawn_blocking(move || changed_files(&root, &base))
+        let git_root = root.clone();
+        let files = tokio::task::spawn_blocking(move || changed_files(&git_root, &base))
             .await
             .map_err(|e| McpError::Protocol(format!("detect_changes failed: {}", e)))?
             .map_err(|e| McpError::Protocol(format!("detect_changes failed: {}", e)))?;
@@ -923,17 +927,44 @@ impl GraphToolExecutor {
             .await
             .map_err(|e| McpError::Protocol(format!("detect_changes failed: {}", e)))?;
 
+        let (churn, churn_status) = churn_counts(&root, include_churn).await;
+        let ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+        let risks = self
+            .graph_query
+            .risk_scores(&ids, &churn)
+            .await
+            .map_err(|e| McpError::Protocol(format!("detect_changes failed: {}", e)))?;
+        let mut scored: Vec<(f64, JsonValue)> = Vec::with_capacity(nodes.len());
+        for node in &nodes {
+            let score = risks.get(&node.id).map_or(0.0, |r| r.0);
+            let mut value = serde_json::to_value(node)?;
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("risk_score".into(), json!(score));
+            }
+            scored.push((score, value));
+        }
+        let risk_score = scored.iter().map(|s| s.0).fold(0.0, f64::max);
+        let mut priorities: Vec<&(f64, JsonValue)> = scored.iter().collect();
+        // Stable: ties keep the changed-node order.
+        priorities.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let review_priorities: Vec<&JsonValue> =
+            priorities.into_iter().take(10).map(|s| &s.1).collect();
+
         let changed_files: Vec<JsonValue> = files
             .iter()
             .map(|f| json!({ "path": f.path, "lines": f.lines }))
             .collect();
+        let changed_nodes: Vec<&JsonValue> = scored.iter().map(|s| &s.1).collect();
         Ok(json!({
             "tool": "detect_changes",
-            "parameters": { "base_ref": base_ref },
+            "parameters": { "base_ref": base_ref, "include_churn": include_churn },
             "result": {
                 "base_ref": base_ref,
+                "risk_score": risk_score,
+                "churn_status": churn_status,
                 "changed_files": changed_files,
-                "changed_nodes": nodes,
+                "changed_nodes": changed_nodes,
+                "review_priorities": review_priorities,
             }
         }))
     }

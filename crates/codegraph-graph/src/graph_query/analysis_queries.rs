@@ -438,6 +438,54 @@ impl GraphQuery {
 }
 
 impl GraphQuery {
+    /// Risk score and signals for each known id (uuid or qualified name), keyed by the id as
+    /// given; unknown ids are skipped. `churn` maps a node's stored `file_path` to its commits
+    /// in the churn window; an empty map means churn is off and scores no churn term.
+    pub async fn risk_scores(
+        &self,
+        ids: &[String],
+        churn: &std::collections::HashMap<String, u32>,
+    ) -> Result<std::collections::HashMap<String, (f64, crate::analysis::risk::RiskSignals)>> {
+        let snap = self.snapshot().await?;
+        let wanted: Vec<(String, String)> = ids
+            .iter()
+            .filter_map(|id| Some((id.clone(), snap.node(snap.resolve(id)?).qualified.clone())))
+            .collect();
+        drop(snap);
+        let churn = churn.clone();
+        self.store()
+            .with_conn(move |conn| {
+                let graph = crate::analysis::AnalysisGraph::load(conn)?;
+                let mut crits: std::collections::HashMap<i64, Vec<f64>> = Default::default();
+                let mut stmt = conn.prepare(
+                    "SELECT m.node_id, f.criticality FROM flow_memberships m \
+                     JOIN flows f ON f.id = m.flow_id ORDER BY m.node_id, f.id",
+                )?;
+                for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))? {
+                    let (node, crit) = row?;
+                    crits.entry(node).or_default().push(crit);
+                }
+                let mut out = std::collections::HashMap::new();
+                for (id, qualified) in wanted {
+                    let Some(ix) = graph.index_of(&qualified) else {
+                        continue;
+                    };
+                    let node = &graph.nodes[ix];
+                    let commits = (!churn.is_empty())
+                        .then(|| churn.get(&node.file_path).copied().unwrap_or(0));
+                    let signals = crate::analysis::risk::risk_signals(
+                        &graph,
+                        ix,
+                        crits.get(&node.id).map_or(&[][..], Vec::as_slice),
+                        commits,
+                    );
+                    out.insert(id, (crate::analysis::risk::risk_score(&signals), signals));
+                }
+                Ok(out)
+            })
+            .await
+    }
+
     /// Every hub candidate, most connected first (see `analysis::insights::hub_nodes`).
     pub async fn hub_nodes(&self) -> Result<Vec<crate::analysis::insights::HubRow>> {
         self.store()

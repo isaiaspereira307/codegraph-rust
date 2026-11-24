@@ -180,6 +180,7 @@ fn cohesion_counts_external_both_sides() {
                 file_path: String::new(),
                 line: 0,
                 import_context: None,
+                unresolved: false,
             })
             .collect()
     };

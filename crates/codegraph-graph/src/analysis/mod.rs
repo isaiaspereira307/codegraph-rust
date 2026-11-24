@@ -4,6 +4,7 @@
 pub mod communities;
 pub mod flows;
 pub mod insights;
+pub mod risk;
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -62,6 +63,9 @@ pub struct AnalysisEdge {
     pub line: i64,
     /// `extra.import_context` of an import edge (`type_only`, `deferred`, `parent_package`).
     pub import_context: Option<String>,
+    /// `extra` names candidate targets (`ambiguous_targets`, `unresolved_targets`) or a claimed
+    /// endpoint, so the edge is not a fact about one symbol (`_edge_extra_is_unresolved`).
+    pub unresolved: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -70,12 +74,14 @@ pub struct AnalysisGraph {
     pub edges: Vec<AnalysisEdge>,
     by_qualified: HashMap<String, usize>,
     by_node_id: HashMap<i64, usize>,
+    by_source: HashMap<String, Vec<usize>>,
+    by_target: HashMap<String, Vec<usize>>,
 }
 
 impl AnalysisGraph {
     /// Loads every node and edge, ordered by `id` so downstream results are deterministic.
     pub fn load(conn: &Connection) -> Result<Self> {
-        let mut graph = AnalysisGraph::default();
+        let mut nodes = Vec::new();
         let mut stmt = conn.prepare(
             "SELECT id, qualified_name, name, kind, file_path, language, line_start, line_end, \
              is_test, extra, community_id FROM nodes ORDER BY id",
@@ -97,32 +103,33 @@ impl AnalysisGraph {
             })
         })?;
         for row in rows {
-            let node = row?;
-            let idx = graph.nodes.len();
-            graph.by_qualified.insert(node.qualified.clone(), idx);
-            graph.by_node_id.insert(node.id, idx);
-            graph.nodes.push(node);
+            nodes.push(row?);
         }
+        let mut edges = Vec::new();
         let mut stmt = conn.prepare(
             "SELECT kind, source_qualified, target_qualified, file_path, line, extra FROM edges \
              ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
+            let extra = r
+                .get::<_, Option<String>>(5)?
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
             Ok(AnalysisEdge {
                 kind: r.get(0)?,
                 source: r.get(1)?,
                 target: r.get(2)?,
                 file_path: r.get(3)?,
                 line: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
-                import_context: import_context_from_extra(
-                    r.get::<_, Option<String>>(5)?.as_deref(),
-                ),
+                import_context: extra
+                    .as_ref()
+                    .and_then(|v| v.get("import_context")?.as_str().map(str::to_string)),
+                unresolved: extra.as_ref().is_some_and(extra_is_unresolved),
             })
         })?;
         for row in rows {
-            graph.edges.push(row?);
+            edges.push(row?);
         }
-        Ok(graph)
+        Ok(Self::from_parts(nodes, edges))
     }
 
     /// Builds a graph from rows already in id order (used by `load` and by tests).
@@ -133,11 +140,19 @@ impl AnalysisGraph {
             .map(|(i, n)| (n.qualified.clone(), i))
             .collect();
         let by_node_id = nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
+        let mut by_source: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_target: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, e) in edges.iter().enumerate() {
+            by_source.entry(e.source.clone()).or_default().push(i);
+            by_target.entry(e.target.clone()).or_default().push(i);
+        }
         AnalysisGraph {
             nodes,
             edges,
             by_qualified,
             by_node_id,
+            by_source,
+            by_target,
         }
     }
 
@@ -148,11 +163,32 @@ impl AnalysisGraph {
     pub fn by_id(&self, id: i64) -> Option<usize> {
         self.by_node_id.get(&id).copied()
     }
+
+    /// Edges leaving `source`, in edge id order.
+    pub fn edges_from<'a>(&'a self, source: &str) -> impl Iterator<Item = &'a AnalysisEdge> + 'a {
+        self.by_source
+            .get(source)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.edges[i])
+    }
+
+    /// Edges entering `target`, in edge id order.
+    pub fn edges_to<'a>(&'a self, target: &str) -> impl Iterator<Item = &'a AnalysisEdge> + 'a {
+        self.by_target
+            .get(target)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.edges[i])
+    }
 }
 
-fn import_context_from_extra(extra: Option<&str>) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(extra?).ok()?;
-    value.get("import_context")?.as_str().map(str::to_string)
+fn extra_is_unresolved(extra: &serde_json::Value) -> bool {
+    extra.as_object().is_some_and(|o| {
+        o.contains_key("ambiguous_targets")
+            || o.contains_key("unresolved_targets")
+            || o.contains_key("claimed_endpoint")
+    })
 }
 
 fn decorators_from_extra(extra: Option<&str>) -> Vec<String> {

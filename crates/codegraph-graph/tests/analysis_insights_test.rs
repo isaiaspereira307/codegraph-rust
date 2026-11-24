@@ -149,6 +149,7 @@ fn sampled_betweenness_is_deterministic() {
                 file_path: String::new(),
                 line: 0,
                 import_context: None,
+                unresolved: false,
             });
         }
     }
@@ -197,6 +198,7 @@ fn edge(kind: &str, s: &str, t: &str) -> AnalysisEdge {
         file_path: String::new(),
         line: 0,
         import_context: None,
+        unresolved: false,
     }
 }
 

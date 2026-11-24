@@ -20,9 +20,9 @@ that ID to the other tools:
 | Callers, callees, imports, importers, tests of a node | `query_graph` | `pattern`, `node_id` or `name`, `limit` |
 | Walk dependencies out, in or both, bounded | `traverse_graph` | `node_id` or `name`, `direction`, `edge_type`, `max_depth`, `max_nodes` |
 | Blast radius of changed nodes or files, with tests | `get_impact_radius` | `node_ids` or `files`, `depth`, `max_nodes` |
-| Nodes touched by the git diff against a base | `detect_changes` | `base_ref` (default HEAD) |
-| Review context for the diff: risk, impact, tests, snippets | `get_review_context` | `base_ref`, `depth`, `max_nodes`, `max_snippet_lines` |
-| Same, compact (ids and counts) | `get_minimal_context` | `base_ref`, `depth`, `max_nodes` |
+| Nodes touched by the git diff against a base, with risk_score and review_priorities | `detect_changes` | `base_ref` (default HEAD), `include_churn` (default false) |
+| Review context for the diff: risk_score and signals, impact, tests, snippets | `get_review_context` | `base_ref`, `depth`, `max_nodes`, `max_snippet_lines`, `include_churn` (default true) |
+| Same, compact (ids, risk_score and counts) | `get_minimal_context` | `base_ref`, `depth`, `max_nodes`, `include_churn` |
 | What does X depend on? | `get_transitive_dependencies` | `node_id`, `edge_type`, `depth` |
 | What breaks if X changes? | `get_reverse_dependencies` | `node_id`, `edge_type`, `depth` |
 | Follow calls from a function | `trace_call_chain` | `from_node`, `max_depth` |

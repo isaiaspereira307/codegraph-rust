@@ -83,6 +83,9 @@ pub struct ReviewRequest {
     /// Lines per changed-node snippet (1-100, default 20); get_review_context only
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_snippet_lines: Option<u32>,
+    /// Add the 90-day git commit churn of each file to the risk score (default true)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_churn: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -189,6 +192,9 @@ pub struct DetectChangesRequest {
     /// Commit, branch or tag to diff against (default HEAD)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
+    /// Add the 90-day git commit churn of each file to the risk score (default false)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_churn: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -442,7 +448,7 @@ impl CodeGraphMCPServer {
     }
 
     #[tool(
-        description = "Graph nodes touched by the current git diff against base_ref (default HEAD): changed files, changed line ranges and the nodes whose spans overlap them."
+        description = "Graph nodes touched by the current git diff against base_ref (default HEAD): changed files, changed line ranges, the nodes whose spans overlap them with a 0-1 risk_score, the overall risk_score and the 10 riskiest as review_priorities."
     )]
     async fn detect_changes(
         &self,
@@ -452,7 +458,7 @@ impl CodeGraphMCPServer {
     }
 
     #[tool(
-        description = "Review context for the current git diff in one call: changed nodes by risk, impact radius by depth, affected files, covering tests and snippets."
+        description = "Review context for the current git diff in one call: changed nodes by risk_score (0-1, with risk_signals), overall risk level, impact radius by depth, affected files, covering tests and snippets."
     )]
     async fn get_review_context(
         &self,
@@ -462,7 +468,7 @@ impl CodeGraphMCPServer {
     }
 
     #[tool(
-        description = "Compact review context for the current git diff: changed node IDs with risk, affected files and counts. No snippets or impact list."
+        description = "Compact review context for the current git diff: changed node IDs with risk_score (0-1), overall risk level, affected files and counts. No snippets or impact list."
     )]
     async fn get_minimal_context(
         &self,
