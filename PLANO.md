@@ -328,11 +328,12 @@ Paridade do critério de aceite (2026-11-24, `docs/parity/changes.md`, scripts e
 Critério atendido em Python. Em Rust fica limitado pelas lacunas da Fase 2 (IMPORTS_FROM entre
 arquivos, entry points).
 
+Corrigidos depois da medição: `detect_changes` passou a somar churn por padrão, como o MCP
+do CRG, e `*.min.js`/`.min.css`/`.min.json` saem da coleta (flows do Rust no CRG: 542 → 303).
+
 Divergências a decidir:
-- `detect_changes` usa `include_churn: false` por padrão; o MCP do CRG sempre soma churn.
 - A lista `tests` de `get_impact_radius` vai um salto de `TESTED_BY` além da profundidade.
 - `affected_files` inclui os próprios arquivos alterados.
-- O Rust indexa JS minificado (`*.min.js`), que o CRG ignora.
 - O Rust detecta entry points Python a mais (284 contra 167 no CRG).
 - `update` debug de 2 arquivos leva 70 s, contra 18 s no CRG.
 

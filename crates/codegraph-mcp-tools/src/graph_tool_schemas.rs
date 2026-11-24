@@ -305,8 +305,8 @@ impl GraphToolSchemas {
                     },
                     "include_churn": {
                         "type": "boolean",
-                        "description": "Add the 90-day git commit churn of each file to the risk score (defaults to false)",
-                        "default": false
+                        "description": "Add the 90-day git commit churn of each file to the risk score (defaults to true, like code-review-graph)",
+                        "default": true
                     }
                 }
             }),

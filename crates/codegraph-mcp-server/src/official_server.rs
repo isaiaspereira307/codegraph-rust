@@ -192,7 +192,7 @@ pub struct DetectChangesRequest {
     /// Commit, branch or tag to diff against (default HEAD)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_ref: Option<String>,
-    /// Add the 90-day git commit churn of each file to the risk score (default false)
+    /// Add the 90-day git commit churn of each file to the risk score (default true)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_churn: Option<bool>,
 }

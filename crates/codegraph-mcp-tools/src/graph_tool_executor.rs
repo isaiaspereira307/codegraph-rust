@@ -926,7 +926,7 @@ impl GraphToolExecutor {
     /// Execute detect_changes - nodes touched by `git diff -U0 <base_ref>` in the project
     async fn execute_detect_changes(&self, params: JsonValue) -> Result<JsonValue> {
         let base_ref = params["base_ref"].as_str().unwrap_or("HEAD").to_string();
-        let include_churn = params["include_churn"].as_bool().unwrap_or(false);
+        let include_churn = params["include_churn"].as_bool().unwrap_or(true);
         let root = PathBuf::from(self.graph_query.project_id());
         let base = base_ref.clone();
         let git_root = root.clone();

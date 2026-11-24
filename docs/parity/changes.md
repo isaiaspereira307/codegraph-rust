@@ -66,14 +66,14 @@ são comparados por `qualified_name` relativo à raiz.
 - **Flows**:
   - Cenário 1: a detecção de entry points em Rust concorda 0.826 com o CRG (este repo).
   - Cenário 3: o Rust tem flows a mais por dois motivos.
-    - Ele indexa `code_review_graph/assets/d3.v7.min.js` (1066 nós, 239 flows), que o CRG
-      ignora.
+    - Ele indexava `code_review_graph/assets/d3.v7.min.js` (1066 nós, 239 flows), que o CRG
+      ignora. Corrigido em 2026-11-24: `*.min.js`/`.min.css`/`.min.json` saem da coleta
+      (`is_minified_asset`), e os flows do Rust no CRG caíram de 542 para 303 (CRG: 186).
     - Ele detecta mais entry points em Python: 284 contra 167, Jaccard 0.555 no CRG inteiro.
       Muitos são métodos de `GraphStore` sem chamador (`get_all_nodes`, `commit`).
-- **Churn**: o `detect_changes_tool` do CRG sempre soma churn (`include_churn=True` em
-  `tools/review.py`). O `detect_changes` do Rust tem padrão `include_churn: false` (Decisão 8
-  da Fase 4). Com o padrão, o risco geral sai 0.85 contra 1.0; com churn, os sinais batem nó a
-  nó.
+- **Churn** (corrigido em 2026-11-24): o `detect_changes_tool` do CRG sempre soma churn
+  (`include_churn=True` em `tools/review.py`); o `detect_changes` do Rust passou a ter o mesmo
+  padrão (`include_churn: true`). Antes, com `false`, o risco geral saía 0.85 contra 1.0.
 - **Tempo, build debug**:
   - `build` do CRG: 19 s neste repo e 57 s no CRG.
   - `build` do Rust: 26 s e 110 s.

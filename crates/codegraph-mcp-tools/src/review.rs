@@ -419,7 +419,13 @@ mod tests {
         let executor = crate::graph_tool_executor::GraphToolExecutor::new(std::sync::Arc::new(
             GraphQuery::new(store.clone()),
         ));
+        // Churn is on by default, as in code-review-graph's detect_changes_tool.
         let out = executor.execute("detect_changes", json!({})).await.unwrap();
+        assert_eq!(out["result"]["churn_status"], "ok");
+        let out = executor
+            .execute("detect_changes", json!({"include_churn": false}))
+            .await
+            .unwrap();
         let result = &out["result"];
         assert_eq!(result["churn_status"], "off");
         assert_eq!(result["changed_nodes"][0]["name"], "a_plain");
