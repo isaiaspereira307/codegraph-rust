@@ -830,3 +830,56 @@ async fn node_coverage_counts_dependents_and_tests() {
     assert_eq!((cov[0].dependents, cov[0].tests), (7, 1));
     assert_eq!((cov[1].dependents, cov[1].tests), (1, 0));
 }
+
+async fn run_all_analysis_tools(q: &GraphQuery) -> String {
+    let hubs = q.hub_nodes().await.unwrap();
+    q.bridge_nodes().await.unwrap();
+    q.knowledge_gaps().await.unwrap();
+    q.suggested_questions().await.unwrap();
+    q.surprising_connections().await.unwrap();
+    format!("{hubs:?}")
+}
+
+#[tokio::test]
+async fn analysis_graph_is_loaded_once_across_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_store, q) = fixture(dir.path()).await;
+    run_all_analysis_tools(&q).await;
+    run_all_analysis_tools(&q).await;
+    assert_eq!(q.analysis_graph_loads(), 1);
+}
+
+#[tokio::test]
+async fn analysis_graph_reloads_after_a_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, q) = fixture(dir.path()).await;
+    let before = run_all_analysis_tools(&q).await;
+    assert_eq!(q.analysis_graph_loads(), 1);
+
+    store
+        .upsert_nodes_batch(&[node(27, "d7", "deps.py", 1.0)])
+        .await
+        .unwrap();
+    store
+        .upsert_edges_batch(&[calls(227, 27, 20)])
+        .await
+        .unwrap();
+    let after = run_all_analysis_tools(&q).await;
+    assert_eq!(q.analysis_graph_loads(), 2);
+    assert_ne!(before, after);
+}
+
+#[tokio::test]
+async fn analysis_graph_reloads_after_another_connection_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_store, q) = fixture(dir.path()).await;
+    let before = run_all_analysis_tools(&q).await;
+
+    let other = Connection::open(dir.path().join(".code-review-graph/graph.db")).unwrap();
+    other
+        .execute("DELETE FROM edges WHERE source_qualified LIKE '%::d6'", [])
+        .unwrap();
+    let after = run_all_analysis_tools(&q).await;
+    assert_eq!(q.analysis_graph_loads(), 2);
+    assert_ne!(before, after);
+}

@@ -29,6 +29,7 @@ use petgraph::Direction::{Incoming, Outgoing};
 use petgraph::graph::NodeIndex;
 use snapshot::Snapshot;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use types::*;
 
@@ -37,12 +38,15 @@ const MAX_CALLERS: usize = 10;
 const MAX_HUBS: usize = 50;
 
 type Cached = Option<((i64, i64), Arc<Snapshot>)>;
+type AnalysisCached = Option<((i64, i64), Arc<crate::analysis::AnalysisGraph>)>;
 
 /// Read side of the graph tools. Clones share the snapshot cache.
 #[derive(Clone)]
 pub struct GraphQuery {
     store: SqliteGraphStore,
     cache: Arc<Mutex<Cached>>,
+    analysis_cache: Arc<Mutex<AnalysisCached>>,
+    analysis_loads: Arc<AtomicUsize>,
 }
 
 fn safe_depth(depth: i32, default: i32) -> i32 {
@@ -80,6 +84,25 @@ fn snapshot_in(conn: &rusqlite::Connection, cache: &Mutex<Cached>) -> Result<Arc
     Ok(snap)
 }
 
+/// The analysis graph for `conn`'s current state, from `cache` when the change marker matches.
+fn analysis_graph_in(
+    conn: &rusqlite::Connection,
+    cache: &Mutex<AnalysisCached>,
+    loads: &AtomicUsize,
+) -> Result<Arc<crate::analysis::AnalysisGraph>> {
+    let key = change_marker(conn)?;
+    let mut cached = cache.lock().expect("analysis cache poisoned");
+    if let Some((k, graph)) = cached.as_ref()
+        && *k == key
+    {
+        return Ok(graph.clone());
+    }
+    let graph = Arc::new(crate::analysis::AnalysisGraph::load(conn)?);
+    loads.fetch_add(1, Ordering::Relaxed);
+    *cached = Some((key, graph.clone()));
+    Ok(graph)
+}
+
 fn round(value: f64, places: i32) -> f64 {
     let scale = 10f64.powi(places);
     (value * scale).round() / scale
@@ -90,7 +113,15 @@ impl GraphQuery {
         Self {
             store,
             cache: Arc::new(Mutex::new(None)),
+            analysis_cache: Arc::new(Mutex::new(None)),
+            analysis_loads: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// How many times the analysis graph was really loaded from SQLite (cache misses).
+    #[doc(hidden)]
+    pub fn analysis_graph_loads(&self) -> usize {
+        self.analysis_loads.load(Ordering::Relaxed)
     }
 
     pub fn store(&self) -> &SqliteGraphStore {

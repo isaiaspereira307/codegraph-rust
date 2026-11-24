@@ -449,6 +449,8 @@ impl GraphQuery {
         let ids = ids.to_vec();
         let churn = churn.clone();
         let cache = self.cache.clone();
+        let analysis_cache = self.analysis_cache.clone();
+        let loads = self.analysis_loads.clone();
         self.store()
             .with_conn(move |conn| {
                 // One read transaction: the id resolution (snapshot) and the analysis graph
@@ -464,7 +466,7 @@ impl GraphQuery {
                     })
                     .collect();
                 drop(snap);
-                let graph = crate::analysis::AnalysisGraph::load(&conn)?;
+                let graph = super::analysis_graph_in(&conn, &analysis_cache, &loads)?;
                 let mut crits: std::collections::HashMap<i64, Vec<f64>> = Default::default();
                 let mut stmt = conn.prepare(
                     "SELECT m.node_id, f.criticality FROM flow_memberships m \
@@ -497,10 +499,12 @@ impl GraphQuery {
 
     /// Every hub candidate, most connected first (see `analysis::insights::hub_nodes`).
     pub async fn hub_nodes(&self) -> Result<Vec<crate::analysis::insights::HubRow>> {
+        let analysis_cache = self.analysis_cache.clone();
+        let loads = self.analysis_loads.clone();
         self.store()
-            .with_conn(|conn| {
+            .with_conn(move |conn| {
                 Ok(crate::analysis::insights::hub_nodes(
-                    &crate::analysis::AnalysisGraph::load(conn)?,
+                    &*super::analysis_graph_in(conn, &analysis_cache, &loads)?,
                 ))
             })
             .await
@@ -508,10 +512,12 @@ impl GraphQuery {
 
     /// Every node with positive betweenness, highest first (exact to 5000 vertices, then sampled).
     pub async fn bridge_nodes(&self) -> Result<Vec<crate::analysis::insights::BridgeRow>> {
+        let analysis_cache = self.analysis_cache.clone();
+        let loads = self.analysis_loads.clone();
         self.store()
-            .with_conn(|conn| {
+            .with_conn(move |conn| {
                 Ok(crate::analysis::insights::bridge_nodes(
-                    &crate::analysis::AnalysisGraph::load(conn)?,
+                    &*super::analysis_graph_in(conn, &analysis_cache, &loads)?,
                 ))
             })
             .await
@@ -521,9 +527,11 @@ impl GraphQuery {
     /// hotspots and import cycles (paths relative to the project root).
     pub async fn knowledge_gaps(&self) -> Result<crate::analysis::insights::KnowledgeGaps> {
         let root = self.store().root().to_string_lossy().into_owned();
+        let analysis_cache = self.analysis_cache.clone();
+        let loads = self.analysis_loads.clone();
         self.store()
             .with_conn(move |conn| {
-                let graph = crate::analysis::AnalysisGraph::load(conn)?;
+                let graph = super::analysis_graph_in(conn, &analysis_cache, &loads)?;
                 let communities = read_communities(conn, "size", 0)?;
                 Ok(crate::analysis::insights::knowledge_gaps(
                     &graph,
@@ -536,9 +544,11 @@ impl GraphQuery {
 
     /// Review questions generated from bridges, hubs, surprises and gaps.
     pub async fn suggested_questions(&self) -> Result<Vec<crate::analysis::insights::Question>> {
+        let analysis_cache = self.analysis_cache.clone();
+        let loads = self.analysis_loads.clone();
         self.store()
-            .with_conn(|conn| {
-                let graph = crate::analysis::AnalysisGraph::load(conn)?;
+            .with_conn(move |conn| {
+                let graph = super::analysis_graph_in(conn, &analysis_cache, &loads)?;
                 let communities = read_communities(conn, "size", 0)?;
                 Ok(crate::analysis::insights::suggested_questions(
                     &graph,
@@ -552,10 +562,12 @@ impl GraphQuery {
     pub async fn surprising_connections(
         &self,
     ) -> Result<Vec<crate::analysis::insights::SurprisingRow>> {
+        let analysis_cache = self.analysis_cache.clone();
+        let loads = self.analysis_loads.clone();
         self.store()
-            .with_conn(|conn| {
+            .with_conn(move |conn| {
                 Ok(crate::analysis::insights::surprising_connections(
-                    &crate::analysis::AnalysisGraph::load(conn)?,
+                    &*super::analysis_graph_in(conn, &analysis_cache, &loads)?,
                 ))
             })
             .await
