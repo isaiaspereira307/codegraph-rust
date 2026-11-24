@@ -497,6 +497,16 @@ pub(crate) fn strip_settings(mut settings: Value) -> Result<Value> {
     Ok(settings)
 }
 
+/// True when `harness` already has every CodeGraph hook (project JSON or inline Codex TOML).
+pub(crate) fn hooks_configured(project: &Path, harness: Harness) -> Result<bool> {
+    Ok(install(project, harness, true)?.iter().all(|c| !c.changed))
+}
+
+/// True when the git post-commit block is present.
+pub(crate) fn git_hook_installed(project: &Path) -> bool {
+    plan_git_hook_removal(project).ok().flatten().is_some()
+}
+
 /// The edit for removing the git post-commit block, or `None` when there is no repository or
 /// no block. Mirrors [`uninstall_git_hook`] without writing.
 pub(crate) fn plan_git_hook_removal(

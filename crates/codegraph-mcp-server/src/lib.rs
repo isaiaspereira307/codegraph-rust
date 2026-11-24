@@ -2,6 +2,7 @@
 // ABOUTME: Thin runtime layer wiring transports and handlers
 
 pub mod agent_hooks;
+pub mod doctor;
 #[cfg(feature = "server-http")]
 pub mod http_config;
 #[cfg(feature = "server-http")]

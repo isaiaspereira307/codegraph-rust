@@ -78,6 +78,16 @@ enum Commands {
         workers: usize,
     },
 
+    #[command(
+        about = "Check the binary, graph database, hooks, skills and MCP entries (read-only)"
+    )]
+    Doctor {
+        #[arg(default_value = ".", help = "Project directory")]
+        path: PathBuf,
+        #[arg(long, help = "Machine-readable output")]
+        json: bool,
+    },
+
     #[command(about = "Remove what `codegraph init` installed in a project")]
     Uninstall {
         #[arg(default_value = ".", help = "Project directory")]
@@ -564,6 +574,18 @@ fn main() -> Result<()> {
     if let Commands::Hooks { ref action } = cli.command {
         return agent_hooks::run(action);
     }
+    if let Commands::Doctor { ref path, json } = cli.command {
+        let checks = codegraph_mcp_server::doctor::run_checks(path);
+        if json {
+            println!("{}", codegraph_mcp_server::doctor::render_json(&checks)?);
+        } else {
+            print!("{}", codegraph_mcp_server::doctor::render_table(&checks));
+        }
+        if codegraph_mcp_server::doctor::has_failure(&checks) {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if let Commands::Uninstall {
         ref path,
         hooks,
@@ -729,6 +751,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         | Commands::Tool { .. }
         | Commands::Hooks { .. }
         | Commands::Uninstall { .. }
+        | Commands::Doctor { .. }
         | Commands::DetectChanges { .. }
         | Commands::GraphStatus { .. }
         | Commands::Impact { .. }
