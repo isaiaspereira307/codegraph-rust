@@ -2,6 +2,7 @@
 // ABOUTME: Checks cached callers, deletion, empty sources, docs invalidation and no-change runs.
 use anyhow::Result;
 use codegraph_core::config_manager::{CodeGraphConfig, IndexingTier};
+use codegraph_graph::analysis::PostprocessLevel;
 use codegraph_graph::sqlite_store::SqliteGraphStore;
 use codegraph_mcp::indexer::{IndexerConfig, ProjectIndexer};
 use indicatif::{MultiProgress, ProgressDrawTarget};
@@ -660,11 +661,141 @@ async fn finalize_twice_keeps_flow_counts() -> Result<()> {
     else {
         return Ok(());
     };
-    let first = flow_counts(&indexer.graph_store())?;
+    let store = indexer.graph_store();
+    let first = flow_counts(&store)?;
     assert_ne!(first, ["0|0"], "main -> helper -> leaf must yield a flow");
-    // A second run over unchanged sources finalizes again.
-    indexer.index_project(dir.path()).await?;
-    assert_eq!(flow_counts(&indexer.graph_store())?, first);
+    // Finalize again, twice, directly: an unchanged-source index run would be a no-op.
+    for _ in 0..2 {
+        refinalize(&store).await?;
+        assert_eq!(flow_counts(&store)?, first);
+    }
+    let _ = dir;
+    Ok(())
+}
+
+fn postprocess_level(store: &SqliteGraphStore) -> Result<Vec<String>> {
+    rows(
+        store,
+        "SELECT value FROM metadata WHERE key = 'postprocess_level'",
+    )
+}
+
+/// Runs `finalize_with(full)` and checks the post-process really ran: a sentinel written
+/// into `postprocess_level` beforehand must come back as `full`.
+async fn refinalize(store: &SqliteGraphStore) -> Result<()> {
+    store.with_conn_blocking(|conn| {
+        conn.execute(
+            "UPDATE metadata SET value = 'sentinel' WHERE key = 'postprocess_level'",
+            [],
+        )?;
+        Ok(())
+    })?;
+    assert_eq!(postprocess_level(store)?, ["sentinel"]);
+    store
+        .finalize_with("incremental", PostprocessLevel::Full)
+        .await?;
+    assert_eq!(
+        postprocess_level(store)?,
+        ["full"],
+        "post-process did not run"
+    );
+    Ok(())
+}
+
+async fn indexer_with(
+    dir: &std::path::Path,
+    postprocess: PostprocessLevel,
+) -> Result<ProjectIndexer> {
+    let config = IndexerConfig {
+        project_root: dir.to_path_buf(),
+        indexing_tier: IndexingTier::Fast,
+        postprocess: Some(postprocess),
+        ..Default::default()
+    };
+    ProjectIndexer::new(
+        config,
+        &CodeGraphConfig::default(),
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden()),
+    )
+    .await
+}
+
+/// `index --skip-postprocess` then a plain `index` over unchanged sources: the build is
+/// skipped but the missing `full` post-process runs; a further run does nothing.
+#[tokio::test]
+async fn noop_index_runs_missing_full_postprocess() -> Result<()> {
+    if !test_env::run(
+        concat!(module_path!(), "::noop_index_runs_missing_full_postprocess"),
+        &[
+            ("CODEGRAPH_NO_PROGRESS", Some("1")),
+            ("CODEGRAPH_ANALYZERS", Some("0")),
+            ("CODEGRAPH_ANALYZERS_REQUIRE_TOOLS", Some("0")),
+        ],
+    ) {
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join(FLOW_SOURCE.0), FLOW_SOURCE.1)?;
+    let skipped = indexer_with(dir.path(), PostprocessLevel::None).await?;
+    skipped.index_project(dir.path()).await?;
+    let store = skipped.graph_store();
+    assert_eq!(flow_counts(&store)?, ["0|0"]);
+    assert_eq!(postprocess_level(&store)?, ["none"]);
+    drop(skipped);
+
+    let full = indexer_with(dir.path(), PostprocessLevel::Full).await?;
+    let stats = full.index_project(dir.path()).await?;
+    assert_eq!(stats.skipped, 1, "unchanged sources must not be rebuilt");
+    assert!(stats.phase_ms.contains_key("postprocess"));
+    assert_ne!(
+        flow_counts(&store)?,
+        ["0|0"],
+        "flows computed on the no-op run"
+    );
+    assert_eq!(postprocess_level(&store)?, ["full"]);
+
+    let stats = full.index_project(dir.path()).await?;
+    assert!(
+        !stats.phase_ms.contains_key("postprocess"),
+        "a complete full post-process is not repeated"
+    );
+    Ok(())
+}
+
+/// A failing analysis step warns instead of failing the build (as code-review-graph does).
+#[tokio::test]
+async fn postprocess_failure_is_not_fatal() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(module_path!(), "::postprocess_failure_is_not_fatal"),
+        &[FLOW_SOURCE],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let store = indexer.graph_store();
+    store.with_conn_blocking(|conn| {
+        conn.execute_batch("DROP TABLE flow_memberships; DROP TABLE flows;")?;
+        Ok(())
+    })?;
+    store
+        .finalize_with("incremental", PostprocessLevel::Full)
+        .await?;
+    assert_eq!(postprocess_level(&store)?, ["failed"]);
+    let warning = rows(
+        &store,
+        "SELECT value FROM metadata WHERE key = 'postprocess_warning'",
+    )?;
+    assert_eq!(warning.len(), 1);
+    assert!(warning[0].contains("no such table"), "{warning:?}");
+    assert_eq!(
+        rows(
+            &store,
+            "SELECT value FROM metadata WHERE key = 'build_state'"
+        )?,
+        ["complete"]
+    );
+    let _ = dir;
     Ok(())
 }
 
@@ -725,8 +856,15 @@ async fn community_ids_stable_across_finalize() -> Result<()> {
         first.iter().all(|row| !row.ends_with('|')),
         "every function belongs to a community: {first:?}"
     );
-    // Unchanged sources finalize again; the assignment must not move.
-    indexer.index_project(dir.path()).await?;
-    assert_eq!(rows(&indexer.graph_store(), sql)?, first);
+    let store = indexer.graph_store();
+    let communities = "SELECT CAST(count(*) AS TEXT) FROM communities";
+    let community_count = rows(&store, communities)?;
+    // Re-run the post-process twice; the assignment must not move.
+    for _ in 0..2 {
+        refinalize(&store).await?;
+        assert_eq!(rows(&store, sql)?, first);
+        assert_eq!(rows(&store, communities)?, community_count);
+    }
+    let _ = dir;
     Ok(())
 }

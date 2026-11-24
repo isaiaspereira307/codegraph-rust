@@ -28,7 +28,8 @@ pub enum HookCommand {
     },
     /// Read a harness event from stdin and return non-blocking context JSON.
     Emit,
-    /// Add or remove a marked post-commit block that runs `codegraph update` in the background.
+    /// Add or remove a marked post-commit block that runs `codegraph update --skip-flows` in
+    /// the background (code-review-graph's hook also skips flows: `postprocess="minimal"`).
     /// Opt-in: nothing is installed unless this command is run.
     Git {
         #[command(subcommand)]
@@ -52,7 +53,7 @@ pub enum GitHookAction {
 
 const GIT_BLOCK_START: &str = "# >>> codegraph post-commit >>>";
 const GIT_BLOCK_END: &str = "# <<< codegraph post-commit <<<";
-const GIT_BLOCK_BODY: &str = "if [ ! -f .code-review-graph/crg-hooks-off ] && command -v codegraph >/dev/null 2>&1; then\n  root=$(git rev-parse --show-toplevel) && (codegraph update \"$root\" >/dev/null 2>&1 &)\nfi";
+const GIT_BLOCK_BODY: &str = "if [ ! -f .code-review-graph/crg-hooks-off ] && command -v codegraph >/dev/null 2>&1; then\n  root=$(git rev-parse --show-toplevel) && (codegraph update \"$root\" --skip-flows >/dev/null 2>&1 &)\nfi";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Harness {

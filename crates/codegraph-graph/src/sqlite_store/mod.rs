@@ -8,7 +8,7 @@ mod schema;
 mod write;
 
 pub use lock::WriteLock;
-pub use reconcile::GraphCounts;
+pub use reconcile::{GraphCounts, POSTPROCESS_LEVEL_KEY, POSTPROCESS_WARNING_KEY};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;

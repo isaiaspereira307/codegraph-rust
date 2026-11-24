@@ -6,7 +6,7 @@ use super::write::{now_epoch, resolve_pending};
 use crate::analysis::{PostprocessLevel, run_postprocess};
 use crate::records::{FileMetadataRecord, ProjectMetadataRecord};
 use anyhow::Result;
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GraphCounts {
@@ -178,12 +178,49 @@ impl SqliteGraphStore {
                 set_metadata(&tx, key, value)?;
             }
             tx.commit()?;
-            run_postprocess(conn, level)?;
+            // Like code-review-graph, a failed analysis step only warns: the build above is
+            // committed and the graph stays usable. `postprocess_level` records the level of
+            // the last post-process (`failed` when it did not finish), so a later no-op
+            // `full` run knows whether flows/communities still need computing.
+            match run_postprocess(conn, level) {
+                Ok(_) => {
+                    set_metadata(conn, POSTPROCESS_LEVEL_KEY, level.as_str())?;
+                    conn.execute(
+                        "DELETE FROM metadata WHERE key = ?1",
+                        [POSTPROCESS_WARNING_KEY],
+                    )?;
+                }
+                Err(error) => {
+                    tracing::warn!("post-build analysis ({}) failed: {error:#}", level.as_str());
+                    set_metadata(conn, POSTPROCESS_LEVEL_KEY, "failed")?;
+                    set_metadata(conn, POSTPROCESS_WARNING_KEY, &format!("{error:#}"))?;
+                }
+            }
             Ok(())
         })
         .await
     }
+
+    /// Level of the last post-process `finalize_with` ran (`full`, `minimal`, `none` or
+    /// `failed`); `None` for a database no Rust build has post-processed.
+    pub async fn last_postprocess_level(&self) -> Result<Option<String>> {
+        self.with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = ?1",
+                    [POSTPROCESS_LEVEL_KEY],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })
+        .await
+    }
 }
+
+/// `metadata` key holding the level of the last post-process (see `finalize_with`).
+pub const POSTPROCESS_LEVEL_KEY: &str = "postprocess_level";
+/// `metadata` key holding the error of the last failed post-process, removed on success.
+pub const POSTPROCESS_WARNING_KEY: &str = "postprocess_warning";
 
 /// Rebuilds TESTED_BY as code-review-graph does: one edge per CALLS edge whose caller is a
 /// Test node, reversed (callee -> test), keeping the call's file and line. Deleting first
@@ -209,7 +246,7 @@ fn fill(tx: &Transaction, table: &str, values: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn set_metadata(tx: &Transaction, key: &str, value: &str) -> Result<()> {
+fn set_metadata(tx: &Connection, key: &str, value: &str) -> Result<()> {
     tx.execute(
         "INSERT INTO metadata (key, value) VALUES (?1, ?2) \
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",

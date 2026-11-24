@@ -272,8 +272,13 @@ pub fn sanitize_name(s: &str) -> String {
 pub enum PostprocessLevel {
     #[default]
     Full,
-    /// Reserved: the CRG's minimal level only refreshes the FTS index, which `finalize` always does.
+    /// Same as `None` here. The CRG's `minimal` runs the resolvers, computes
+    /// `nodes.signature` and refreshes the FTS index; the Rust `finalize` always resolves
+    /// pending edges and rebuilds FTS (and TESTED_BY) whatever the level, and never
+    /// computes `nodes.signature`, so nothing is left for `minimal` to add.
     Minimal,
+    /// No derived analysis. Unlike the CRG's `none`, `finalize` still resolves edges and
+    /// rebuilds FTS and TESTED_BY (harmless: they are cheap and keep the graph coherent).
     None,
 }
 
@@ -292,6 +297,15 @@ impl std::str::FromStr for PostprocessLevel {
 }
 
 impl PostprocessLevel {
+    /// Lowercase name, as accepted by `CODEGRAPH_POSTPROCESS`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Minimal => "minimal",
+            Self::None => "none",
+        }
+    }
+
     /// Reads `CODEGRAPH_POSTPROCESS` (default `full`); an invalid value is an error.
     pub fn from_env() -> Result<Self> {
         match std::env::var("CODEGRAPH_POSTPROCESS") {

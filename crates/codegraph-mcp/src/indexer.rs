@@ -41,7 +41,8 @@ use std::collections::HashMap;
 /// The graph shape and resolver this build writes. It feeds the project input fingerprint
 /// and the ready marker, so a graph written by a build with another shape is rebuilt even
 /// when no source changed. Bump it whenever node kinds, edge kinds or resolution change.
-pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-8";
+/// crg-shape-9: the writer fills `nodes.extra.decorators` (Fase 4 flows/communities input).
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-9";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {
@@ -85,7 +86,8 @@ pub struct IndexerConfig {
     /// Root directory of the project being indexed (where .codegraph/ will be created)
     /// Defaults to current directory if not specified
     pub project_root: PathBuf,
-    /// Post-build analysis level; `None` reads `CODEGRAPH_POSTPROCESS` (default `full`).
+    /// Post-build analysis level; `None` reads `CODEGRAPH_POSTPROCESS` (default `full`) when
+    /// the indexer is created, so an invalid value fails before any work.
     pub postprocess: Option<codegraph_graph::analysis::PostprocessLevel>,
 }
 
@@ -234,6 +236,9 @@ impl ProjectIndexer {
             let project_id = std::env::var("CODEGRAPH_PROJECT_ID")
                 .unwrap_or_else(|_| config.project_root.display().to_string());
             let policies = crate::policy::InferencePolicies::from_env()?;
+            if config.postprocess.is_none() {
+                config.postprocess = Some(codegraph_graph::analysis::PostprocessLevel::from_env()?);
+            }
             // Cap Rayon threads to a sensible default: leave one core free and obey user overrides
             let available = std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -477,6 +482,21 @@ impl ProjectIndexer {
                     .satisfied_by(&state.stats.embedding_status, &state.stats.semantic_status)
             {
                 source_snapshots.validate_current().await?;
+                // Unchanged sources skip the build, but not a missing `full` post-process:
+                // a graph built with --skip-flows / CODEGRAPH_POSTPROCESS below `full`, or
+                // whose last analysis failed, gets flows and communities computed now.
+                let postprocess = self.config.postprocess.unwrap_or_default();
+                if postprocess == codegraph_graph::analysis::PostprocessLevel::Full
+                    && self.store.last_postprocess_level().await?.as_deref()
+                        != Some(postprocess.as_str())
+                {
+                    let postprocess_start = std::time::Instant::now();
+                    self.store.finalize_with("incremental", postprocess).await?;
+                    phase_ms.insert(
+                        "postprocess".into(),
+                        postprocess_start.elapsed().as_millis() as u64,
+                    );
+                }
                 let mut stats = state.stats.clone();
                 stats.skipped = all_files.len();
                 stats.cached_files = all_files.len();
@@ -1448,10 +1468,7 @@ impl ProjectIndexer {
             }
             // Leave the database as code-review-graph expects after a build (pending edges
             // resolved, FTS rebuilt, build metadata), then write the ready marker last.
-            let postprocess = match self.config.postprocess {
-                Some(level) => level,
-                None => codegraph_graph::analysis::PostprocessLevel::from_env()?,
-            };
+            let postprocess = self.config.postprocess.unwrap_or_default();
             self.store
                 .finalize_with(
                     if previous.is_some() {
