@@ -73,7 +73,7 @@ impl<'a> PathParts<'a> {
 }
 
 /// Collapses `.`/`..` segments, keeping a leading `/`.
-fn normalize(path: &str) -> String {
+pub(crate) fn normalize(path: &str) -> String {
     let absolute = path.starts_with('/');
     let mut segments: Vec<&str> = Vec::new();
     for segment in path.split('/') {

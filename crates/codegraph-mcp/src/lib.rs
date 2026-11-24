@@ -8,6 +8,7 @@ pub mod policy;
 mod python_stdlib;
 mod reconciliation;
 mod resolution;
+mod rust_crates;
 #[cfg(test)]
 mod semantic_scoring;
 mod spring;
