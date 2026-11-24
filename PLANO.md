@@ -463,11 +463,29 @@ Fica para depois:
 
 1. ~~**Compatibilidade de banco**~~: decidido na Fase 1 — mesmo schema v15, mesmo
    `.code-review-graph/graph.db` do CRG.
-2. **Nome do binário**: manter `codegraph` ou usar `code-review-graph`/`crg`?
-3. **Tiers com LSP**: manter os tiers `balanced`/`full` (mais precisos, exigem language
-   servers instalados) ou só o `fast` na v1? Recomendação: manter, com `fast` como padrão.
+2. ~~**Nome do binário**~~: decidido (2026-11-24) — fica `codegraph` (binário e crates). O item
+   "renomear o binário/crates" da Fase 5 está cancelado; resta só definir o texto do projeto
+   nos docs.
+3. ~~**Tiers com LSP**~~: decidido por padrão — manter `balanced`/`full`, com `fast` como padrão.
 4. ~~**Licença do fork**~~: decidido — `MIT OR Apache-2.0` em todos os crates; `LICENSE-MIT` e
    `LICENSE-APACHE` na raiz (copyright do upstream e do fork).
+
+## Próximos passos (decididos em 2026-11-24)
+
+Em ordem; cada item ganha plano próprio em `docs/superpowers/plans/`:
+
+1. **Resolução de módulos Rust entre arquivos** (`_resolve_rust_module_file`: raiz do crate por
+   `lib.rs`/`main.rs`, `crate::`/`super::`/dependências do `Cargo.toml`, `use m::f`). Traz
+   `IMPLEMENTS`/`X::m` para itens de outro arquivo e fecha o critério da Fase 3 em Rust
+   (0.897) e os ciclos de import da Fase 4.
+2. **`INHERITS` no `GraphQuery`**: resolver alvos de texto por nome, para as ferramentas
+   seguirem herança (TS/JS, Go, Java, Python).
+3. **Distribuição**: release com binários (Linux/macOS/Windows), Homebrew, GitHub Action,
+   README final.
+
+Adiado ("por ora não"): linguagens restantes da Fase 2 (item 6), demais itens da Fase 5
+(refactor, multi-repo, wiki, visualização, plataformas extras, embeddings) e o plano de
+paridade de risco (TESTED_BY por nome solto, migrations, fallback de flow_count).
 
 ## Ordem sugerida e marcos
 
