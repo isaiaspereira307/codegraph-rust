@@ -177,25 +177,34 @@ impl RustCrates {
         Self { crates }
     }
 
-    /// Reads every `Cargo.toml` above the indexed `.rs` files (up to `project_root`).
+    /// Reads every `Cargo.toml` above the indexed `.rs` files (up to `project_root`). File keys
+    /// are spelled as the indexer walked them: absolute, or relative to the current directory.
     pub(crate) fn discover(project_root: &Path, rust_files: &BTreeSet<String>) -> Self {
-        let root_text = project_root.to_string_lossy().replace('\\', "/");
-        let root_text = root_text.trim_end_matches('/');
-        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        Self::discover_from(project_root, &cwd, rust_files)
+    }
+
+    /// `discover` with relative keys resolved against `key_base`. Each directory is compared
+    /// with the root after canonicalizing both, so symlinked or non-canonical spellings of the
+    /// same tree match; manifests stay keyed by the catalog's own spelling.
+    fn discover_from(project_root: &Path, key_base: &Path, rust_files: &BTreeSet<String>) -> Self {
+        let root = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        // Directory key -> whether it lies inside the root (read once per key).
+        let mut inside: BTreeMap<String, bool> = BTreeMap::new();
         let mut manifests = BTreeMap::new();
         for file in rust_files {
-            let Some(start) = parent_dir(file) else {
-                // A bare file name lives in the project root, whose key is "".
-                Self::read_manifest(project_root, "", &mut seen, &mut manifests);
-                continue;
-            };
-            for dir in ancestors(start) {
-                // Component-wise: `/proj-other` is not inside `/proj`.
-                if file.starts_with('/') && !Path::new(&dir).starts_with(root_text) {
-                    break;
-                }
-                Self::read_manifest(project_root, &dir, &mut seen, &mut manifests);
-                if dir == root_text {
+            for dir in ancestors(parent_dir(file).unwrap_or("")) {
+                let is_inside = match inside.get(&dir) {
+                    Some(known) => *known,
+                    None => {
+                        let known = Self::read_manifest(&root, key_base, &dir, &mut manifests);
+                        inside.insert(dir.clone(), known);
+                        known
+                    }
+                };
+                if !is_inside {
                     break;
                 }
             }
@@ -203,23 +212,25 @@ impl RustCrates {
         Self::from_manifests(&manifests, rust_files)
     }
 
+    /// Reads `dir`'s `Cargo.toml` when `dir` lies inside `root`; returns whether it does. A
+    /// directory that cannot be resolved counts as inside so the walk can continue upward.
     fn read_manifest(
-        project_root: &Path,
+        root: &Path,
+        key_base: &Path,
         dir: &str,
-        seen: &mut BTreeSet<String>,
         manifests: &mut BTreeMap<String, String>,
-    ) {
-        if !seen.insert(dir.to_string()) {
-            return;
-        }
-        let path = if dir.starts_with('/') {
-            Path::new(dir).join("Cargo.toml")
-        } else {
-            project_root.join(dir).join("Cargo.toml")
+    ) -> bool {
+        let Ok(resolved) = key_base.join(dir).canonicalize() else {
+            return true;
         };
-        if let Ok(text) = std::fs::read_to_string(path) {
+        // Component-wise: `/proj-other` is not inside `/proj`.
+        if !resolved.starts_with(root) {
+            return false;
+        }
+        if let Ok(text) = std::fs::read_to_string(resolved.join("Cargo.toml")) {
             manifests.insert(dir.to_string(), text);
         }
+        true
     }
 
     /// The layout of the deepest crate whose directory contains `file`.
@@ -399,8 +410,69 @@ mod tests {
         std::fs::write(root.join("app/Cargo.toml"), PKG).unwrap();
         std::fs::write(root.join("app/src/lib.rs"), "").unwrap();
         let files = set(&["app/src/lib.rs"]);
-        let crates = RustCrates::discover(root, &files);
+        let crates = RustCrates::discover_from(root, root, &files);
         assert_eq!(crates.crate_of("app/src/lib.rs").unwrap().dir, "app");
+    }
+
+    /// `codegraph index sub/dir` run from `base`: keys are relative to `base`, not the root.
+    #[test]
+    fn discover_relative_keys_resolve_against_the_key_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let root = base.join("sub/dir");
+        std::fs::create_dir_all(root.join("a/src")).unwrap();
+        std::fs::write(root.join("a/Cargo.toml"), PKG).unwrap();
+        std::fs::write(root.join("a/src/lib.rs"), "").unwrap();
+        let files = set(&["sub/dir/a/src/lib.rs"]);
+        let crates = RustCrates::discover_from(&root, base, &files);
+        assert_eq!(
+            crates.crate_of("sub/dir/a/src/lib.rs").unwrap().dir,
+            "sub/dir/a"
+        );
+    }
+
+    /// Joining relative keys onto the root used to read `<root>/Cargo.toml` as the `""` crate
+    /// and attribute `sub/dir/a` files to it.
+    #[test]
+    fn discover_relative_keys_do_not_fall_back_to_the_root_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let root = base.join("sub/dir");
+        std::fs::create_dir_all(root.join("a/src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"outer\"\n[lib]\npath = \"sub/dir/a/src/lib.rs\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("a/Cargo.toml"), PKG).unwrap();
+        std::fs::write(root.join("a/src/lib.rs"), "").unwrap();
+        let files = set(&["sub/dir/a/src/lib.rs"]);
+        let crates = RustCrates::discover_from(&root, base, &files);
+        assert_eq!(
+            crates.crate_of("sub/dir/a/src/lib.rs").unwrap().dir,
+            "sub/dir/a"
+        );
+        assert!(
+            crates.crate_of("src/lib.rs").is_none(),
+            "no crate at the key base"
+        );
+    }
+
+    /// Keys spelled through a symlink match a canonical root; the layout keeps their spelling.
+    #[cfg(unix)]
+    #[test]
+    fn discover_absolute_keys_under_a_symlinked_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        let link = tmp.path().join("link");
+        std::fs::create_dir_all(real.join("src")).unwrap();
+        std::fs::write(real.join("Cargo.toml"), PKG).unwrap();
+        std::fs::write(real.join("src/lib.rs"), "").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let root = real.canonicalize().unwrap();
+        let key = format!("{}/src/lib.rs", link.to_string_lossy());
+        let crates = RustCrates::discover_from(&root, &root, &set(&[&key]));
+        assert_eq!(crates.crate_of(&key).unwrap().dir, link.to_string_lossy());
     }
 
     #[test]
