@@ -306,15 +306,35 @@ como resolver) um repositório que já tem banco do CRG.
 
 ---
 
-## Fase 3 — Núcleo de revisão (MVP usável)
+## Fase 3 — Núcleo de revisão (MVP usável) ✅
 
 Plano de implementação (11 tarefas, ordem e decisões): `docs/superpowers/plans/2026-11-23-fase3-nucleo-revisao.md`.
 Tasks 1 (`search_nodes`, FTS5), 2 (`list_graph_stats`), 3 (`find_large_functions`), 4 (`query_graph`), 5 (`traverse_graph`), 6 (`get_impact_radius`), 7 (`detect_changes`), 8 (`get_review_context`) e 9 (`get_minimal_context`) concluídas. Task 10 quase completa: subcomandos CLI `build`, `update`, `detect-changes`, `impact`, `query`, `search` prontos; tool MCP `build_or_update_graph` pronta (roda `codegraph update` em processo filho, saída capturada, para não corromper o stdio do MCP; fora do executor, por isso o teste de exposição inclui essa tool à parte). `codegraph graph-status` (contagens do grafo, via `list_graph_stats`; o `status` continua sendo o do servidor MCP). Task 10 concluída. Task 11 feita com defaults conservadores: `codegraph hooks git install|uninstall` (opt-in, bloco marcado no `.git/hooks/post-commit`, `update` em background; desde a revisão da Fase 4, `update --skip-flows`, como o hook do CRG, respeita `crg-hooks-off`); `SessionStart` NÃO roda `update` (custo por sessão; continua só com a orientação). Skills `review-changes`, `review-pr` e `review-delta` em `rules-for-claude-code/skills/`. Não instaladas automaticamente em lugar nenhum.
 
 Medição (2026-11-23, este repo, `HEAD~3`, `base_ref`): arquivos tocados inteiros 376 KB; `git diff`
 41 KB; `get_review_context` 47 KB (~8x menos que ler os arquivos); `get_minimal_context` 4 KB
-(~94x menos). Falta do critério de aceite: comparar o conjunto afetado com o do CRG via harness
-(`detect_changes` do CRG sobre o mesmo diff). Fase 2.5 itens 1-2 commitados (`c231942`).
+(~94x menos). Fase 2.5 itens 1-2 commitados (`c231942`).
+
+Paridade do critério de aceite (2026-11-24, `docs/parity/changes.md`, scripts em
+`scripts/parity/changes/`):
+- Arquivos e funções alterados: 1.000 nos 3 cenários (este repo `HEAD~3`; edição sintética no
+  CRG; `HEAD~1` real do CRG).
+- Nós impactados (`impacted`): Python 0.995 (d=1) e 0.960 (d=2); Rust 0.897. Arquivos
+  impactados: 1.000 e 0.857. Flows afetados: 1.000 e 0.803.
+- Risco por função igual com churn (31/35 no Rust).
+- Contexto: `get_review_context` 2.7–6.6x menor que ler os arquivos, `get_minimal_context`
+  24–74x.
+
+Critério atendido em Python. Em Rust fica limitado pelas lacunas da Fase 2 (IMPORTS_FROM entre
+arquivos, entry points).
+
+Divergências a decidir:
+- `detect_changes` usa `include_churn: false` por padrão; o MCP do CRG sempre soma churn.
+- A lista `tests` de `get_impact_radius` vai um salto de `TESTED_BY` além da profundidade.
+- `affected_files` inclui os próprios arquivos alterados.
+- O Rust indexa JS minificado (`*.min.js`), que o CRG ignora.
+- O Rust detecta entry points Python a mais (284 contra 167 no CRG).
+- `update` debug de 2 arquivos leva 70 s, contra 18 s no CRG.
 
 Ferramentas MCP e comandos CLI equivalentes aos do CRG:
 
