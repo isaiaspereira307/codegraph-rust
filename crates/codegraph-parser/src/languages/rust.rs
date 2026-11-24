@@ -197,10 +197,8 @@ impl<'a> Collector<'a> {
 
             // Imports (use)
             "use_declaration" => {
-                let imports: Vec<String> = flatten_use(node, self.content, &[])
-                    .into_iter()
-                    .map(|(_, path)| path)
-                    .collect();
+                let pairs = flatten_use(node, self.content, &[]);
+                let imports: Vec<String> = pairs.iter().map(|(_, path)| path.clone()).collect();
                 let Some(name) = imports.first().cloned() else {
                     return;
                 };
@@ -221,7 +219,7 @@ impl<'a> Collector<'a> {
                 // REVOLUTIONARY: Extract import edges during same AST traversal
                 let import_node_id = code.id;
                 let import_span = self.span_for(&node);
-                for import in &imports {
+                for (alias, import) in &pairs {
                     let edge = EdgeRelationship {
                         from: import_node_id,
                         to: import.clone(),
@@ -230,6 +228,7 @@ impl<'a> Collector<'a> {
                             let mut meta = HashMap::new();
                             meta.insert("import_type".to_string(), "use_declaration".to_string());
                             meta.insert("source_file".to_string(), self.file_path.to_string());
+                            meta.insert(crg_shape::RUST_ALIAS_ATTR.to_string(), alias.clone());
                             meta
                         },
                         span: Some(import_span.clone()),
@@ -1229,6 +1228,39 @@ mod tests {
             ])
         );
         assert!(imports.iter().all(|(from, _)| from == "m.rs"));
+    }
+
+    #[test]
+    fn use_edges_record_the_local_alias() {
+        let r = extract_rust(
+            "use x::Y as Z;\nuse a::{b, c::D, self as e};\nuse std::fmt;\n",
+            "m.rs",
+        );
+        let pairs: BTreeSet<(String, String)> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Imports)
+            .map(|e| {
+                (
+                    e.to.clone(),
+                    e.metadata
+                        .get(crate::languages::crg_shape::RUST_ALIAS_ATTR)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        let want: BTreeSet<(String, String)> = [
+            ("x::Y", "Z"),
+            ("a::b", "b"),
+            ("a::c::D", "D"),
+            ("a::self", "e"),
+            ("std::fmt", "fmt"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        assert_eq!(pairs, want);
     }
 
     #[test]

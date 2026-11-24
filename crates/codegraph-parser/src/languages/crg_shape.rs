@@ -36,6 +36,9 @@ pub const UNTYPED_RECEIVER_ATTR: &str = "crg_untyped_receiver";
 /// like code-review-graph, the indexer never binds it, not even to a free function.
 pub const UNBOUND_ATTR: &str = "crg_unbound";
 
+/// Local name a Rust `use` binds (`use x::Y as Z` -> `Z`), on `Imports` edges.
+pub const RUST_ALIAS_ATTR: &str = "crg_rust_alias";
+
 /// Set by an extractor on a Python call bound through an import, as `"<module>|<symbol>"`
 /// (`from M import X` -> `"M|X"`, `import a.b as c` -> `"a.b|"`); the indexer resolves the
 /// module with its `ModuleIndex`.
