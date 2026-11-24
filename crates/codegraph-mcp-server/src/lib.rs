@@ -10,6 +10,7 @@ pub mod official_server;
 pub mod project_init;
 pub mod prompts;
 pub mod tool_cli;
+pub mod uninstall;
 
 pub use codegraph_mcp_core::analysis::AnalysisType;
 #[cfg(feature = "server-http")]

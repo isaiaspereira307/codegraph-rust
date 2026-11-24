@@ -73,6 +73,22 @@ enum Commands {
         workers: usize,
     },
 
+    #[command(about = "Remove what `codegraph init` installed in a project")]
+    Uninstall {
+        #[arg(default_value = ".", help = "Project directory")]
+        path: PathBuf,
+        #[arg(
+            long,
+            value_enum,
+            help = "Harness to remove: claude | codex | both (default both)"
+        )]
+        hooks: Option<project_init::HookSelection>,
+        #[arg(long, help = "Also delete .code-review-graph/ (the graph database)")]
+        purge_index: bool,
+        #[arg(long, help = "List what would change without writing")]
+        dry_run: bool,
+    },
+
     #[command(about = "Run graph analysis tools without an MCP transport")]
     Tool {
         #[command(subcommand)]
@@ -543,6 +559,28 @@ fn main() -> Result<()> {
     if let Commands::Hooks { ref action } = cli.command {
         return agent_hooks::run(action);
     }
+    if let Commands::Uninstall {
+        ref path,
+        hooks,
+        purge_index,
+        dry_run,
+    } = cli.command
+    {
+        let plan = codegraph_mcp_server::uninstall::run(path, hooks, purge_index, dry_run)?;
+        if plan.is_empty() {
+            println!("Nothing to remove.");
+        }
+        for (file, edit) in &plan {
+            let verb = match (edit, dry_run) {
+                (codegraph_mcp_server::uninstall::FileEdit::Delete, true) => "Would remove",
+                (codegraph_mcp_server::uninstall::FileEdit::Delete, false) => "Removed",
+                (_, true) => "Would update",
+                (_, false) => "Updated",
+            };
+            println!("{verb} {}", file.display());
+        }
+        return Ok(());
+    }
     if let Some(action) = quick_tool_call(&cli.command) {
         // SAFETY: No async runtime or application threads have been started yet.
         return unsafe { tool_cli::run(&action, cli.verbose, cli.config.as_deref()) };
@@ -684,6 +722,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Commands::Init { .. }
         | Commands::Tool { .. }
         | Commands::Hooks { .. }
+        | Commands::Uninstall { .. }
         | Commands::DetectChanges { .. }
         | Commands::GraphStatus { .. }
         | Commands::Impact { .. }

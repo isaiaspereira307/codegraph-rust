@@ -449,6 +449,77 @@ fn merge_settings(mut settings: Value, inline: Option<&Value>) -> Result<Value> 
     Ok(settings)
 }
 
+/// Inverse of [`merge_settings`]: drops only CodeGraph's handlers and the groups, events and
+/// `hooks` object that this leaves empty. Anything else in the file is kept as is.
+pub(crate) fn strip_settings(mut settings: Value) -> Result<Value> {
+    settings
+        .as_object()
+        .context("Settings must be a JSON object")?;
+    let Some(hooks_value) = settings.get_mut("hooks") else {
+        return Ok(settings);
+    };
+    let hooks = hooks_value
+        .as_object_mut()
+        .context("hooks must be a JSON object")?;
+    let mut touched = false;
+    for event in ["SessionStart", "SubagentStart"] {
+        let Some(groups_value) = hooks.get_mut(event) else {
+            continue;
+        };
+        let groups = groups_value
+            .as_array_mut()
+            .with_context(|| format!("{event} must be an array"))?;
+        let mut event_touched = false;
+        for group in groups.iter_mut() {
+            let handlers = group
+                .get_mut("hooks")
+                .and_then(Value::as_array_mut)
+                .with_context(|| format!("{event} matcher group must have a hooks array"))?;
+            let before = handlers.len();
+            handlers.retain(|h| h.get("command").and_then(Value::as_str) != Some(HOOK_COMMAND));
+            event_touched |= handlers.len() != before;
+        }
+        if event_touched {
+            touched = true;
+            groups.retain(|g| {
+                g.get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|h| !h.is_empty())
+            });
+            if groups.is_empty() {
+                hooks.remove(event);
+            }
+        }
+    }
+    if touched && hooks.is_empty() {
+        settings.as_object_mut().unwrap().remove("hooks");
+    }
+    Ok(settings)
+}
+
+/// The edit for removing the git post-commit block, or `None` when there is no repository or
+/// no block. Mirrors [`uninstall_git_hook`] without writing.
+pub(crate) fn plan_git_hook_removal(
+    project: &Path,
+) -> Result<Option<(PathBuf, crate::uninstall::FileEdit)>> {
+    let Ok(path) = post_commit_path(project) else {
+        return Ok(None);
+    };
+    let Some(existing) = read_hook(&path)? else {
+        return Ok(None);
+    };
+    let stripped = strip_git_block(&existing);
+    if stripped == existing {
+        return Ok(None);
+    }
+    let edit = if stripped.trim().is_empty() || stripped.trim() == "#!/bin/sh" {
+        crate::uninstall::FileEdit::Delete
+    } else {
+        crate::uninstall::FileEdit::Write(stripped.into_bytes())
+    };
+    Ok(Some((path, edit)))
+}
+
 pub(crate) fn apply_changes(changes: &[HookChange]) -> Result<()> {
     for change in changes {
         if change.changed {
@@ -624,6 +695,21 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), project.path().join(".claude")).unwrap();
         assert!(install(project.path(), Harness::Claude, false).is_err());
         assert!(!outside.path().join("settings.json").exists());
+    }
+
+    #[test]
+    fn strip_settings_undoes_merge_and_keeps_user_content() {
+        for original in [
+            json!({}),
+            json!({"permissions": {"allow": ["Bash(ls)"]}}),
+            json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo hi"}]}]}}),
+        ] {
+            let merged = merge_settings(original.clone(), None).unwrap();
+            assert_ne!(merged, original);
+            assert_eq!(strip_settings(merged).unwrap(), original);
+        }
+        assert_eq!(strip_settings(json!({})).unwrap(), json!({}));
+        assert!(strip_settings(json!({"hooks": []})).is_err());
     }
 
     #[test]

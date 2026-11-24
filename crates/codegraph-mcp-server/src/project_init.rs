@@ -23,6 +23,14 @@ pub enum HookSelection {
 }
 
 impl HookSelection {
+    pub(crate) fn includes_claude(self) -> bool {
+        matches!(self, Self::Claude | Self::Both)
+    }
+
+    pub(crate) fn includes_codex(self) -> bool {
+        matches!(self, Self::Codex | Self::Both)
+    }
+
     fn harness(self) -> Option<Harness> {
         match self {
             Self::Claude => Some(Harness::Claude),
@@ -187,6 +195,38 @@ fn managed_block(include_heading: bool, newline: &str) -> String {
     format!("{BEGIN}\n{instructions}{END}\n").replace('\n', newline)
 }
 
+/// Inverse of [`merge_guidance`]: removes the marked block and nothing else. A block at the end
+/// of the file also drops the blank lines `merge_guidance` put before it.
+pub(crate) fn strip_guidance(original: &str) -> Result<String> {
+    let newline = if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let lines = visible_lines(original)?;
+    let begins: Vec<_> = lines.iter().filter(|(_, _, text)| *text == BEGIN).collect();
+    let ends: Vec<_> = lines.iter().filter(|(_, _, text)| *text == END).collect();
+    match (begins.as_slice(), ends.as_slice()) {
+        ([begin], [end]) if begin.0 < end.0 => {
+            let (head, tail) = (&original[..begin.0], &original[end.1..]);
+            if tail.trim().is_empty() {
+                let head = head.trim_end();
+                Ok(if head.is_empty() {
+                    String::new()
+                } else {
+                    format!("{head}{newline}")
+                })
+            } else {
+                Ok(format!("{head}{tail}"))
+            }
+        }
+        ([], []) => Ok(original.to_string()),
+        _ => bail!(
+            "CodeGraph instruction markers are duplicated, reversed or incomplete; repair the managed block before retrying."
+        ),
+    }
+}
+
 fn merge_guidance(original: &str) -> Result<String> {
     let newline = if original.contains("\r\n") {
         "\r\n"
@@ -304,6 +344,22 @@ mod tests {
         );
         assert_eq!(merge_guidance(&merged).unwrap(), merged);
         assert!(merge_guidance("# Rules\n```md\n").is_err());
+    }
+
+    #[test]
+    fn strip_guidance_undoes_merge_and_keeps_other_text() {
+        for original in [
+            "",
+            "# Team rules\nKeep them.\n",
+            "# Team rules\r\nKeep them.\r\n",
+            "# codegraph\nmine\n\nmore\n",
+        ] {
+            let merged = merge_guidance(original).unwrap();
+            assert_ne!(merged, original);
+            assert_eq!(strip_guidance(&merged).unwrap(), original);
+        }
+        assert_eq!(strip_guidance("plain\n").unwrap(), "plain\n");
+        assert!(strip_guidance(BEGIN).is_err());
     }
 
     #[test]
