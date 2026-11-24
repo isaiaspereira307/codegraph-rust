@@ -1016,7 +1016,7 @@ We're not trying to replace your IDE, your type checker, or your tests. We're gi
 
 ## License
 
-MIT
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
 
 ---
 

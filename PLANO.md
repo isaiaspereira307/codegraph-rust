@@ -458,8 +458,8 @@ Fica para depois:
 2. **Nome do binário**: manter `codegraph` ou usar `code-review-graph`/`crg`?
 3. **Tiers com LSP**: manter os tiers `balanced`/`full` (mais precisos, exigem language
    servers instalados) ou só o `fast` na v1? Recomendação: manter, com `fast` como padrão.
-4. **Licença do fork**: o `Cargo.toml` declara "MIT OR Apache-2.0", mas não há arquivo
-   `LICENSE`; adicionar um no fork.
+4. ~~**Licença do fork**~~: decidido — `MIT OR Apache-2.0` em todos os crates; `LICENSE-MIT` e
+   `LICENSE-APACHE` na raiz (copyright do upstream e do fork).
 
 ## Ordem sugerida e marcos
 
