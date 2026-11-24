@@ -2,7 +2,7 @@
 // ABOUTME: finalize() leaves the database in the state code-review-graph expects after a build.
 
 use super::SqliteGraphStore;
-use super::write::{now_epoch, resolve_pending};
+use super::write::{normalize_suffixed_names, now_epoch, resolve_pending};
 use crate::analysis::{PostprocessLevel, run_postprocess};
 use crate::records::{FileMetadataRecord, ProjectMetadataRecord};
 use anyhow::Result;
@@ -157,6 +157,7 @@ impl SqliteGraphStore {
         self.with_conn(move |conn| {
             let tx = conn.transaction()?;
             resolve_pending(&tx)?;
+            normalize_suffixed_names(&tx)?;
             derive_tested_by(&tx)?;
             tx.execute_batch(
                 "INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild'); \

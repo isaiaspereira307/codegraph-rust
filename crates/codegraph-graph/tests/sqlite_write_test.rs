@@ -493,3 +493,115 @@ async fn writer_stores_decorators_in_extra() {
     );
     assert_eq!(extra("plain"), "{}");
 }
+
+fn names(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut stmt = conn.prepare(sql).unwrap();
+    stmt.query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// Writes uuid 1 then uuid 2 for the same symbol (so 2 gets `@L1`), then keeps only uuid 2.
+async fn replace_owner(store: &SqliteGraphStore, extra: &[CodeNode], keep_edges: Vec<String>) {
+    let stale = node(1, "g", NodeType::Function, "f.py", 1);
+    let fresh = node(2, "g", NodeType::Function, "f.py", 1);
+    store.upsert_nodes_batch(&[stale]).await.unwrap();
+    store.upsert_nodes_batch(&[fresh.clone()]).await.unwrap();
+    let mut keep = vec![fresh.id.to_string()];
+    keep.extend(extra.iter().map(|n| n.id.to_string()));
+    store
+        .reconcile_catalog("p", keep, keep_edges, vec![])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stale_uuid_does_not_leave_suffixed_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, conn) = open(dir.path());
+    replace_owner(&store, &[], vec![]).await;
+    store.finalize("full").await.unwrap();
+
+    let file = abs(dir.path(), "f.py");
+    let expected = format!("{file}::g");
+    assert_eq!(
+        names(&conn, "SELECT qualified_name FROM nodes WHERE name = 'g'"),
+        vec![expected.clone()]
+    );
+    assert_eq!(
+        names(&conn, "SELECT qualified_name FROM cg_nodes"),
+        vec![expected]
+    );
+}
+
+#[tokio::test]
+async fn node_named_with_l_suffix_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, conn) = open(dir.path());
+    let test = node(5, "it:x@L2", NodeType::Function, "a.test.ts", 2);
+    store.upsert_nodes_batch(&[test]).await.unwrap();
+    store.finalize("full").await.unwrap();
+    let file = abs(dir.path(), "a.test.ts");
+    assert_eq!(
+        names(&conn, "SELECT qualified_name FROM nodes"),
+        vec![format!("{file}::it:x@L2")]
+    );
+}
+
+#[tokio::test]
+async fn colliding_bases_stay_distinct() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, conn) = open(dir.path());
+    let first = node(3, "g", NodeType::Function, "f.py", 1);
+    let second = node(4, "g", NodeType::Function, "f.py", 9);
+    store.upsert_nodes_batch(&[first, second]).await.unwrap();
+    store.finalize("full").await.unwrap();
+    let file = abs(dir.path(), "f.py");
+    assert_eq!(
+        names(
+            &conn,
+            "SELECT qualified_name FROM nodes ORDER BY line_start"
+        ),
+        vec![format!("{file}::g"), format!("{file}::g@L9")]
+    );
+}
+
+#[tokio::test]
+async fn normalize_is_idempotent_and_edges_follow_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, conn) = open(dir.path());
+    let caller = node(3, "h", NodeType::Function, "f.py", 20);
+    let fresh = node(2, "g", NodeType::Function, "f.py", 1);
+    let call = edge(10, &caller, &fresh, EdgeType::Calls);
+    store.upsert_nodes_batch(&[caller.clone()]).await.unwrap();
+    replace_owner(&store, &[caller], vec![]).await;
+    store.upsert_edges_batch(&[call.clone()]).await.unwrap();
+    store
+        .reconcile_catalog(
+            "p",
+            vec![
+                fresh.id.to_string(),
+                "00000000-0000-0000-0000-000000000003".into(),
+            ],
+            vec![call.id.to_string()],
+            vec![],
+        )
+        .await
+        .unwrap();
+    store.finalize("full").await.unwrap();
+    store.finalize("full").await.unwrap();
+
+    let file = abs(dir.path(), "f.py");
+    assert_eq!(
+        names(
+            &conn,
+            "SELECT target_qualified FROM edges WHERE kind = 'CALLS'"
+        ),
+        vec![format!("{file}::g")]
+    );
+    assert_eq!(
+        names(&conn, "SELECT qualified_name FROM nodes WHERE name = 'g'"),
+        vec![format!("{file}::g")]
+    );
+}

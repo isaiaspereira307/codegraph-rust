@@ -67,6 +67,15 @@ pub(super) fn ensure(conn: &mut Connection, path: &Path) -> Result<()> {
         )?;
     }
     tx.execute_batch(CG_TABLES)?;
+    // Databases created before `base_qualified` existed lack the column; nodes get it on rewrite.
+    let has_base: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('cg_nodes') WHERE name = 'base_qualified')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_base {
+        tx.execute_batch("ALTER TABLE cg_nodes ADD COLUMN base_qualified TEXT;")?;
+    }
     tx.commit()?;
     Ok(())
 }

@@ -201,11 +201,11 @@ fn write_node(tx: &Transaction, root: &Path, node: &CodeNode, now: f64) -> Resul
     )?;
     tx.execute(
         "INSERT INTO cg_nodes (uuid, qualified_name, file_path, rust_kind, complexity, content, \
-         attributes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         attributes, base_qualified) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
          ON CONFLICT(uuid) DO UPDATE SET qualified_name = excluded.qualified_name, \
          file_path = excluded.file_path, rust_kind = excluded.rust_kind, \
          complexity = excluded.complexity, content = excluded.content, \
-         attributes = excluded.attributes",
+         attributes = excluded.attributes, base_qualified = excluded.base_qualified",
         params![
             uuid,
             qualified,
@@ -214,9 +214,59 @@ fn write_node(tx: &Transaction, root: &Path, node: &CodeNode, now: f64) -> Resul
             node.complexity,
             node.content.as_ref().map(|c| c.to_string()),
             serde_json::to_string(&attrs.iter().collect::<BTreeMap<_, _>>())?,
+            base,
         ],
     )?;
     Ok(())
+}
+
+/// Gives a node its plain `base` name once the stale node that owned it is gone. `write_node`
+/// adds `@L<line>` while another uuid still owns `base` (reconciliation removes the old rows
+/// only after the writes) and keeps that name forever. Only `cg_nodes.base_qualified` decides
+/// what the plain name is: names that merely end in `@L<n>` (JS test nodes) stay as they are.
+pub(crate) fn normalize_suffixed_names(tx: &Transaction) -> Result<usize> {
+    let candidates: Vec<(String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT qualified_name, base_qualified FROM cg_nodes \
+             WHERE base_qualified IS NOT NULL AND qualified_name != base_qualified \
+             ORDER BY qualified_name",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    let mut renamed = 0;
+    for (old, base) in candidates {
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cg_nodes WHERE qualified_name = ?1)",
+            [&base],
+            |r| r.get(0),
+        )?;
+        if taken {
+            continue;
+        }
+        let symbol = base
+            .split_once("::")
+            .map(|(_, s)| s.to_string())
+            .unwrap_or_else(|| base.clone());
+        tx.execute(
+            "UPDATE nodes SET qualified_name = ?2, symbol = ?3 WHERE qualified_name = ?1",
+            params![old, base, symbol],
+        )?;
+        tx.execute(
+            "UPDATE cg_nodes SET qualified_name = ?2 WHERE qualified_name = ?1",
+            params![old, base],
+        )?;
+        tx.execute(
+            "UPDATE edges SET source_qualified = ?2 WHERE source_qualified = ?1",
+            params![old, base],
+        )?;
+        tx.execute(
+            "UPDATE edges SET target_qualified = ?2 WHERE target_qualified = ?1",
+            params![old, base],
+        )?;
+        renamed += 1;
+    }
+    Ok(renamed)
 }
 
 /// `base`, or `base@L<line>` (then `#2`, `#3`, …) when another node already owns `base`.

@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS cg_nodes (
     rust_kind TEXT,
     complexity REAL,
     content TEXT,
-    attributes TEXT NOT NULL DEFAULT '{}'
+    attributes TEXT NOT NULL DEFAULT '{}',
+    base_qualified TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cg_nodes_qn ON cg_nodes(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_cg_nodes_file ON cg_nodes(file_path);

@@ -41,8 +41,8 @@ use std::collections::HashMap;
 /// The graph shape and resolver this build writes. It feeds the project input fingerprint
 /// and the ready marker, so a graph written by a build with another shape is rebuilt even
 /// when no source changed. Bump it whenever node kinds, edge kinds or resolution change.
-/// crg-shape-9: the writer fills `nodes.extra.decorators` (Fase 4 flows/communities input).
-pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-9";
+/// crg-shape-10: `cg_nodes.base_qualified` lets `finalize` drop stale `@L<line>` suffixes.
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-10";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {
