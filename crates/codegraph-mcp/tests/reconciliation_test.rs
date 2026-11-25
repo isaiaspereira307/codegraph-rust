@@ -1023,6 +1023,75 @@ async fn skip_postprocess_leaves_flows_empty() -> Result<()> {
     Ok(())
 }
 
+/// Editing only a `Cargo.toml` changes the input fingerprint, so sources are re-resolved even
+/// though their content hashes are unchanged (Task 5 of the P1 parity plan).
+#[tokio::test]
+async fn manifest_only_edit_re_resolves_rust_sources() -> Result<()> {
+    if !test_env::run(
+        concat!(
+            module_path!(),
+            "::manifest_only_edit_re_resolves_rust_sources"
+        ),
+        &[
+            ("CODEGRAPH_NO_PROGRESS", Some("1")),
+            ("CODEGRAPH_ANALYZERS", Some("0")),
+            ("CODEGRAPH_ANALYZERS_REQUIRE_TOOLS", Some("0")),
+        ],
+    ) {
+        return Ok(());
+    }
+    let dir = tempfile::tempdir()?;
+    let manifest = dir.path().join("Cargo.toml");
+    std::fs::write(&manifest, "[package]\nname = \"app\"\n")?;
+    let caller = dir.path().join("src/lib.rs");
+    std::fs::create_dir(dir.path().join("src"))?;
+    std::fs::write(&caller, "fn caller() { other::thing::remote_only(); }\n")?;
+    std::fs::create_dir_all(dir.path().join("other/src"))?;
+    std::fs::write(
+        dir.path().join("other/Cargo.toml"),
+        "[package]\nname = \"other\"\n",
+    )?;
+    std::fs::write(dir.path().join("other/src/lib.rs"), "pub mod thing;\n")?;
+    std::fs::write(
+        dir.path().join("other/src/thing.rs"),
+        "pub fn remote_only() {}\n",
+    )?;
+    let config = IndexerConfig {
+        project_root: dir.path().into(),
+        indexing_tier: IndexingTier::Fast,
+        ..Default::default()
+    };
+    let indexer = ProjectIndexer::new(
+        config,
+        &CodeGraphConfig::default(),
+        MultiProgress::with_draw_target(ProgressDrawTarget::hidden()),
+    )
+    .await?;
+    let cold = indexer.index_project(dir.path()).await?;
+    assert!(cold.complete);
+    let store = indexer.graph_store();
+    let prefix = format!("{}/", dir.path().to_string_lossy());
+    let targets = || -> Result<Vec<String>> {
+        Ok(rows(
+            &store,
+            "SELECT target_qualified FROM edges WHERE kind = 'CALLS'",
+        )?
+        .into_iter()
+        .map(|row| row.replace(&prefix, ""))
+        .collect())
+    };
+    assert_eq!(targets()?, ["other::thing::remote_only"]);
+    // No source file changed: only the manifest now declares the path dependency.
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"app\"\n\n[dependencies]\nother = { path = \"other\" }\n",
+    )?;
+    let edited = indexer.reconcile_project(dir.path(), false).await?;
+    assert_eq!(edited.cached_files, cold.files, "sources were not reused");
+    assert_eq!(targets()?, ["other/src/thing.rs::remote_only"]);
+    Ok(())
+}
+
 #[tokio::test]
 async fn community_ids_stable_across_finalize() -> Result<()> {
     let module = |prefix: &str| {

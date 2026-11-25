@@ -341,7 +341,11 @@ impl ModuleIndex {
                 current = rust_current_module_parts(&importer_path, &layout.source_root);
                 while let Some((&"super", tail)) = remaining.split_first() {
                     remaining = tail;
-                    current.pop()?;
+                    // Like code-review-graph, extra `super` levels clamp at the crate root:
+                    // `super::config::load` from a root file still names `config::load`.
+                    if !current.is_empty() {
+                        current.pop();
+                    }
                 }
                 self.rust_module_file(layout, &current)?
             }
@@ -695,8 +699,13 @@ mod tests {
     fn rust_super_above_the_root_and_self_in_root_files() {
         let index = index();
         let lib = "crate/src/lib.rs";
-        assert_eq!(index.resolve(lib, "super::x"), None);
-        assert_eq!(index.resolve("crate/src/m.rs", "super::super::x"), None);
+        // Like code-review-graph, `super` clamps at the crate root: the path then names an
+        // item of the root file rather than leaving the call as text.
+        assert_eq!(index.resolve(lib, "super::x"), Some(lib));
+        assert_eq!(
+            index.resolve("crate/src/m.rs", "super::super::x"),
+            Some(lib)
+        );
         assert_eq!(index.resolve(lib, "self::m"), Some("crate/src/m.rs"));
         assert_eq!(
             index.resolve(lib, "self::m::inner::g"),

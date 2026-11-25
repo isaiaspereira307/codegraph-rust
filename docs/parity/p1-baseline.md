@@ -86,3 +86,9 @@ debug com 3 repetições na Task 11; estes valores são apenas o registro da lin
   (resolvido 0.941), IMPORTS_FROM 1.000, nós 1.000, CONTAINS 0.920. Snapshot completo
   `/tmp/opencode/parity-p1-t4`: 82 pisos OK. Medição em
   [`p1-task4-python-reexports.md`](p1-task4-python-reexports.md).
+- Task 5: `super::` limitado ao raiz do crate, fixtures de reexport/`#[path]`/receptor tipado no
+  probe `rust-imports` e `reachable` com fatia emprestada. Sonda: CALLS 0.867 → 1.000,
+  IMPORTS_FROM/IMPLEMENTS/nós 1.000; corpus Rust 1.000 em todas as métricas. Snapshot completo
+  `/tmp/opencode/parity-p1-t5`: 82 pisos OK. A/B release (`build . --skip-postprocess`, 10 pares)
+  mediana 16,46 s → 15,51 s. Medição em
+  [`p1-task5-rust-resolution.md`](p1-task5-rust-resolution.md).

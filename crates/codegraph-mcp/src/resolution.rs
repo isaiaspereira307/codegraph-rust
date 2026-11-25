@@ -4,6 +4,7 @@
 use crate::module_index::ModuleIndex;
 use crate::rust_crates::RustCrates;
 use codegraph_core::{CodeNode, EdgeRelationship, EdgeType, NodeId, NodeType};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Clone)]
@@ -282,18 +283,25 @@ impl SymbolCatalog {
             let Some(ids) = self.aliases.get(alias) else {
                 continue;
             };
-            let mut reachable = self.reachable(&edge.to, alias, ids, edge.from);
-            reachable.retain(|id| self.symbols.get(id).is_some_and(&keep));
+            let reachable = self.reachable(&edge.to, alias, ids, edge.from);
+            // Keep the common non-bare case borrowed; only a bare target needs a filtered copy.
+            let candidates = || {
+                reachable
+                    .iter()
+                    .copied()
+                    .filter(|id| self.symbols.get(id).is_some_and(&keep))
+            };
             // A target spelled as a symbol's exact qualified name (`f.java::User`) names that
             // symbol, not a member that merely shares the `file::name` alias (`User.User`).
-            let named: Vec<_> = reachable
-                .iter()
-                .filter(|id| self.symbols.get(id).is_some_and(|s| s.qualified == alias))
-                .collect();
-            if let [id] = named.as_slice() {
-                return Some(**id);
+            let mut named = candidates()
+                .filter(|id| self.symbols.get(id).is_some_and(|s| s.qualified == alias));
+            if let Some(id) = named.next()
+                && named.next().is_none()
+            {
+                return Some(id);
             }
-            if let Some(id) = self.choose(&reachable, edge.from) {
+            let filtered: Vec<_> = candidates().collect();
+            if let Some(id) = self.choose(&filtered, edge.from) {
                 return Some(id);
             }
         }
@@ -490,22 +498,31 @@ impl SymbolCatalog {
     /// code-review-graph, a bare name (no `::`, `.` or `/` in the target or the alias that
     /// matched it) binds only within the caller's file or a file it imports; qualified
     /// targets matched by qualified aliases bind anywhere.
-    fn reachable(&self, target: &str, alias: &str, ids: &[NodeId], from: NodeId) -> Vec<NodeId> {
+    fn reachable<'a>(
+        &'a self,
+        target: &str,
+        alias: &str,
+        ids: &'a [NodeId],
+        from: NodeId,
+    ) -> Cow<'a, [NodeId]> {
         if !is_bare(target) && !is_bare(alias) {
-            return ids.to_vec();
+            return Cow::Borrowed(ids);
         }
         let Some(source) = self.symbols.get(&from) else {
-            return Vec::new();
+            return Cow::Owned(Vec::new());
         };
         let imported = self.imported_files.get(&source.file);
-        ids.iter()
-            .copied()
-            .filter(|id| {
-                self.symbols.get(id).is_some_and(|s| {
-                    s.file == source.file || imported.is_some_and(|files| files.contains(&s.file))
+        Cow::Owned(
+            ids.iter()
+                .copied()
+                .filter(|id| {
+                    self.symbols.get(id).is_some_and(|s| {
+                        s.file == source.file
+                            || imported.is_some_and(|files| files.contains(&s.file))
+                    })
                 })
-            })
-            .collect()
+                .collect(),
+        )
     }
 
     /// A deterministic shortlist; a zero limit retains every overlapping candidate.
@@ -608,6 +625,69 @@ mod tests {
             metadata: Default::default(),
             span: None,
         }
+    }
+
+    #[test]
+    fn rust_reexported_trait_alias_binds_to_the_definition() {
+        let file = |path: &str| {
+            let mut node = node(path, path);
+            node.node_type = Some(NodeType::Other("File".into()));
+            node
+        };
+        let mut main = file("app/src/main.rs");
+        main.set_deterministic_id("main-file");
+        let mut config = file("app/src/config.rs");
+        config.set_deterministic_id("config-file");
+        let mut local = node("app/src/main.rs", "Local");
+        local.set_deterministic_id("local");
+        let mut trait_node = node("app/src/config.rs", "Tr");
+        trait_node.set_deterministic_id("tr");
+        trait_node
+            .metadata
+            .attributes
+            .insert("qualified_name".into(), "app/src/config.rs::Tr".into());
+        let files = std::collections::BTreeSet::from([
+            "app/src/main.rs".to_string(),
+            "app/src/config.rs".to_string(),
+        ]);
+        let manifests = std::collections::BTreeMap::from([(
+            "app".to_string(),
+            "[package]\nname = \"app\"\n".to_string(),
+        )]);
+        let mut catalog = SymbolCatalog::new(&[main, config, local.clone(), trait_node.clone()]);
+        catalog.set_rust_crates(RustCrates::from_manifests(&manifests, &files));
+        let mut import = edge(local.id, "config::Tr");
+        import.edge_type = EdgeType::Imports;
+        import.metadata.insert(
+            codegraph_parser::languages::crg_shape::RUST_ALIAS_ATTR.into(),
+            "Exported".into(),
+        );
+        catalog.link_imports(std::slice::from_ref(&import));
+        assert_eq!(
+            catalog.rust_aliases.get("app/src/main.rs"),
+            Some(&std::collections::HashMap::from([(
+                "Exported".to_string(),
+                "config::Tr".to_string()
+            )]))
+        );
+        assert_eq!(
+            catalog
+                .modules
+                .resolve("app/src/main.rs", "config::Tr")
+                .map(str::to_string),
+            Some("app/src/config.rs".to_string())
+        );
+        let mut implements = edge(local.id, "Exported");
+        implements.edge_type = EdgeType::Implements;
+        implements.metadata.insert(
+            codegraph_parser::languages::crg_shape::VERBATIM_TARGET_ATTR.into(),
+            "true".into(),
+        );
+        assert_eq!(
+            catalog.rust_path_claim(&implements),
+            Some("app/src/config.rs::Tr".into())
+        );
+        assert_eq!(catalog.rust_path_target(&implements), Some(trait_node.id));
     }
 
     #[test]
