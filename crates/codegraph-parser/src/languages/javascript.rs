@@ -89,6 +89,8 @@ struct TypeScriptCollector<'a> {
     edges: Vec<EdgeRelationship>,
     /// Named functions enclosing the current position, innermost last.
     functions: Vec<NodeId>,
+    /// Depth of statically dead branches around the walk position.
+    dead: usize,
 }
 
 impl<'a> TypeScriptCollector<'a> {
@@ -101,6 +103,7 @@ impl<'a> TypeScriptCollector<'a> {
             nodes: Vec::new(),
             edges: Vec::new(),
             functions: Vec::new(),
+            dead: 0,
         }
     }
 
@@ -158,6 +161,8 @@ impl<'a> TypeScriptCollector<'a> {
                 }
                 self.nodes.push(code);
             }
+        } else if kind == "if_statement" {
+            return self.if_statement(&node);
         } else if kind == "import_statement" {
             self.import(&node);
         } else if kind == "call_expression" {
@@ -177,6 +182,54 @@ impl<'a> TypeScriptCollector<'a> {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             self.walk(child);
+        }
+    }
+
+    fn walk_dead(&mut self, node: Node, dead: bool) {
+        self.dead += usize::from(dead);
+        self.walk(node);
+        self.dead -= usize::from(dead);
+    }
+
+    /// CRG's unreachable-call visitor drops calls in a statically false `if` body (and in the
+    /// tail after a statically true one). What is not a call is still visited normally.
+    fn if_statement(&mut self, node: &Node) {
+        let truth = node
+            .child_by_field_name("condition")
+            .and_then(|condition| self.static_truth(&condition));
+        let consequence = node.child_by_field_name("consequence");
+        let alternative = node.child_by_field_name("alternative");
+        if let Some(body) = consequence {
+            self.walk_dead(body, truth == Some(false));
+        }
+        if let Some(body) = alternative {
+            self.walk_dead(body, truth == Some(true));
+        }
+        // Non-branch children (the condition itself) stay live.
+        let ids = [consequence.map(|n| n.id()), alternative.map(|n| n.id())];
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if !ids.contains(&Some(child.id())) {
+                self.walk(child);
+            }
+        }
+    }
+
+    fn static_truth(&self, node: &Node) -> Option<bool> {
+        let node = if node.kind() == "parenthesized_expression" {
+            node.named_child(0)?
+        } else {
+            *node
+        };
+        match node.kind() {
+            "true" => Some(true),
+            "false" => Some(false),
+            "number" => self
+                .node_text(&node)
+                .parse::<f64>()
+                .ok()
+                .map(|value| value != 0.0),
+            _ => None,
         }
     }
 
@@ -230,6 +283,9 @@ impl<'a> TypeScriptCollector<'a> {
     }
 
     fn call(&mut self, node: &Node) {
+        if self.dead > 0 {
+            return;
+        }
         let Some(target) = self.call_name(node) else {
             return;
         };
@@ -570,6 +626,50 @@ mod tests {
         let r = extract_ts(&format!("it('{long}', () => {{}});\n"), "a.test.ts");
         let expected = format!("a.test.ts::it:{}@L1", "x".repeat(200));
         assert!(qualified_names(&r).contains(&expected));
+    }
+
+    #[test]
+    fn commonjs_and_dynamic_imports_become_import_edges() {
+        let r = extract_ts(
+            "const a = require('./util');\nconst b = import('./other');\n",
+            "m.js",
+        );
+        let mut imports: Vec<_> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Imports)
+            .map(|e| e.to.clone())
+            .collect();
+        imports.sort();
+        assert_eq!(imports, ["./other", "./util"]);
+        assert!(
+            !r.edges
+                .iter()
+                .any(|e| e.edge_type == EdgeType::Calls && e.to == "require")
+        );
+    }
+
+    #[test]
+    fn js_dead_guards_drop_calls_in_the_false_branch() {
+        let r = extract_ts(
+            "function f() {\n  if (false) { dead(); } else { live(); }\n}\n",
+            "m.ts",
+        );
+        assert_eq!(calls_from(&r, "m.ts::f"), vec!["live"]);
+    }
+
+    #[test]
+    fn assigned_functions_and_prototype_methods_are_nodes() {
+        let r = extract_ts(
+            "exports.run = function run() { helper(); };\n\
+             Thing.prototype.go = function go() { helper(); };\n",
+            "m.js",
+        );
+        let qns = qualified_names(&r);
+        assert!(qns.contains("m.js::exports.run"), "{qns:?}");
+        assert!(qns.contains("m.js::Thing.prototype.go"), "{qns:?}");
+        assert_eq!(calls_from(&r, "m.js::exports.run"), vec!["helper"]);
+        assert_eq!(calls_from(&r, "m.js::Thing.prototype.go"), vec!["helper"]);
     }
 
     #[test]
