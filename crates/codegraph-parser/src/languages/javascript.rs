@@ -122,6 +122,9 @@ impl<'a> TypeScriptCollector<'a> {
     }
 
     fn walk(&mut self, node: Node) {
+        if self.dead > 0 {
+            return;
+        }
         let kind = node.kind();
         if FUNCTION_KINDS.contains(&kind) {
             if let Some(name) = self.field_text(&node, "name") {
@@ -208,19 +211,19 @@ impl<'a> TypeScriptCollector<'a> {
         self.dead -= usize::from(dead);
     }
 
-    /// CRG's unreachable-call visitor drops calls in a statically false `if` body (and in the
-    /// tail after a statically true one). What is not a call is still visited normally.
+    /// CRG's unreachable-call visitor drops the consequence of a statically false `if`
+    /// (including declarations nested there). `else`/`elif` branches stay live.
     fn if_statement(&mut self, node: &Node) {
-        let truth = node
+        let dead = node
             .child_by_field_name("condition")
-            .and_then(|condition| self.static_truth(&condition));
+            .is_some_and(|condition| self.static_false(&condition));
         let consequence = node.child_by_field_name("consequence");
         let alternative = node.child_by_field_name("alternative");
         if let Some(body) = consequence {
-            self.walk_dead(body, truth == Some(false));
+            self.walk_dead(body, dead);
         }
         if let Some(body) = alternative {
-            self.walk_dead(body, truth == Some(true));
+            self.walk(body);
         }
         // Non-branch children (the condition itself) stay live.
         let ids = [consequence.map(|n| n.id()), alternative.map(|n| n.id())];
@@ -232,22 +235,16 @@ impl<'a> TypeScriptCollector<'a> {
         }
     }
 
-    fn static_truth(&self, node: &Node) -> Option<bool> {
+    fn static_false(&self, node: &Node) -> bool {
         let node = if node.kind() == "parenthesized_expression" {
-            node.named_child(0)?
+            let Some(inner) = node.named_child(0) else {
+                return false;
+            };
+            inner
         } else {
             *node
         };
-        match node.kind() {
-            "true" => Some(true),
-            "false" => Some(false),
-            "number" => self
-                .node_text(&node)
-                .parse::<f64>()
-                .ok()
-                .map(|value| value != 0.0),
-            _ => None,
-        }
+        node.kind() == "false" || (node.kind() == "number" && self.node_text(&node) == "0")
     }
 
     /// Records a named function spanning `extent` and walks `body` inside it.
@@ -710,6 +707,16 @@ mod tests {
             "m.ts",
         );
         assert_eq!(calls_from(&r, "m.ts::f"), vec!["live"]);
+    }
+
+    #[test]
+    fn js_dead_guards_drop_nested_declarations_but_keep_the_else_branch() {
+        let r = extract_ts(
+            "function f() {\n  if (0) { function nested() { deep(); } } else { live(); }\n}\n",
+            "m.ts",
+        );
+        assert_eq!(calls_from(&r, "m.ts::f"), vec!["live"]);
+        assert!(!qualified_names(&r).iter().any(|q| q.contains("nested")));
     }
 
     #[test]
