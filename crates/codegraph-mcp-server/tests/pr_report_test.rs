@@ -2,7 +2,7 @@
 // ABOUTME: The fixture is a real `codegraph detect-changes` output (see report for how it was made).
 
 use codegraph_mcp_server::pr_report::{
-    FailOn, REPORT_MARKER, RiskLevel, gate_exit_code, render_report, risk_level,
+    FailOn, REPORT_MARKER, RiskLevel, gate_exit_code, render_report, risk_level, write_report,
 };
 use serde_json::{Value, json};
 use std::process::Command;
@@ -78,6 +78,10 @@ fn gate_exit_codes() {
     assert_eq!(gate_exit_code(0.84, FailOn::Critical), 0);
     assert_eq!(gate_exit_code(0.85, FailOn::Critical), 3);
     assert_eq!(gate_exit_code(0.90, FailOn::High), 3);
+    assert_eq!(gate_exit_code(0.849999, FailOn::Critical), 0);
+    assert_eq!(gate_exit_code(0.849999, FailOn::High), 3);
+    assert_eq!(gate_exit_code(-1.0, FailOn::High), 0);
+    assert_eq!(gate_exit_code(-1.0, FailOn::Critical), 0);
 }
 
 #[test]
@@ -117,4 +121,93 @@ fn cli_without_graph_exits_1_and_writes_nothing() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(!out_file.exists());
     assert!(!String::from_utf8_lossy(&output.stdout).contains(REPORT_MARKER));
+}
+
+fn node(name: &str, path: &str, risk: f64) -> Value {
+    json!({"id": "x", "kind": "Function", "name": name,
+        "location": {"file_path": path, "start_line": 1, "end_line": 2}, "risk_score": risk})
+}
+
+#[test]
+fn hostile_names_and_paths_cannot_inject_markup_or_columns() {
+    let evil = node(
+        "a`|<!-- codegraph-report -->",
+        "src/<script>\nalert(1)\r</script>.rs",
+        0.9,
+    );
+    let evil2 = node("``x`", "src/`y``.rs", 0.8);
+    let changes = json!({"result": {"base_ref": "<!-- codegraph-report -->`", "risk_score": 0.9,
+        "changed_files": [{"path": "src/<script>\nalert(1)\r</script>.rs", "lines": [[1, 2]]},
+            {"path": "src/`y``.rs", "lines": [[1, 2]]}],
+        "changed_nodes": [evil.clone(), evil2.clone()],
+        "review_priorities": [evil, evil2]}});
+    let report = render_report(&changes, MAX);
+    assert_eq!(report.matches(REPORT_MARKER).count(), 1, "{report}");
+    assert!(report.starts_with(REPORT_MARKER));
+    assert!(!report.contains("<script"), "{report}");
+    assert!(!report.contains("</script"), "{report}");
+    assert_eq!(report.matches("<!--").count(), 1, "{report}");
+    let rows: Vec<&str> = report.lines().filter(|l| l.starts_with('|')).collect();
+    assert_eq!(rows.len(), 2 + 2, "{report}");
+    for row in rows {
+        assert_eq!(row.matches('|').count(), 5, "{row}");
+    }
+}
+
+#[test]
+fn details_section_is_capped_at_12000_bytes() {
+    let nodes: Vec<Value> = (0..2_000)
+        .map(|i| node(&format!("fn_{i:04}"), "a.rs", 0.1))
+        .collect();
+    let changes = json!({"result": {"risk_score": 0.1,
+        "changed_files": [{"path": "a.rs", "lines": [[1, 2]]}],
+        "changed_nodes": nodes, "review_priorities": []}});
+    let report = render_report(&changes, MAX);
+    let start = report.find("<details><summary>Changed functions").unwrap();
+    let end = start + report[start..].find("</details>").unwrap();
+    let body = &report[start..end];
+    assert!(body.len() <= 12_000 + 200, "{}", body.len());
+    assert!(body.contains("more entries truncated"));
+}
+
+#[test]
+fn truncation_closes_open_details() {
+    let nodes: Vec<Value> = (0..400)
+        .map(|i| node(&format!("fn_{i:04}"), "a.rs", 0.1))
+        .collect();
+    let changes = json!({"result": {"risk_score": 0.1,
+        "changed_files": [{"path": "a.rs", "lines": [[1, 2]]}],
+        "changed_nodes": nodes, "review_priorities": []}});
+    let report = render_report(&changes, 3_000);
+    assert!(report.len() <= 3_000);
+    assert_eq!(
+        report.matches("<details>").count(),
+        report.matches("</details>").count(),
+        "{report}"
+    );
+}
+
+#[test]
+fn display_path_matches_on_component_boundary() {
+    let changes = json!({"result": {"risk_score": 0.1,
+        "changed_files": [{"path": "lib.py", "lines": [[1, 2]]}],
+        "changed_nodes": [node("f", "/w/mylib.py", 0.1), node("g", "/w/lib.py", 0.1)],
+        "review_priorities": [node("f", "/w/mylib.py", 0.1)]}});
+    let report = render_report(&changes, MAX);
+    assert!(report.contains("/w/mylib.py"), "{report}");
+    assert!(report.contains("`g` (`Function`) in `lib.py`"), "{report}");
+    assert!(
+        report.contains("`f` (`Function`) in `/w/mylib.py`"),
+        "{report}"
+    );
+}
+
+#[test]
+fn write_report_creates_missing_parent_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out/dir/report.md");
+    write_report(&path, "hi").unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hi");
+    let bare = std::path::Path::new("report-bare-test.md");
+    assert!(bare.parent().is_some_and(|p| p.as_os_str().is_empty()));
 }

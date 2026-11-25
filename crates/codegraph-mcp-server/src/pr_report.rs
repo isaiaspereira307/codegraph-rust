@@ -98,7 +98,7 @@ pub fn render_report(changes: &Value, max_bytes: usize) -> String {
         nodes.len()
     );
     if let Some(base) = result["base_ref"].as_str() {
-        let _ = writeln!(out, "Base: `{base}`\n");
+        let _ = writeln!(out, "Base: {}\n", code(base));
     }
 
     let priorities = array(result, "review_priorities");
@@ -109,10 +109,10 @@ pub fn render_report(changes: &Value, max_bytes: usize) -> String {
         for (i, node) in priorities.iter().take(PRIORITY_ROWS).enumerate() {
             let _ = writeln!(
                 out,
-                "| {} | `{}` | {} | {:.2} |",
+                "| {} | {} | {} | {:.2} |",
                 i + 1,
-                cell(node["name"].as_str().unwrap_or("?")),
-                cell(&display_path(node, files)),
+                code(node["name"].as_str().unwrap_or("?")),
+                code(&display_path(node, files)),
                 node["risk_score"].as_f64().unwrap_or(0.0)
             );
         }
@@ -125,8 +125,8 @@ pub fn render_report(changes: &Value, max_bytes: usize) -> String {
             .filter_map(|r| Some(format!("{}-{}", r[0].as_i64()?, r[1].as_i64()?)))
             .collect();
         format!(
-            "- `{}` (lines {})",
-            f["path"].as_str().unwrap_or("?"),
+            "- {} (lines {})",
+            code(f["path"].as_str().unwrap_or("?")),
             ranges.join(", ")
         )
     });
@@ -134,10 +134,10 @@ pub fn render_report(changes: &Value, max_bytes: usize) -> String {
 
     let node_lines = nodes.iter().map(|n| {
         format!(
-            "- `{}` ({}) in `{}` - risk {:.2}",
-            n["name"].as_str().unwrap_or("?"),
-            n["kind"].as_str().unwrap_or("?"),
-            display_path(n, files),
+            "- {} ({}) in {} - risk {:.2}",
+            code(n["name"].as_str().unwrap_or("?")),
+            code(n["kind"].as_str().unwrap_or("?")),
+            code(&display_path(n, files)),
             n["risk_score"].as_f64().unwrap_or(0.0)
         )
     });
@@ -149,9 +149,33 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
     value[key].as_array().map_or(&[], Vec::as_slice)
 }
 
-/// Escapes characters that would break a markdown table cell.
-fn cell(text: &str) -> String {
-    text.replace('|', "\\|").replace(['\n', '\r'], " ")
+/// Renders an untrusted value (names, paths, refs come from repo contents) as an inline
+/// code span that cannot break out: control characters become spaces, `<`, `>` and `|`
+/// are swapped for look-alike characters (so no raw HTML and no extra table columns),
+/// and the fence is longer than any backtick run in the value.
+fn code(value: &str) -> String {
+    let clean: String = value
+        .chars()
+        .map(|c| match c {
+            '<' => '\u{2039}',
+            '>' => '\u{203a}',
+            '|' => '\u{00a6}',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    let (mut longest, mut run) = (0, 0);
+    for c in clean.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest + 1);
+    let pad = if clean.starts_with('`') || clean.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{clean}{pad}{fence}")
 }
 
 /// Node paths are absolute; prefer the repo-relative path from `changed_files`.
@@ -160,7 +184,12 @@ fn display_path(node: &Value, files: &[Value]) -> String {
     files
         .iter()
         .filter_map(|f| f["path"].as_str())
-        .find(|p| full.ends_with(p))
+        .find(|p| {
+            full == *p
+                || full
+                    .strip_suffix(*p)
+                    .is_some_and(|head| head.ends_with('/') || head.ends_with('\\'))
+        })
         .unwrap_or(full)
         .to_string()
 }
@@ -187,18 +216,25 @@ fn details(title: &str, count: usize, lines: impl Iterator<Item = String>) -> St
 }
 
 /// Cuts `text` to `max_bytes` on a char boundary, appending a note about what was cut.
+/// An unclosed `<details>` is closed in the note. Only inline code spans are generated,
+/// so no fenced block can be left open.
 fn cap(text: String, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text;
     }
-    let note = |cut: usize| format!("\n\n_report truncated: {cut} bytes cut_\n");
+    let note = |cut: usize, close: bool| {
+        let tail = if close { "\n</details>" } else { "" };
+        format!("\n\n_report truncated: {cut} bytes cut_{tail}\n")
+    };
     // The note's length depends on the digit count of the cut size; reserve for the widest.
-    let reserve = note(text.len()).len();
+    let reserve = note(text.len(), true).len();
     let keep = floor_boundary(&text, max_bytes.saturating_sub(reserve));
-    let mut out = text[..keep].to_string();
-    out.push_str(&note(text.len() - keep));
+    let kept = &text[..keep];
+    let open = kept.matches("<details>").count() > kept.matches("</details>").count();
+    let mut out = kept.to_string();
+    out.push_str(&note(text.len() - keep, open));
     if out.len() > max_bytes {
-        // Budget too small even for the note: marker-only fallback keeps the contract.
+        // Budget too small even for the note: hard cut keeps the size contract.
         out.truncate(floor_boundary(&out, max_bytes));
     }
     out
@@ -262,9 +298,17 @@ unsafe fn analyze(
     };
     let report = render_report(&changes, MAX_REPORT_BYTES);
     match output {
-        Some(path) => std::fs::write(&path, report)
-            .with_context(|| format!("Cannot write {}", path.display()))?,
+        Some(path) => write_report(&path, &report)?,
         None => print!("{report}"),
     }
     Ok(gate_exit_code(score, fail_on))
+}
+
+/// Writes the report to `path`.
+pub fn write_report(path: &Path, report: &str) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Cannot create {}", parent.display()))?;
+    }
+    std::fs::write(path, report).with_context(|| format!("Cannot write {}", path.display()))
 }
