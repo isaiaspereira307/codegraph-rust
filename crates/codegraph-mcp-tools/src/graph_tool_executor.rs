@@ -554,7 +554,7 @@ impl GraphToolExecutor {
             .ok_or_else(|| McpError::Protocol("Missing pattern".to_string()))?;
         let pattern = QueryPattern::parse(pattern_name).ok_or_else(|| {
             McpError::Protocol(format!(
-                "Unknown pattern '{pattern_name}'; expected callers_of, callees_of, imports_of, importers_of or tests_for"
+                "Unknown pattern '{pattern_name}'; expected callers_of, callees_of, imports_of, importers_of, tests_for or inheritors_of"
             ))
         })?;
         let limit = params["limit"].as_i64().unwrap_or(20).clamp(1, 100) as usize;

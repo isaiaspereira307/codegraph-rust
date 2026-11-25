@@ -408,7 +408,7 @@ impl GraphToolSchemas {
             name: "query_graph".to_string(),
             description: "Direct relationships of one node. Patterns: callers_of (CALLS into the \
                    node), callees_of (CALLS out of it), imports_of (files it imports), \
-                   importers_of (files importing it), tests_for (tests that cover it). Give \
+                   importers_of (files importing it), tests_for (tests that cover it), inheritors_of (subclasses and implementers). Give \
                    node_id, or name to pick the best match. Returns the target, matches sorted \
                    by name, the total, and how many text targets were ignored as unresolved."
                 .to_string(),
@@ -417,7 +417,7 @@ impl GraphToolSchemas {
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "enum": ["callers_of", "callees_of", "imports_of", "importers_of", "tests_for"],
+                        "enum": ["callers_of", "callees_of", "imports_of", "importers_of", "tests_for", "inheritors_of"],
                         "description": "Relationship to follow"
                     },
                     "node_id": {

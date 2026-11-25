@@ -56,7 +56,7 @@ pub struct SearchNodesRequest {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct QueryGraphRequest {
-    /// callers_of, callees_of, imports_of, importers_of or tests_for
+    /// callers_of, callees_of, imports_of, importers_of, tests_for or inheritors_of
     pub pattern: String,
     /// Node ID from find_nodes_by_name or search_nodes; takes precedence over name
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -418,7 +418,7 @@ impl CodeGraphMCPServer {
     }
 
     #[tool(
-        description = "Direct relationships of one node: callers_of, callees_of, imports_of, importers_of or tests_for. Give node_id, or name for the best match. Returns the target, matches and the count of unresolved text targets."
+        description = "Direct relationships of one node: callers_of, callees_of, imports_of, importers_of, tests_for or inheritors_of. Give node_id, or name for the best match. Returns the target, matches and the count of unresolved text targets."
     )]
     async fn query_graph(
         &self,

@@ -1,4 +1,4 @@
-// ABOUTME: query_graph patterns: callers, callees, imports, importers and tests of one node.
+// ABOUTME: query_graph patterns: callers, callees, imports, importers, tests and inheritors of one node.
 // ABOUTME: Walks the petgraph snapshot and counts text targets that are not graph nodes.
 
 use super::GraphQuery;
@@ -23,6 +23,9 @@ pub enum QueryPattern {
     ImportsOf,
     ImportersOf,
     TestsFor,
+    /// Subclasses and implementers: incoming `INHERITS` and `IMPLEMENTS` (handled apart from
+    /// `edge()`, which names a single kind).
+    InheritorsOf,
 }
 
 impl QueryPattern {
@@ -34,6 +37,7 @@ impl QueryPattern {
             "imports_of" => Self::ImportsOf,
             "importers_of" => Self::ImportersOf,
             "tests_for" => Self::TestsFor,
+            "inheritors_of" => Self::InheritorsOf,
             _ => return None,
         })
     }
@@ -45,6 +49,7 @@ impl QueryPattern {
             Self::ImportsOf => "imports_of",
             Self::ImportersOf => "importers_of",
             Self::TestsFor => "tests_for",
+            Self::InheritorsOf => "inheritors_of",
         }
     }
 
@@ -55,6 +60,7 @@ impl QueryPattern {
             Self::ImportsOf => ("IMPORTS_FROM", Outgoing),
             Self::ImportersOf => ("IMPORTS_FROM", Incoming),
             Self::TestsFor => ("TESTED_BY", Outgoing),
+            Self::InheritorsOf => ("INHERITS", Incoming),
         }
     }
 }
@@ -86,24 +92,31 @@ impl GraphQuery {
             return Ok(None);
         };
         let (kind, dir) = pattern.edge();
-        let neighbours = snap.neighbours(ix, dir, |k| k == kind);
+        let inheritors = pattern == QueryPattern::InheritorsOf;
+        let neighbours =
+            snap.neighbours(ix, dir, |k| k == kind || (inheritors && k == "IMPLEMENTS"));
         let limit = match limit {
             0 => DEFAULT_LIMIT,
             n => n.min(MAX_LIMIT),
         };
         let qualified = snap.node(ix).qualified.clone();
-        let sql = if dir == Outgoing {
-            UNRESOLVED_OUT
+        let unresolved: i64 = if inheritors {
+            // Bare-name heritage edges that named this class but could not be bound.
+            let name = &snap.node(ix).name;
+            snap.ambiguous_heritage.get(name).copied().unwrap_or(0) as i64
         } else {
-            UNRESOLVED_IN
+            let sql = if dir == Outgoing {
+                UNRESOLVED_OUT
+            } else {
+                UNRESOLVED_IN
+            };
+            let kind = kind.to_string();
+            self.store()
+                .with_conn(move |conn| {
+                    Ok(conn.query_row(sql, params![kind, qualified], |row| row.get(0))?)
+                })
+                .await?
         };
-        let kind = kind.to_string();
-        let unresolved: i64 = self
-            .store()
-            .with_conn(move |conn| {
-                Ok(conn.query_row(sql, params![kind, qualified], |row| row.get(0))?)
-            })
-            .await?;
         let total = neighbours.len();
         let results = neighbours
             .iter()

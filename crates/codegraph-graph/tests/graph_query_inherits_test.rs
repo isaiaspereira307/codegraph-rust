@@ -165,3 +165,76 @@ async fn imported_file_base_wins_over_unrelated_duplicate_through_the_snapshot()
     );
     assert!(inheritors(&q, "legacy.py::Base").await.is_empty());
 }
+
+async fn inheritors_of(
+    q: &GraphQuery,
+    base: &str,
+) -> codegraph_graph::graph_query::QueryGraphResult {
+    use codegraph_graph::graph_query::QueryPattern;
+    q.query_graph(QueryPattern::InheritorsOf, base, 0)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn inheritors_of_lists_subclasses_and_implementers() {
+    let (_dir, q) = fixture(
+        &[
+            ("Interface", "a.ts::Shape", "a.ts", "typescript"),
+            ("Class", "z.ts::Zed", "z.ts", "typescript"),
+            ("Class", "b.ts::Box", "b.ts", "typescript"),
+        ],
+        &[
+            ("INHERITS", "z.ts::Zed", "Shape"),
+            ("IMPLEMENTS", "b.ts::Box", "Shape"),
+        ],
+    );
+    let r = inheritors_of(&q, "a.ts::Shape").await;
+    assert_eq!(r.pattern, "inheritors_of");
+    let names: Vec<_> = r.results.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, vec!["Box", "Zed"]);
+    assert_eq!(r.total, 2);
+    assert_eq!(r.unresolved, 0);
+}
+
+#[tokio::test]
+async fn inheritors_of_counts_ambiguous_bases_as_unresolved() {
+    let (_dir, q) = fixture(
+        &[
+            ("Class", "a.py::Base", "a.py", "python"),
+            ("Class", "b.py::Base", "b.py", "python"),
+            ("Class", "c.py::Child", "c.py", "python"),
+            ("Class", "d.py::Other", "d.py", "python"),
+        ],
+        &[
+            ("INHERITS", "c.py::Child", "Base"),
+            ("INHERITS", "d.py::Other", "Base"),
+        ],
+    );
+    let r = inheritors_of(&q, "a.py::Base").await;
+    assert!(r.results.is_empty());
+    assert_eq!(r.unresolved, 2);
+    // Another pattern keeps its own (SQL) count.
+    use codegraph_graph::graph_query::QueryPattern;
+    let c = q
+        .query_graph(QueryPattern::CallersOf, "a.py::Base", 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(c.unresolved, 0);
+}
+
+#[tokio::test]
+async fn inheritors_of_on_a_leaf_class_is_empty() {
+    let (_dir, q) = fixture(
+        &[
+            ("Class", "a.py::Base", "a.py", "python"),
+            ("Class", "c.py::Child", "c.py", "python"),
+        ],
+        &[("INHERITS", "c.py::Child", "Base")],
+    );
+    let r = inheritors_of(&q, "c.py::Child").await;
+    assert!(r.results.is_empty());
+    assert_eq!((r.total, r.unresolved), (0, 0));
+}

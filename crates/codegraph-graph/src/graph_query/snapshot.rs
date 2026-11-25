@@ -30,7 +30,6 @@ pub(crate) struct Snapshot {
     index: HashMap<String, NodeIndex>,
     /// Bare base name → number of text INHERITS/IMPLEMENTS edges naming it that matched
     /// several type nodes and so were left unbound.
-    #[allow(dead_code)] // read by query_graph's `inheritors_of` pattern
     pub ambiguous_heritage: HashMap<String, usize>,
 }
 
