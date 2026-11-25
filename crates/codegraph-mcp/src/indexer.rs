@@ -1219,6 +1219,12 @@ impl ProjectIndexer {
             if spring_resolved > 0 {
                 info!("   🌱 Spring DI calls resolved: {spring_resolved}");
             }
+            // CRG's event resolver also needs every file's PUBLISHES/HANDLES edges: a deleted
+            // listener must not leave a stale publisher-to-listener CALLS edge behind.
+            let spring_events = crate::spring::resolve_spring_events(&nodes, &mut edges);
+            if spring_events > 0 {
+                info!("   🌱 Spring event calls resolved: {spring_events}");
+            }
             let mut catalog = crate::resolution::SymbolCatalog::new(&nodes);
             catalog.set_go_root(&self.project_root);
             // Rust `use` paths resolve through the Cargo.toml layouts above the indexed files.
@@ -1263,6 +1269,13 @@ impl ProjectIndexer {
                     targets.push(Some(target));
                     go_import_dirs.push(None);
                     resolution_provenance.push(("import", 1.0f64));
+                    continue;
+                }
+                if let Some(target) = catalog.java_construction_target(edge) {
+                    exact_count += 1;
+                    targets.push(Some(target));
+                    go_import_dirs.push(None);
+                    resolution_provenance.push(("definition", 1.0f64));
                     continue;
                 }
                 if let Some(target) = catalog.java_call_target(edge) {

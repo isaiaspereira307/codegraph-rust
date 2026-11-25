@@ -1,8 +1,8 @@
 // ABOUTME: Spring DI call resolution over the whole project, ported from CRG spring_resolver.py.
 // ABOUTME: Calls on injected fields go to the unique bean implementation or the injected type.
 
-use codegraph_core::{CodeNode, EdgeRelationship, EdgeType, Language, NodeId, NodeType};
-use codegraph_parser::languages::java::INJECTS;
+use codegraph_core::{CodeNode, EdgeRelationship, EdgeType, Language, NodeId, NodeType, Span};
+use codegraph_parser::languages::java::{HANDLES, INJECTS, PUBLISHES};
 use std::collections::{BTreeSet, HashMap};
 
 fn qualified(node: &CodeNode) -> Option<&str> {
@@ -248,6 +248,110 @@ pub(crate) fn resolve_spring_di_calls(nodes: &[CodeNode], edges: &mut [EdgeRelat
         resolved += 1;
     }
     resolved
+}
+
+/// Rebuilds publisher-to-listener CALLS from the project-wide `PUBLISHES`/`HANDLES` edges that
+/// point at the same virtual `event::` node, as CRG's `event_resolver` does after a build.
+/// The derived edges point at the listener's qualified name so the normal symbol resolution
+/// binds them like any other call; they are stamped for idempotent reindexing.
+pub(crate) fn resolve_spring_events(
+    nodes: &[CodeNode],
+    edges: &mut Vec<EdgeRelationship>,
+) -> usize {
+    let is_event =
+        |kind: &EdgeType| matches!(kind, EdgeType::Other(k) if k == PUBLISHES || k == HANDLES);
+    let identity = |edge: &EdgeRelationship| {
+        let target = edge
+            .metadata
+            .get("event_type")
+            .cloned()
+            .filter(|s| !s.is_empty())?;
+        Some(format!("event::{target}"))
+    };
+
+    let by_id: HashMap<NodeId, &CodeNode> = nodes.iter().map(|node| (node.id, node)).collect();
+    let mut publishers: HashMap<String, Vec<(NodeId, String, u32, Option<Span>)>> = HashMap::new();
+    let mut listeners: HashMap<String, Vec<NodeId>> = HashMap::new();
+    for edge in edges.iter() {
+        if !is_event(&edge.edge_type) || !edge.to.starts_with("event::") {
+            continue;
+        }
+        let Some(target) = identity(edge) else {
+            continue;
+        };
+        if edge.edge_type == EdgeType::Other(PUBLISHES.into()) {
+            let Some(node) = by_id.get(&edge.from) else {
+                continue;
+            };
+            let line = edge
+                .metadata
+                .get("line")
+                .and_then(|line| line.parse().ok())
+                .unwrap_or(node.location.line);
+            publishers.entry(target).or_default().push((
+                edge.from,
+                node.location.file_path.to_string(),
+                line,
+                edge.span.clone(),
+            ));
+        } else if edge.metadata.get("resolution").map(String::as_str)
+            == Some("spring_event_listener")
+        {
+            listeners.entry(target).or_default().push(edge.from);
+        }
+    }
+    if publishers.is_empty() || listeners.is_empty() {
+        return 0;
+    }
+
+    let mut emitted = 0;
+    for (target, publishers) in publishers {
+        let Some(listeners) = listeners.get(&target) else {
+            continue;
+        };
+        let identity = target
+            .strip_prefix("event::")
+            .unwrap_or(&target)
+            .to_string();
+        for (from, file, line, span) in publishers {
+            for listener in listeners {
+                let Some(target_node) = by_id.get(listener) else {
+                    continue;
+                };
+                let Some(target) = qualified(target_node) else {
+                    continue;
+                };
+                if edges.iter().any(|edge| {
+                    edge.edge_type == EdgeType::Calls
+                        && edge.from == from
+                        && edge.to == target
+                        && edge.metadata.contains_key("spring_event_resolved")
+                }) {
+                    continue;
+                }
+                edges.push(EdgeRelationship {
+                    from,
+                    to: target.to_string(),
+                    edge_type: EdgeType::Calls,
+                    metadata: HashMap::from([
+                        ("spring_event_resolved".to_string(), "true".to_string()),
+                        ("event_type".to_string(), identity.clone()),
+                        (
+                            "resolution".to_string(),
+                            "spring_application_event".to_string(),
+                        ),
+                        ("confidence".to_string(), "0.95".to_string()),
+                        ("confidence_tier".to_string(), "INFERRED".to_string()),
+                        ("source_file".to_string(), file.clone()),
+                        ("line".to_string(), line.to_string()),
+                    ]),
+                    span: span.clone(),
+                });
+                emitted += 1;
+            }
+        }
+    }
+    emitted
 }
 
 #[cfg(test)]

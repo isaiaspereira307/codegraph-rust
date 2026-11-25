@@ -484,6 +484,29 @@ impl SymbolCatalog {
         self.modules.java_same_package_file(importer, base)
     }
 
+    /// A Java `new Type()` binds to the class itself: same package, import or FQN, like the
+    /// type lookup CRG applies to constructed event payloads.
+    pub(crate) fn java_construction_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        if edge.edge_type != EdgeType::Calls
+            || edge.metadata.get("java_construction").map(String::as_str) != Some("true")
+        {
+            return None;
+        }
+        let caller = self.symbols.get(&edge.from)?;
+        if !caller.file.ends_with(".java") {
+            return None;
+        }
+        let file = self.java_type_file(&caller.file, &edge.to)?;
+        let base = edge.to.rsplit('.').next()?;
+        let mut ids = self
+            .aliases
+            .get(&format!("{file}::{base}"))?
+            .iter()
+            .copied();
+        let id = ids.next()?;
+        ids.next().is_none().then_some(id)
+    }
+
     /// A Java call on a typed receiver binds only to that type's method in its defining file.
     /// Unknown or ambiguous receivers keep the bare method name, as at CRG bbdda4b.
     pub(crate) fn java_call_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {

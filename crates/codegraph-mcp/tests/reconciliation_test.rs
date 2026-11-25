@@ -347,6 +347,50 @@ async fn java_typed_receivers_bind_without_imports() -> Result<()> {
     Ok(())
 }
 
+/// Spring `publishEvent(new Event())` binds to the event class and to every listener of that
+/// event, as code-review-graph's event resolver does after indexing the whole project.
+#[tokio::test]
+async fn java_spring_events_bind_publisher_to_listener() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(
+            module_path!(),
+            "::java_spring_events_bind_publisher_to_listener"
+        ),
+        &[
+            (
+                "com/x/LocalEvent.java",
+                "package com.x;\npublic class LocalEvent {}\n",
+            ),
+            (
+                "com/x/Events.java",
+                "package com.x;\nimport org.springframework.context.ApplicationEventPublisher;\n\
+                 import org.springframework.context.event.EventListener;\n\
+                 public class Events {\n\
+                 private final ApplicationEventPublisher publisher;\n\
+                 public void publish() { publisher.publishEvent(new LocalEvent()); }\n\
+                 @EventListener(LocalEvent.class) public void on(LocalEvent event) {}\n\
+                 }\n",
+            ),
+        ],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let edges = edges_of(&indexer.graph_store(), dir.path(), "'CALLS', 'PUBLISHES'")?;
+    for expected in [
+        "CALLS|com/x/Events.java::Events.publish|com/x/Events.java::Events.on",
+        "CALLS|com/x/Events.java::Events.publish|com/x/LocalEvent.java::LocalEvent",
+        "PUBLISHES|com/x/Events.java::Events.publish|event::com.x.LocalEvent",
+    ] {
+        assert!(
+            edges.iter().any(|row| row == expected),
+            "missing {expected} in {edges:?}"
+        );
+    }
+    Ok(())
+}
+
 /// Rust `use` paths bind to File nodes through Cargo layouts: `crate::` inside the importer's
 /// crate, a path dependency's name to that crate's modules; `std` stays text.
 #[tokio::test]

@@ -476,6 +476,9 @@ impl<'a> JavaCollector<'a> {
             ("call_type".to_string(), "java_invocation".to_string()),
             ("source_file".to_string(), self.file_path.to_string()),
         ]);
+        if node.kind() == "object_creation_expression" {
+            metadata.insert("java_construction".into(), "true".into());
+        }
         let mut target = method.clone();
         let expression_receiver =
             node.kind() == "method_invocation" && self.java_expression_receiver(node);
@@ -1185,6 +1188,10 @@ impl<'a> JavaCollector<'a> {
         node: &Node,
     ) {
         metadata.insert("source_file".to_string(), self.file_path.to_string());
+        metadata.insert(
+            "line".to_string(),
+            (node.start_position().row + 1).to_string(),
+        );
         self.edges.push(EdgeRelationship {
             from,
             to,
