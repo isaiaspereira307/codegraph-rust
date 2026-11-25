@@ -1271,6 +1271,13 @@ impl ProjectIndexer {
                     resolution_provenance.push(("import", 1.0f64));
                     continue;
                 }
+                if let Some(target) = catalog.csharp_call_target(edge) {
+                    exact_count += 1;
+                    targets.push(Some(target));
+                    go_import_dirs.push(None);
+                    resolution_provenance.push(("import", 1.0f64));
+                    continue;
+                }
                 if let Some(target) = catalog.java_construction_target(edge) {
                     exact_count += 1;
                     targets.push(Some(target));

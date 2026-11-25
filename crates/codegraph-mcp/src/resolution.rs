@@ -42,6 +42,12 @@ pub(crate) struct SymbolCatalog {
     go_imports: HashMap<String, HashMap<String, String>>,
     /// Per Java file, each simple import name and the qualified type it names.
     java_imports: HashMap<String, HashMap<String, String>>,
+    /// C# `namespace.Type` → the file declaring it, from class/interface metadata.
+    csharp_types: HashMap<String, String>,
+    /// C# namespace declared in each file, for local type lookup.
+    csharp_file_namespaces: HashMap<String, String>,
+    /// Per C# file, the namespaces its `using` directives name.
+    csharp_imports: HashMap<String, HashSet<String>>,
     /// Indexed `.go` files directly inside each package directory.
     go_package_files: HashMap<String, Vec<String>>,
     /// Project root, to compare relative symbol paths with absolute package directories.
@@ -177,6 +183,9 @@ impl SymbolCatalog {
             rust_aliases: HashMap::new(),
             go_imports: HashMap::new(),
             java_imports: HashMap::new(),
+            csharp_types: HashMap::new(),
+            csharp_file_namespaces: HashMap::new(),
+            csharp_imports: HashMap::new(),
             go_package_files: HashMap::new(),
             go_root: None,
         };
@@ -207,6 +216,18 @@ impl SymbolCatalog {
                 if !ids.contains(&node.id) {
                     ids.push(node.id);
                 }
+            }
+            if let Some(namespace) = node.metadata.attributes.get("csharp_namespace") {
+                let file = &node.location.file_path;
+                catalog
+                    .csharp_file_namespaces
+                    .entry(file.clone())
+                    .or_insert_with(|| namespace.clone());
+                let leaf = node.name.rsplit('.').next().unwrap_or(&node.name);
+                catalog
+                    .csharp_types
+                    .entry(format!("{namespace}.{leaf}"))
+                    .or_insert_with(|| file.clone());
             }
         }
         for file in catalog.file_nodes.keys() {
@@ -402,6 +423,16 @@ impl SymbolCatalog {
                     .or_default()
                     .insert(alias, dir);
             }
+            if importer.file.ends_with(".cs")
+                && !edge.to.is_empty()
+                && !edge.metadata.contains_key("static")
+                && !edge.metadata.contains_key("alias")
+            {
+                self.csharp_imports
+                    .entry(importer.file.clone())
+                    .or_default()
+                    .insert(edge.to.clone());
+            }
             if importer.file.ends_with(".java")
                 && !edge.metadata.contains_key("static")
                 && !edge.metadata.contains_key("wildcard")
@@ -541,6 +572,45 @@ impl SymbolCatalog {
             })
             .collect();
         (candidates.len() == 1).then(|| candidates[0])
+    }
+
+    /// A C# call on a receiver whose parameter type was recorded binds to that type's method
+    /// in a namespace named by the file's `using` directives (or in its own namespace). A
+    /// complex receiver has no recorded type and keeps its bare method name, as at CRG.
+    pub(crate) fn csharp_call_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        if edge.edge_type != EdgeType::Calls {
+            return None;
+        }
+        let type_name = edge.metadata.get("receiver_type")?;
+        let caller = self.symbols.get(&edge.from)?;
+        if !caller.file.ends_with(".cs") {
+            return None;
+        }
+        let mut namespaces: Vec<&String> = self
+            .csharp_imports
+            .get(&caller.file)
+            .into_iter()
+            .flatten()
+            .collect();
+        if let Some(local) = self.csharp_file_namespaces.get(&caller.file) {
+            namespaces.push(local);
+        }
+        for namespace in namespaces {
+            let Some(file) = self.csharp_types.get(&format!("{namespace}.{type_name}")) else {
+                continue;
+            };
+            let expected = format!("{file}::{namespace}.{type_name}.{}", edge.to);
+            let Some(ids) = self.aliases.get(&expected) else {
+                continue;
+            };
+            let mut ids = ids.iter().copied();
+            if let Some(id) = ids.next()
+                && ids.next().is_none()
+            {
+                return Some(id);
+            }
+        }
+        None
     }
 
     /// The File node an `Imports` edge names, when its text maps to one indexed file.
@@ -833,6 +903,37 @@ mod tests {
             metadata: Default::default(),
             span: None,
         }
+    }
+
+    #[test]
+    fn csharp_typed_receiver_call_binds_to_the_imported_namespace() {
+        let mut caller = node("src/App.cs", "Run");
+        caller
+            .metadata
+            .attributes
+            .insert("qualified_name".into(), "src/App.cs::Demo.App.Run".into());
+        let mut helper = node("src/Helper.cs", "Demo.Helpers.Helper");
+        helper.node_type = Some(NodeType::Class);
+        helper
+            .metadata
+            .attributes
+            .insert("qualified_name".into(), "src/Helper.cs::Demo.Helpers.Helper".into());
+        helper
+            .metadata
+            .attributes
+            .insert("csharp_namespace".into(), "Demo.Helpers".into());
+        let mut target = node("src/Helper.cs", "Twice");
+        target
+            .metadata
+            .attributes
+            .insert("qualified_name".into(), "src/Helper.cs::Demo.Helpers.Helper.Twice".into());
+        let mut catalog = SymbolCatalog::new(&[caller.clone(), helper, target.clone()]);
+        let mut import = edge(caller.id, "Demo.Helpers");
+        import.edge_type = EdgeType::Imports;
+        catalog.link_imports(&[import]);
+        let mut call = edge(caller.id, "Twice");
+        call.metadata.insert("receiver_type".into(), "Helper".into());
+        assert_eq!(catalog.csharp_call_target(&call), Some(target.id));
     }
 
     #[test]
