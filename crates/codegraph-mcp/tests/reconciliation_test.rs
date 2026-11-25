@@ -701,6 +701,136 @@ async fn inherits_targets_stay_text() -> Result<()> {
     Ok(())
 }
 
+/// Every file under `dir`, as (path relative to `dir`, contents), sorted by path.
+fn probe_files(dir: &std::path::Path) -> Result<Vec<(String, String)>> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(dir)?.to_string_lossy().into_owned();
+                files.push((relative, std::fs::read_to_string(&path)?));
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// The inheritance parity probe, indexed end to end: text INHERITS/IMPLEMENTS targets bind to
+/// the base in the same language family across files; external and ambiguous bases do not.
+#[tokio::test]
+async fn inherits_text_targets_bind_across_files_and_languages() -> Result<()> {
+    use codegraph_graph::graph_query::{GraphQuery, QueryPattern};
+    let probe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/parity/probes/inheritance");
+    let files = probe_files(&probe)?;
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    let Some((dir, indexer)) = index_files(
+        concat!(
+            module_path!(),
+            "::inherits_text_targets_bind_across_files_and_languages"
+        ),
+        &borrowed,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let prefix = format!("{}/", dir.path().to_string_lossy());
+    let qn = |relative: &str| format!("{prefix}{relative}");
+    let store = indexer.graph_store();
+    let graph = GraphQuery::new(store.clone());
+    // `file::name` of each inheritor of `base`, and the ambiguous count reported for it.
+    let inheritors = async |base: &str| -> Result<(Vec<String>, usize)> {
+        let result = graph
+            .query_graph(QueryPattern::InheritorsOf, &qn(base), 100)
+            .await?
+            .unwrap_or_else(|| panic!("base {base} is not a node"));
+        let mut names: Vec<String> = result
+            .results
+            .iter()
+            .map(|n| {
+                let file = n.location.as_ref().map_or("", |l| l.file_path.as_str());
+                format!("{}::{}", file.replace(&prefix, ""), n.name)
+            })
+            .collect();
+        names.sort();
+        Ok((names, result.unresolved))
+    };
+    for (base, expected) in [
+        (
+            "py/shapes.py::Shape",
+            ["py/circle.py::Circle", "py/square.py::Square"],
+        ),
+        (
+            "ts/shape.ts::Shape",
+            ["ts/circle.ts::Circle", "ts/square.ts::Square"],
+        ),
+        (
+            "java/Shape.java::Shape",
+            ["java/Circle.java::Circle", "java/Square.java::Square"],
+        ),
+        (
+            "go/shape.go::Shape",
+            ["go/circle.go::Circle", "go/square.go::Square"],
+        ),
+    ] {
+        let (names, _) = inheritors(base).await?;
+        assert_eq!(names, expected, "inheritors of {base}");
+        let impact = graph.get_impact_radius(&[qn(base)], &[], 1, 0).await?;
+        let impacted: Vec<String> = impact.impacted.iter().map(|n| n.node.id.clone()).collect();
+        for subclass in expected {
+            assert!(
+                impact.impacted.iter().any(|n| n.depth == 1
+                    && n.node.location.as_ref().is_some_and(|l| {
+                        format!("{}::{}", l.file_path.replace(&prefix, ""), n.node.name) == subclass
+                    })),
+                "impact of {base} misses {subclass}: {impacted:?}"
+            );
+        }
+    }
+    // The duplicated base: one ambiguous edge per language, no inheritor for it.
+    for shared in [
+        "py/shared_a.py::Shared",
+        "py/shared_b.py::Shared",
+        "ts/shared_a.ts::Shared",
+        "java/a/Shared.java::Shared",
+        "go/a/shared.go::Shared",
+    ] {
+        let (names, unresolved) = inheritors(shared).await?;
+        assert!(
+            names.is_empty(),
+            "{shared} must have no inheritors: {names:?}"
+        );
+        assert_eq!(unresolved, 1, "ambiguous edges reported for {shared}");
+    }
+    // No subclass of an external or ambiguous base is an inheritor of any in-repo type.
+    let types = rows(
+        &store,
+        "SELECT qualified_name FROM nodes \
+         WHERE kind IN ('Class', 'Interface', 'Type', 'Struct', 'Enum', 'Trait')",
+    )?;
+    for base in &types {
+        let (names, _) = inheritors(&base.replace(&prefix, "")).await?;
+        for name in &names {
+            assert!(
+                ["CircleCase", "Widget", "AppError", "Guarded", "Leaf"]
+                    .iter()
+                    .all(|outsider| !name.ends_with(&format!("::{outsider}"))),
+                "{name} bound to in-repo base {base}"
+            );
+        }
+    }
+    Ok(())
+}
+
 const FLOW_SOURCE: (&str, &str) = (
     "app.py",
     "def main():\n    helper()\n\ndef helper():\n    leaf()\n\ndef leaf():\n    pass\n",
