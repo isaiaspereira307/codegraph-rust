@@ -120,7 +120,10 @@ diferença não era por linguagem, era de forma do grafo: o Rust não gerava nó
 `CONTAINS`, `Test`/`TESTED_BY`; gravava métodos sem a classe no nome (`__init__@L10`), imports
 como nós `Import` com `IMPORTS_FROM` em laço e descartava chamadas não resolvidas (o CRG guarda
 o texto do alvo). Tudo isso foi corrigido pela camada comum (`crg_shape`); ver "Progresso da
-Fase 2" abaixo. Ainda aberto: `INHERITS` (e `IMPLEMENTS`/`REFERENCES`) não são gerados.
+Fase 2" abaixo. Histórico (estado desse diagnóstico): `INHERITS` (e `IMPLEMENTS`/`REFERENCES`)
+não eram gerados. Hoje `INHERITS` sai como texto em Python, TS/JS, Java e Go, e `IMPLEMENTS`
+em Rust; desde 2026-11-25 o `GraphQuery` liga esse texto ao nó por nome (Próximos passos, item
+2). `REFERENCES` continua fora do tier padrão (ver Fase 2).
 
 O `code-review-graph` instalado no PATH é 2.3.7 e cria schema **9**; o harness usa o CRG da
 fonte (`uv run --frozen --project ../code-review-graph`, v2.4.0, schema 15). Convivência:
@@ -339,6 +342,12 @@ Paridade do critério de aceite (2026-11-24, `docs/parity/changes.md`, scripts e
 - Risco por função igual com churn (31/35 no Rust).
 - Contexto: `get_review_context` 2.7–6.6x menor que ler os arquivos, `get_minimal_context`
   24–74x.
+- Remedido em 2026-11-25, depois de "INHERITS no `GraphQuery`" (binário `18bcec9`): todos os
+  números iguais (Rust 0.948 / 0.976 / 0.880; Python 0.995 e 0.960). Esses cenários não
+  editam nenhuma base com subclasse no repo. Editando `errors.py` do CRG, o Rust alcança
+  `CorruptGraphDatabaseError`, subclasse de `GraphStoreError`, que o CRG não alcança. É o
+  único nó só no Rust, e todos os nós só no CRG vêm de lacunas anteriores (`REFERENCES` em
+  Python).
 
 Critério atendido em Python. Em Rust fica limitado pelas lacunas da Fase 2 (IMPORTS_FROM entre
 arquivos, entry points).
@@ -373,7 +382,9 @@ Também: subcomandos `build`, `update`, `status`, `watch`, `detect-changes`, `im
 
 Critério de aceite: num repositório real, o fluxo "editar → `detect_changes` →
 `get_review_context`" devolve o mesmo conjunto de arquivos/funções afetados que o CRG (via
-harness da Fase 2) e mede menos tokens que ler os arquivos diretamente.
+harness da Fase 2), exceto as subclasses e implementações que só o Rust alcança pela herança em
+texto (desde 2026-11-25; o impacto do CRG não segue `INHERITS`/`IMPLEMENTS` com alvo em texto),
+e mede menos tokens que ler os arquivos diretamente.
 
 ---
 
@@ -506,7 +517,28 @@ Em ordem; cada item ganha plano próprio em `docs/superpowers/plans/`:
    aresta. Nada muda no SQLite. Novo padrão `query_graph` `inheritors_of`. Sonda
    `scripts/parity/probes/inheritance` contra o CRG em `docs/parity/baseline.md` ("INHERITS no
    GraphQuery"). O que resta:
-   - `AnalysisGraph` (flows, comunidades, risco, hubs) ainda ignora a herança em texto.
+   - Quais ferramentas seguem a herança. As que usam o `Snapshot` seguem: `get_impact_radius`,
+     `get_review_context`/`get_minimal_context` (impacto e contagem de `dependents`),
+     `traverse_graph`, `query_graph`, dependências diretas/reversas e ciclos, acoplamento
+     (`calculate_coupling_metrics`) e o `risk_score` de `find_complexity_hotspots`. As que usam
+     o `AnalysisGraph` (flows, comunidades, `risk_scores` de `detect_changes` e da revisão,
+     `review_priorities`, a ferramenta `get_hub_nodes`, pontes, lacunas, conexões
+     surpreendentes, perguntas sugeridas) continuam ignorando, como o CRG. Só o método de
+     biblioteca `GraphQuery::get_hub_nodes` usa o `Snapshot`, e nenhuma ferramenta o chama.
+   - Por isso o impacto do Rust é um superconjunto do impacto do CRG quando um arquivo alterado
+     define uma base com subclasses no repo. O impacto do CRG junta arestas por
+     `qualified_name` e nunca casa alvo em texto. Aceito como melhoria intencional, sem flag;
+     o critério da Fase 3 passou a excluir essas subclasses/implementações. Remedição em
+     `docs/parity/changes.md`: os cenários da Fase 3 não mudaram; editando `errors.py` do CRG,
+     o único nó só no Rust é a subclasse `CorruptGraphDatabaseError`.
+   - Limitação conhecida da camada (c) (repositório inteiro): uma base importada de fora do
+     repo pode ser ligada a uma classe homônima sem relação dentro do repo. Exemplos: Python
+     `from django.db import Model; class X(Model)` com outro `Model` no repo; Go `shared.Shared`
+     de `vendor/shared` com um único `Shared` Go no repo. O import externo não vira aresta
+     `File → File`, então a camada (b) não decide. O `inheritors_of` do CRG faz o mesmo
+     (fallback por nome solto).
+   - Python `Base[int]`/`Generic[T]` e Kotlin `Base()` não ligam (o texto tem subscrito ou
+     chamada); só perde arestas, não cria erradas.
    - Base ambígua (dois `Shared` sem import que desempate) não ganha aresta; o CRG lista todos
      os candidatos em `inheritors_of` com `inferred_by: "bare_name"`. O Rust só conta em
      `unresolved`.

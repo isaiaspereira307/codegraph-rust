@@ -1179,3 +1179,25 @@ Corpus (`parity.py corpus`) depois do plano: nos e arestas identicos ao "Depois"
 linha diferente e o ARI de python (0.909 contra 0.403 em "Depois"), o mesmo valor ja medido
 no fechamento da resolucao de modulos Rust (secao anterior); o `AnalysisGraph` nao mudou neste
 plano.
+
+Ferramentas afetadas. O `Snapshot` alimenta `get_impact_radius`, `get_review_context` e
+`get_minimal_context` (impacto e contagem de `dependents`), `traverse_graph`, `query_graph`,
+dependencias diretas/reversas, ciclos, `calculate_coupling_metrics` e o `risk_score` de
+`find_complexity_hotspots`; todas passam a seguir a heranca em texto. As que usam o
+`AnalysisGraph` nao mudam: `detect_changes` (`risk_score`/`risk_signals`,
+`review_priorities`, flows afetados), o `risk_score` da revisao, flows, comunidades e as
+ferramentas `get_hub_nodes`/`get_bridge_nodes`/`get_knowledge_gaps`/
+`get_surprising_connections`/`get_suggested_questions`. O metodo de biblioteca
+`GraphQuery::get_hub_nodes` conta heranca, mas nenhuma ferramenta o chama. Consequencia: o
+impacto do Rust e um superconjunto do impacto do CRG quando um arquivo alterado define uma base
+com subclasses no repo. Isso foi aceito como melhoria intencional. O criterio da Fase 3 agora
+exclui essas subclasses/implementacoes. Remedicao em `docs/parity/changes.md`
+("Depois de INHERITS no GraphQuery"): cenarios da Fase 3 inalterados; editando `errors.py` do
+CRG, o unico no so-Rust e `CorruptGraphDatabaseError(GraphStoreError)`.
+
+Limitacao conhecida (camada (c), repositorio inteiro): uma base importada de fora do repo pode
+ser ligada a uma classe homonima sem relacao no repo. Exemplos: Python
+`from django.db import Model; class X(Model)` com outro `Model` no repo; Go `shared.Shared` de
+`vendor/shared` quando ha um unico `Shared` Go no repo (na sonda ha dois, por isso fica
+ambiguo). O import externo nao gera aresta `File -> File`, entao a camada (b) nao decide. O
+`inheritors_of` do CRG faz o mesmo pelo fallback de nome solto.

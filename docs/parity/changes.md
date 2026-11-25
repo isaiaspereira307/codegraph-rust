@@ -2,8 +2,12 @@
 
 Critério de aceite da Fase 3: num repositório real, o fluxo "editar → `detect_changes` →
 `get_review_context`" devolve os mesmos arquivos e funções afetados que o CRG e mede menos
-tokens que ler os arquivos. Medido em 2026-11-24, binário debug no commit `3a786dc`, CRG v2.4.0
-da fonte (`uv run --frozen --extra communities`).
+tokens que ler os arquivos. Desde 2026-11-25 ("INHERITS no GraphQuery"), "os mesmos" quer dizer
+iguais ao CRG exceto as subclasses e implementações que só o Rust alcança pela herança em texto:
+o impacto do CRG não segue `INHERITS`/`IMPLEMENTS` com alvo em texto, o do Rust segue (melhoria
+intencional, sem flag). Medido em 2026-11-24, binário debug no commit `3a786dc`, CRG v2.4.0
+da fonte (`uv run --frozen --extra communities`); remedido em 2026-11-25 (seção "Depois de
+INHERITS no GraphQuery").
 
 ## Como rodar
 
@@ -45,6 +49,61 @@ são comparados por `qualified_name` relativo à raiz.
 | flows afetados (nome do entry) | 0.803 (69/68) | 1.000 (10) | 1.000 (10) | 0.543 (51/94) |
 | risk score por função alterada, igual a ±0.001 | 31/35 | 2/2 | 2/2 | - |
 | `risk_score` geral | 1.0 / 1.0 | 1.0 / 1.0 | 1.0 / 1.0 | - |
+
+### Depois de INHERITS no GraphQuery (2026-11-25)
+
+Binário debug em `18bcec9`, CRG da fonte em `bbdda4b`, mesmos cenários: clones deste repo em
+`3a786dc` (base `HEAD~3`, d=2) e clones do CRG em `bbdda4b` com a mesma edição sintética
+commitada (base `HEAD~1`). O CRG fez `build` + `update`; o Rust fez `build` direto no commit
+editado (mesmo grafo final).
+
+| conjunto | 1: Rust `HEAD~3` (d=2) antes → depois | 2: sintético d=1 antes → depois | 2: sintético d=2 antes → depois |
+|---|---|---|---|
+| arquivos alterados | 1.000 → 1.000 | 1.000 → 1.000 | 1.000 → 1.000 |
+| funções alteradas | 1.000 → 1.000 | 1.000 → 1.000 | 1.000 → 1.000 |
+| `impacted` | 0.948 (186/192) → 0.948 (186/192) | 0.995 (200/201) → 0.995 (200/201) | 0.960 (714/691) → 0.960 (714/691, 688 em comum) |
+| arquivos impactados fora dos alterados | 0.976 → 0.976 | 1.000 → 1.000 | 1.000 → 1.000 |
+| flows afetados | 0.880 → 0.880 | 1.000 → 1.000 | 1.000 → 1.000 |
+| `risk_score` geral | 1.0 / 1.0 | 1.0 / 1.0 | 1.0 / 1.0 |
+
+Nenhum número caiu, e os limiares da Fase 3 seguem atendidos. Os nós só no Rust são os mesmos
+de antes, todos chamadas que o CRG não liga (cenário 1: os 8 listados acima; cenário 2:
+`run_postprocess` e dois testes que o chamam). A herança não entra nesses cenários. No 2 os
+arquivos alterados só têm funções, sem classe. No 1 há 60 tipos entre as sementes e os nós
+impactados, mas nenhum tem herdeiro no repositório: os `IMPLEMENTS` Rust daqui apontam para
+traits externos (`Default`, `Drop`).
+
+**Verificação da atribuição** (edição de um arquivo que define uma base com subclasses no
+repo; `get_impact_radius` por arquivo nos clones do cenário 2):
+
+| arquivo | d | CRG | Rust | em comum | Jaccard | só Rust | só CRG |
+|---|---|---|---|---|---|---|---|
+| `code_review_graph/errors.py` | 1 | 62 | 39 | 38 | 0.603 | 1 | 24 |
+| `code_review_graph/errors.py` | 2 | 538 | 483 | 482 | 0.894 | 1 | 56 |
+| `code_review_graph/embeddings.py` | 1 | 187 | 183 | 183 | 0.979 | 0 | 4 |
+| `code_review_graph/embeddings.py` | 2 | 519 | 475 | 475 | 0.915 | 0 | 44 |
+
+- **Só no Rust**: um único nó, `graph.py::CorruptGraphDatabaseError(GraphStoreError)`, uma
+  subclasse de uma base de `errors.py` alcançada pela herança em texto. Não há nó só no Rust
+  sem essa explicação. Em `embeddings.py` as 5 subclasses de `EmbeddingProvider` estão no
+  próprio arquivo (já são sementes), então nada muda.
+- **Só no CRG** (lacunas anteriores, não ligadas à herança): na profundidade 1, 24 de 24
+  (`errors.py`) e 3 de 4 (`embeddings.py`) são testes com aresta `REFERENCES` para o arquivo
+  (`pytest.raises(GraphStoreError)`). O Rust não gera `REFERENCES` em Python (0 arestas; o CRG
+  tem 2654). O restante é uma chamada `embeddings.LocalEmbeddingProvider(...)` após um
+  `from code_review_graph import embeddings` dentro da função, que o Rust não resolve.
+
+Ferramentas que seguem a herança em texto (usam o `Snapshot`): `get_impact_radius`,
+`get_review_context` e `get_minimal_context` (pela parte de impacto e pela contagem de
+`dependents`), `traverse_graph`, `query_graph` (`inheritors_of`), `get_transitive_dependencies`,
+`get_reverse_dependencies`, `detect_circular_dependencies` (com `edge_type` de herança),
+`calculate_coupling_metrics` e `find_complexity_hotspots` (acoplamento e `risk_score` =
+complexidade × (aferente + 1)). Ferramentas que não seguem (usam o `AnalysisGraph`, igual ao
+CRG): `detect_changes` (funções alteradas, `risk_score`/`risk_signals`, `review_priorities`,
+flows afetados), o `risk_score` dentro de `get_review_context`, `get_hub_nodes`,
+`get_bridge_nodes`, `get_knowledge_gaps`, `get_surprising_connections`,
+`get_suggested_questions`, flows e comunidades. O método de biblioteca
+`GraphQuery::get_hub_nodes` usa o `Snapshot`, mas a ferramenta MCP `get_hub_nodes` não o chama.
 
 ## Divergências e causas
 
