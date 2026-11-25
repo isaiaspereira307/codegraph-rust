@@ -166,6 +166,11 @@ impl<'a> TypeScriptCollector<'a> {
         } else if kind == "import_statement" {
             self.import(&node);
         } else if kind == "call_expression" {
+            if let Some((specifier, import_type)) = self.module_import(&node) {
+                self.module_import_edge(&node, specifier, import_type);
+                self.walk_children(node);
+                return;
+            }
             if let Some(runner) = self.test_runner(&node) {
                 // The callback's calls belong to the test, not to a CALLS edge to `it`.
                 self.functions.push(runner);
@@ -280,6 +285,43 @@ impl<'a> TypeScriptCollector<'a> {
             span: Some(self.span_for(node)),
         });
         self.nodes.push(code);
+    }
+
+    /// `require('./x')` and `import('./x')` are module imports, not calls to `require`.
+    fn module_import(&self, node: &Node) -> Option<(String, &'static str)> {
+        if self.dead > 0 {
+            return None;
+        }
+        let callee = node.child_by_field_name("function")?;
+        let import_type = match callee.kind() {
+            "import" => "dynamic_import",
+            "identifier" if self.node_text(&callee) == "require" => "require",
+            _ => return None,
+        };
+        let arguments = node.child_by_field_name("arguments")?;
+        let mut cursor = arguments.walk();
+        let argument = arguments
+            .children(&mut cursor)
+            .find(|a| matches!(a.kind(), "string" | "template_string"))?;
+        let specifier = self
+            .node_text(&argument)
+            .trim_matches(|c| matches!(c, '\'' | '"' | '`'))
+            .to_string();
+        (!specifier.is_empty()).then_some((specifier, import_type))
+    }
+
+    fn module_import_edge(&mut self, node: &Node, specifier: String, import_type: &str) {
+        self.edges.push(EdgeRelationship {
+            from: NodeId::nil(),
+            to: specifier,
+            edge_type: EdgeType::Imports,
+            metadata: HashMap::from([
+                ("import_type".to_string(), import_type.to_string()),
+                ("source_file".to_string(), self.file_path.to_string()),
+                (crg_shape::FILE_SCOPE_ATTR.to_string(), "true".to_string()),
+            ]),
+            span: Some(self.span_for(node)),
+        });
     }
 
     fn call(&mut self, node: &Node) {
