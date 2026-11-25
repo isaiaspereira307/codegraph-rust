@@ -264,10 +264,11 @@ impl<'a> CppCollector<'a> {
                 if let Some(decl) = node.child_by_field_name("declarator") {
                     let name = self.extract_function_name(&decl);
                     if !name.is_empty() {
+                        let identity = self.function_identity(node, &name);
                         let loc = self.location(&node);
                         let content_text = self.node_text(&node);
                         let mut code = CodeNode::new(
-                            name.clone(),
+                            identity,
                             Some(NodeType::Function),
                             Some(Language::Cpp),
                             loc,
@@ -334,6 +335,38 @@ impl<'a> CppCollector<'a> {
                 }
             }
 
+            // A method declared (not defined) in a class body is still a CRG function node.
+            "field_declaration" => {
+                let Some(decl) = node.child_by_field_name("declarator") else {
+                    return;
+                };
+                let Some(function) = Self::find_function_declarator(decl) else {
+                    return;
+                };
+                let name = self.extract_function_name(&decl);
+                if name.is_empty() {
+                    return;
+                }
+                let identity = self.function_identity_from(function, &name);
+                let mut code = CodeNode::new(
+                    identity,
+                    Some(NodeType::Function),
+                    Some(Language::Cpp),
+                    self.location(&node),
+                )
+                .with_content(self.node_text(&node));
+                code.span = Some(self.span_for(&node));
+                code.metadata
+                    .attributes
+                    .insert("kind".into(), "function".into());
+                if let Some(ref current_class) = ctx.current_class {
+                    code.metadata
+                        .attributes
+                        .insert("parent_class".into(), current_class.clone());
+                }
+                self.nodes.push(code);
+            }
+
             // C++ Template declaration
             "template_declaration" => {
                 let content_text = self.node_text(&node);
@@ -360,10 +393,20 @@ impl<'a> CppCollector<'a> {
                 if let Some(current_fn) = self.current_function_id {
                     if let Some(func) = node.child_by_field_name("function") {
                         let callee_name = self.node_text(&func);
-                        if !callee_name.is_empty() {
+                        // CRG keeps C++ call targets bare: `h.twice(2)` names `twice`.
+                        let bare = callee_name
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(&callee_name)
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(&callee_name)
+                            .trim()
+                            .to_string();
+                        if !bare.is_empty() {
                             let edge = EdgeRelationship {
                                 from: current_fn,
-                                to: callee_name,
+                                to: bare,
                                 edge_type: EdgeType::Calls,
                                 metadata: {
                                     let mut meta = HashMap::new();
@@ -391,6 +434,114 @@ impl<'a> CppCollector<'a> {
             }
             cursor.goto_parent();
         }
+    }
+
+    /// CRG identifies C++ functions by `name(type,type)[ qualifiers]`, with `::` scopes
+    /// written as `.` (code-review-graph `_cpp_function_identity`).
+    fn function_identity(&self, node: Node, name: &str) -> String {
+        let Some(declarator) = node.child_by_field_name("declarator") else {
+            return name.to_string();
+        };
+        let Some(function) = Self::find_function_declarator(declarator) else {
+            return name.to_string();
+        };
+        self.function_identity_from(function, name)
+    }
+
+    fn function_identity_from(&self, function: Node, name: &str) -> String {
+        let callable = name.replace("::", ".");
+        let Some(parameters) = function.child_by_field_name("parameters") else {
+            return callable;
+        };
+        let mut types: Vec<String> = parameters
+            .named_children(&mut parameters.walk())
+            .filter(|p| p.kind() == "parameter_declaration")
+            .map(|p| self.parameter_type(&p))
+            .filter(|p| !p.is_empty())
+            .collect();
+        if types == ["void"] {
+            types.clear();
+        }
+        let qualifiers: Vec<String> = function
+            .children(&mut function.walk())
+            .filter(|c| matches!(c.kind(), "type_qualifier" | "ref_qualifier"))
+            .map(|c| self.node_text(&c))
+            .collect();
+        let suffix = if qualifiers.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", qualifiers.join(" "))
+        };
+        format!("{callable}({}){suffix}", types.join(","))
+    }
+
+    /// Type-only form of one parameter: its declared name removed and whitespace around
+    /// punctuation collapsed, as CRG `_cpp_parameter_type` does.
+    fn parameter_type(&self, parameter: &Node) -> String {
+        let mut end = parameter.end_byte();
+        if let Some(declarator) = parameter.child_by_field_name("declarator")
+            && let Some(name) = Self::declarator_name(declarator)
+        {
+            end = name.start_byte();
+        }
+        if let Some(index) = self.content[parameter.start_byte()..end].find('=') {
+            end = parameter.start_byte() + index;
+        }
+        let raw = self.content[parameter.start_byte()..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut normalized = String::new();
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            if " ,<>,*&()[]".contains(c) {
+                if c == ',' || " <>,*&()[]".contains(c) {
+                    while normalized.ends_with(' ') {
+                        normalized.pop();
+                    }
+                }
+                if c == ',' {
+                    normalized.push(',');
+                } else if c == ' ' {
+                    if normalized.ends_with(',') || normalized.is_empty() {
+                        continue;
+                    }
+                    normalized.push(' ');
+                } else {
+                    normalized.push(c);
+                }
+                while chars.peek() == Some(&' ') {
+                    chars.next();
+                }
+            } else {
+                normalized.push(c);
+            }
+        }
+        normalized
+    }
+
+    fn find_function_declarator(node: Node) -> Option<Node> {
+        if matches!(
+            node.kind(),
+            "function_declarator" | "abstract_function_declarator"
+        ) {
+            return Some(node);
+        }
+        let inner = node.child_by_field_name("declarator")?;
+        Self::find_function_declarator(inner)
+    }
+
+    fn declarator_name(node: Node) -> Option<Node> {
+        if matches!(node.kind(), "identifier" | "field_identifier") {
+            return Some(node);
+        }
+        if let Some(inner) = node.child_by_field_name("declarator")
+            && let Some(found) = Self::declarator_name(inner)
+        {
+            return Some(found);
+        }
+        node.named_children(&mut node.walk())
+            .find(|child| matches!(child.kind(), "identifier" | "field_identifier"))
     }
 
     fn extract_function_name(&self, declarator: &Node) -> String {
@@ -442,5 +593,72 @@ impl<'a> CppCollector<'a> {
             end_line: Some((node.end_position().row + 1) as u32),
             end_column: Some((node.end_position().column + 1) as u32),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ExtractionPolicy;
+    use crate::languages::extract_for_language_at;
+    use tree_sitter::Parser;
+
+    fn extract(source: &str, path: &str) -> ExtractionResult {
+        let mut parser = Parser::new();
+        parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        extract_for_language_at(
+            &Language::Cpp,
+            &tree,
+            source,
+            path,
+            path,
+            ExtractionPolicy::default(),
+        )
+        .unwrap()
+    }
+
+    fn qualified(result: &ExtractionResult, id: &NodeId) -> String {
+        result
+            .nodes
+            .iter()
+            .find(|n| &n.id == id)
+            .and_then(|n| n.metadata.attributes.get("qualified_name"))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn cpp_function_names_carry_the_crg_signature() {
+        let result = extract(
+            "class Helper { public: int twice(int value); };\n",
+            "include/helper.h",
+        );
+        assert!(result.nodes.iter().any(|n| n
+            .metadata
+            .attributes
+            .get("qualified_name")
+            .is_some_and(|q| q == "include/helper.h::Helper.twice(int)")));
+    }
+
+    #[test]
+    fn cpp_calls_are_bare_and_attributed_to_the_enclosing_function() {
+        let result = extract(
+            "#include \"../include/helper.h\"\nint run() { Helper h; return h.twice(2); }\n",
+            "src/app.cpp",
+        );
+        let calls: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .map(|e| (qualified(&result, &e.from), e.to.clone()))
+            .collect();
+        assert_eq!(
+            calls,
+            [("src/app.cpp::run()".to_string(), "twice".to_string())]
+        );
+        assert!(result.edges.iter().any(|e| {
+            e.edge_type == EdgeType::Imports && e.to == "../include/helper.h"
+        }));
     }
 }
