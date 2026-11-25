@@ -194,3 +194,58 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md dist/*
+
+  homebrew:
+    name: Update Homebrew tap
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check tap token
+        id: token
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HOMEBREW_TAP_TOKEN secret is not set; skipping Homebrew formula update"
+          fi
+
+      - name: Render formula
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release download "$TAG" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
+          bash scripts/release/render-formula.sh "${TAG#v}" "$RUNNER_TEMP/SHA256SUMS" > "$RUNNER_TEMP/codegraph.rb"
+          cat "$RUNNER_TEMP/codegraph.rb"
+
+      - name: Push formula to tap
+        if: steps.token.outputs.enabled == 'true'
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          git_auth=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth")
+          git "${git_auth[@]}" clone --depth 1 https://github.com/isaiaspereira307/homebrew-codegraph.git "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          mkdir -p Formula
+          cp "$RUNNER_TEMP/codegraph.rb" Formula/codegraph.rb
+          if [ -z "$(git status --porcelain Formula/codegraph.rb)" ]; then
+            echo "formula unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/codegraph.rb
+          git commit -m "codegraph ${TAG#v}"
+          git "${git_auth[@]}" push origin HEAD
