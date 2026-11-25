@@ -16,6 +16,7 @@
 # If you don't have top-level 'debug' or 'release' directories, you can remove these.
 debug/
 release/
+!scripts/release/
 
 # RocksDB data directories
 /data/
