@@ -139,6 +139,18 @@ impl<'a> TypeScriptCollector<'a> {
                 };
                 return self.function(name, extent, node);
             }
+        } else if kind == "assignment_expression" {
+            let value = node.child_by_field_name("right");
+            if let (Some(left), Some(value)) = (node.child_by_field_name("left"), value)
+                && left.kind() == "member_expression"
+                && FUNCTION_VALUE_KINDS.contains(&value.kind())
+            {
+                let extent = node
+                    .parent()
+                    .filter(|parent| parent.kind() == "expression_statement")
+                    .unwrap_or(node);
+                return self.function(self.node_text(&left), extent, value);
+            }
         } else if CLASS_KINDS.contains(&kind) {
             if let Some(name) = self.field_text(&node, "name") {
                 let node_type = if kind == "interface_declaration" {
