@@ -64,19 +64,10 @@ pub unsafe fn run(command: &ToolCommand, verbose: bool, config_path: Option<&Pat
         } => (name, params, target),
     };
     let result = (|| {
-        if GraphToolExecutor::get_tool_names()
-            .iter()
-            .all(|known| known != name)
-        {
-            bail!("Unknown tool: {name}; see `codegraph tool list`");
-        }
+        ensure_known_tool(name)?;
         let params = parse_params(params)?;
         // SAFETY: The caller guarantees this runs before any worker threads exist.
-        unsafe { prepare_environment(target, config_path) }?;
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(execute(name, params, target, verbose))
+        unsafe { run_prepared(name, params, target, verbose, config_path) }
     })();
     let mut stdout = io::stdout().lock();
     match result {
@@ -93,6 +84,48 @@ pub unsafe fn run(command: &ToolCommand, verbose: bool, config_path: Option<&Pat
             Err(error).with_context(|| format!("{name} failed"))
         }
     }
+}
+
+/// Runs one graph tool and returns its JSON result without printing, so other commands
+/// (e.g. `pr-report`) share the exact setup, timeout and executor path of `tool run`.
+///
+/// # Safety
+/// Same contract as [`run`]: call from the single-threaded process entry point.
+pub unsafe fn run_to_value(
+    name: &str,
+    params: Value,
+    target: &ToolTarget,
+    verbose: bool,
+    config_path: Option<&Path>,
+) -> Result<Value> {
+    ensure_known_tool(name)?;
+    // SAFETY: forwarded from the caller's guarantee.
+    unsafe { run_prepared(name, params, target, verbose, config_path) }
+}
+
+fn ensure_known_tool(name: &str) -> Result<()> {
+    if GraphToolExecutor::get_tool_names()
+        .iter()
+        .all(|known| known != name)
+    {
+        bail!("Unknown tool: {name}; see `codegraph tool list`");
+    }
+    Ok(())
+}
+
+unsafe fn run_prepared(
+    name: &str,
+    params: Value,
+    target: &ToolTarget,
+    verbose: bool,
+    config_path: Option<&Path>,
+) -> Result<Value> {
+    // SAFETY: forwarded from the caller's guarantee.
+    unsafe { prepare_environment(target, config_path) }?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(execute(name, params, target, verbose))
 }
 
 async fn execute(name: &str, params: Value, target: &ToolTarget, verbose: bool) -> Result<Value> {

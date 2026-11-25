@@ -174,6 +174,25 @@ enum Commands {
         target: tool_cli::ToolTarget,
     },
 
+    #[command(
+        about = "Write a markdown PR risk report from git changes (exit 0 ok, 1 analysis failed, 3 risk gate hit)"
+    )]
+    PrReport {
+        #[arg(long, help = "Git ref to diff against")]
+        base: String,
+        #[arg(
+            long,
+            value_enum,
+            default_value = "none",
+            help = "Exit 3 (after writing the report) when risk reaches this level"
+        )]
+        fail_on_risk: codegraph_mcp_server::pr_report::FailOn,
+        #[arg(long, help = "Write the report here instead of stdout")]
+        output: Option<PathBuf>,
+        #[command(flatten)]
+        target: tool_cli::ToolTarget,
+    },
+
     #[command(about = "List transitive dependents of nodes or files")]
     Impact {
         #[arg(long, value_delimiter = ',', help = "Node ids, comma separated")]
@@ -610,6 +629,26 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    if let Commands::PrReport {
+        ref base,
+        fail_on_risk,
+        ref output,
+        ref target,
+    } = cli.command
+    {
+        // SAFETY: No async runtime or application threads have been started yet.
+        let code = unsafe {
+            codegraph_mcp_server::pr_report::run(
+                base,
+                fail_on_risk,
+                output.as_deref(),
+                target,
+                cli.verbose,
+                cli.config.as_deref(),
+            )
+        };
+        std::process::exit(code);
+    }
     if let Some(action) = quick_tool_call(&cli.command) {
         // SAFETY: No async runtime or application threads have been started yet.
         return unsafe { tool_cli::run(&action, cli.verbose, cli.config.as_deref()) };
@@ -755,6 +794,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         | Commands::Uninstall { .. }
         | Commands::Doctor { .. }
         | Commands::DetectChanges { .. }
+        | Commands::PrReport { .. }
         | Commands::GraphStatus { .. }
         | Commands::Impact { .. }
         | Commands::Query { .. }

@@ -9,6 +9,7 @@ pub mod http_config;
 pub mod http_server;
 pub mod mcp_config;
 pub mod official_server;
+pub mod pr_report;
 pub mod project_init;
 pub mod prompts;
 pub mod skills;

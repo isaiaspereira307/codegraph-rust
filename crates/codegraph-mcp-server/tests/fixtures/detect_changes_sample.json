@@ -1,0 +1,101 @@
+{
+    "parameters": {
+        "base_ref": "HEAD",
+        "include_churn": true
+    },
+    "result": {
+        "base_ref": "HEAD",
+        "changed_files": [
+            {
+                "lines": [
+                    [
+                        2,
+                        2
+                    ],
+                    [
+                        8,
+                        8
+                    ],
+                    [
+                        13,
+                        13
+                    ]
+                ],
+                "path": "lib.py"
+            }
+        ],
+        "changed_nodes": [
+            {
+                "id": "c842d901-1dcd-ca54-8f95-35940421cea9",
+                "kind": "Function",
+                "location": {
+                    "end_line": 9,
+                    "file_path": "/work/fixture-repo/lib.py",
+                    "start_line": 5
+                },
+                "name": "compute",
+                "risk_score": 0.815
+            },
+            {
+                "id": "1f1cc465-43d9-61ca-2b8e-a0e46a6e2225",
+                "kind": "Function",
+                "location": {
+                    "end_line": 2,
+                    "file_path": "/work/fixture-repo/lib.py",
+                    "start_line": 1
+                },
+                "name": "helper",
+                "risk_score": 0.865
+            },
+            {
+                "id": "a035c5a7-80d6-a686-67ab-13b2ffa08ac5",
+                "kind": "Function",
+                "location": {
+                    "end_line": 13,
+                    "file_path": "/work/fixture-repo/lib.py",
+                    "start_line": 12
+                },
+                "name": "untested_entry",
+                "risk_score": 0.715
+            }
+        ],
+        "churn_status": "ok",
+        "review_priorities": [
+            {
+                "id": "1f1cc465-43d9-61ca-2b8e-a0e46a6e2225",
+                "kind": "Function",
+                "location": {
+                    "end_line": 2,
+                    "file_path": "/work/fixture-repo/lib.py",
+                    "start_line": 1
+                },
+                "name": "helper",
+                "risk_score": 0.865
+            },
+            {
+                "id": "c842d901-1dcd-ca54-8f95-35940421cea9",
+                "kind": "Function",
+                "location": {
+                    "end_line": 9,
+                    "file_path": "/work/fixture-repo/lib.py",
+                    "start_line": 5
+                },
+                "name": "compute",
+                "risk_score": 0.815
+            },
+            {
+                "id": "a035c5a7-80d6-a686-67ab-13b2ffa08ac5",
+                "kind": "Function",
+                "location": {
+                    "end_line": 13,
+                    "file_path": "/work/fixture-repo/lib.py",
+                    "start_line": 12
+                },
+                "name": "untested_entry",
+                "risk_score": 0.715
+            }
+        ],
+        "risk_score": 0.865
+    },
+    "tool": "detect_changes"
+}
