@@ -27,12 +27,30 @@ pub(crate) fn is_heritage(kind: &str) -> bool {
     kind == "INHERITS" || kind == "IMPLEMENTS"
 }
 
-/// The bare name a heritage text names: its last segment split on `.` and `::`, after
-/// dropping type arguments (Java writes `Shape<Integer>` as the heritage text).
+/// The bare name a heritage text names: its last segment split on `.` and `::`, ignoring
+/// balanced type-argument groups anywhere (Java writes `Shape<Integer>` and
+/// `Outer<T>.Inner` as the heritage text), trimmed of surrounding whitespace.
 pub(crate) fn last_segment(text: &str) -> &str {
-    let text = text.split('<').next().unwrap_or(text);
-    let tail = text.rsplit("::").next().unwrap_or(text);
-    tail.rsplit('.').next().unwrap_or(tail)
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' => depth += 1,
+            b'>' => depth = depth.saturating_sub(1),
+            b'.' if depth == 0 => start = i + 1,
+            b':' if depth == 0 && bytes.get(i + 1) == Some(&b':') => {
+                start = i + 2;
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    // Separators are ASCII, so `start` is a char boundary.
+    let segment = &text[start..];
+    segment.split('<').next().unwrap_or(segment).trim()
 }
 
 /// Languages that may share a bare base name: JS/TS/TSX and C/C++; others only themselves.
@@ -158,6 +176,22 @@ mod tests {
         assert_eq!(last_segment("java.util.Map<K, V>"), "Map");
         assert_eq!(last_segment("a.Base<x.Y<z.W>>"), "Base");
         assert_eq!(last_segment("<T>"), "");
+    }
+
+    #[test]
+    fn last_segment_strips_type_argument_groups_anywhere() {
+        // A nested Java type: the base is `Inner`, never the generic outer type.
+        assert_eq!(last_segment("Outer<T>.Inner"), "Inner");
+        assert_eq!(last_segment("a.Outer<K, V>.Inner<X>"), "Inner");
+        assert_eq!(last_segment("Foo<A, B<C>>"), "Foo");
+        assert_eq!(last_segment("a.b.Base<x.Y<z.W>>"), "Base");
+        assert_eq!(last_segment("Foo::<T>"), "");
+    }
+
+    #[test]
+    fn last_segment_trims_space_before_type_arguments() {
+        assert_eq!(last_segment("Shape <Integer>"), "Shape");
+        assert_eq!(last_segment(" a.Base "), "Base");
     }
 
     #[test]

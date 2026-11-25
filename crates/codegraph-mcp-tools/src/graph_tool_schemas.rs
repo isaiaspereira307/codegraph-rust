@@ -410,7 +410,9 @@ impl GraphToolSchemas {
                    node), callees_of (CALLS out of it), imports_of (files it imports), \
                    importers_of (files importing it), tests_for (tests that cover it), inheritors_of (subclasses and implementers). Give \
                    node_id, or name to pick the best match. Returns the target, matches sorted \
-                   by name, the total, and how many text targets were ignored as unresolved."
+                   by name, the total, and `unresolved`: edges left out because their other \
+                   end is text naming no node, or, for inheritors_of, heritage edges ambiguous \
+                   between this node and other same-named types (external bases not counted)."
                 .to_string(),
             parameters: json!({
                 "type": "object",

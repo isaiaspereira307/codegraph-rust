@@ -74,7 +74,10 @@ pub struct QueryGraphResult {
     pub results: Vec<NodeReference>,
     /// Matches before the limit was applied.
     pub total: usize,
-    /// Edges of this pattern whose other end is text that names no node (ignored above).
+    /// Edges of this pattern left out of `results`. For `callers_of`, `callees_of`,
+    /// `imports_of`, `importers_of` and `tests_for`: edges whose other end is text that names
+    /// no node. For `inheritors_of`: heritage edges whose text was ambiguous between several
+    /// candidates including this node (a base with no candidate node is not counted).
     pub unresolved: usize,
 }
 

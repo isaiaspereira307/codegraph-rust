@@ -418,7 +418,7 @@ impl CodeGraphMCPServer {
     }
 
     #[tool(
-        description = "Direct relationships of one node: callers_of, callees_of, imports_of, importers_of, tests_for or inheritors_of. Give node_id, or name for the best match. Returns the target, matches and the count of unresolved text targets."
+        description = "Direct relationships of one node: callers_of, callees_of, imports_of, importers_of, tests_for or inheritors_of. Give node_id, or name for the best match. Returns the target, matches and `unresolved`: edges whose other end names no node, or, for inheritors_of, heritage edges ambiguous between this node and other same-named types."
     )]
     async fn query_graph(
         &self,
