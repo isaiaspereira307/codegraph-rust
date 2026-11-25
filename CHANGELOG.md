@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Distribution
+
+- Release workflow (`.github/workflows/release.yml`): on a `v*` tag it builds native binaries for
+  x86_64/aarch64 Linux, x86_64/aarch64 macOS and x86_64 Windows, checks that `codegraph --version`
+  matches the tag, and publishes `codegraph-<version>-<target>` archives with `.sha256` files and
+  `SHA256SUMS`. `workflow_dispatch` runs a build-only dry run.
+- `install.sh`: curl-pipe installer for the prebuilt binary (Linux/macOS), checksum-verified,
+  configurable through `CODEGRAPH_VERSION`, `CODEGRAPH_INSTALL_DIR` and `CODEGRAPH_RELEASE_BASE_URL`.
+- Homebrew formula rendered by the release workflow and pushed to the
+  `isaiaspereira307/homebrew-codegraph` tap (skipped for prerelease tags or without
+  `HOMEBREW_TAP_TOKEN`).
+- `codegraph pr-report --base <ref> [--fail-on-risk none|high|critical] [--output <path>]`: markdown
+  PR report (risk header, review priorities, changed files and functions) with a risk gate
+  (exit 3).
+- Composite GitHub Action (`action.yml`) that posts a sticky risk-scored PR comment; see
+  `docs/GITHUB_ACTION.md`. Dogfood workflow `.github/workflows/pr-review.yml`, enabled by the
+  repository variable `CODEGRAPH_DOGFOOD=true`.
+
+### Removed - Legacy workflows and guides
+
+- CI workflows that referenced removed crates and the legacy installation and usage guides
+  (`docs/INSTALLATION_GUIDE.md`, `docs/USAGE_GUIDE.md`); the README now covers installation.
+
 ### Changed - Project agent guidance
 
 - `codegraph init` now explicitly describes CodeGraph as a CLI tool available

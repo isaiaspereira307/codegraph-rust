@@ -20,7 +20,7 @@ can show help/instructions and install hooks; executing an agentic command fails
 with an actionable feature error, and the hook emitter supplies no context.
 
 Use the same SurrealDB schema, indexed project, embedding provider, LLM settings,
-and `CODEGRAPH_AGENT_ARCHITECTURE` as for MCP. See [installation](INSTALLATION_GUIDE.md)
+and `CODEGRAPH_AGENT_ARCHITECTURE` as for MCP. See the [README](../README.md)
 and [provider configuration](AI_PROVIDERS.md). No MCP server or transport is started
 by an agentic CLI call. Each call runs a fresh agent workflow and may incur the
 configured provider's costs.

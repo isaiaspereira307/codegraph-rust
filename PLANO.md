@@ -37,7 +37,7 @@ Pendente para fechar a fase:
 
 Sobras conhecidas (config/embedding e `graph_vector.rs` removidos na Fase 1, Task 7):
 
-- `README.md`, `docs/` e banners dos `install-codegraph*.sh` ainda descrevem o produto antigo.
+- Resolvido depois: `README.md` e `install-codegraph.sh` foram reescritos (Fase 5) e os guias de instalação/uso foram removidos (Distribuição). Ainda descrevem o produto antigo só os guias legados listados em `docs/README.md`.
 
 ### Notas de ambiente (máquina local, WSL)
 
@@ -106,7 +106,7 @@ sobre um repositório fixture.
 
 ---
 
-## Fase 2 — Paridade do parser
+## Fase 2 — Paridade do parser ✅
 
 Risco principal do projeto: o `parser.py` do CRG tem ~25k linhas de regras por linguagem,
 mais resolvers específicos (C#, AOP, eventos, HCL, aliases npm, workspaces, jedi), contra
@@ -480,9 +480,9 @@ Fica para depois:
   gemini-cli, qwen, kiro, copilot…), skills para o Codex e instalação global.
 - Embeddings opcionais (feature desligada por padrão) via ONNX local, se a busca FTS5 se
   mostrar insuficiente.
-- Distribuição: release com binários (Linux/macOS/Windows), Homebrew, GitHub Action
-  equivalente ao `action.yml` do CRG.
-- ✅ `README.md` reescrito e `install-codegraph.sh` simplificado (as 3 variantes saíram); os guias legados de `docs/` ganharam aviso e seguem pendentes de reescrita. Falta renomear o binário/crates e definir o nome do projeto.
+- ✅ Distribuição: release com binários (Linux/macOS/Windows), Homebrew, GitHub Action
+  equivalente ao `action.yml` do CRG (ver Próximos passos, item 3; falta cortar o primeiro release).
+- ✅ `README.md` reescrito e `install-codegraph.sh` simplificado (as 3 variantes saíram); os guias legados de `docs/` ganharam aviso e seguem pendentes de reescrita. O renomear do binário/crates foi cancelado (Decisão 2).
 
 ---
 
@@ -545,8 +545,17 @@ Em ordem; cada item ganha plano próprio em `docs/superpowers/plans/`:
    - Go: só embedding (`INHERITS` texto); satisfação estrutural de interface não existe.
    - Qualificador pontuado além do último segmento (`a.Shared` vs `b.Shared`) não desempata.
    - `OVERRIDES` não é gerado nem seguido.
-3. **Distribuição**: release com binários (Linux/macOS/Windows), Homebrew, GitHub Action,
-   README final.
+3. ✅ **Distribuição** (plano `docs/superpowers/plans/2026-11-25-distribuicao.md`): release com
+   binários (Linux/macOS/Windows), Homebrew, GitHub Action, README final. Entregue:
+   `.github/workflows/release.yml` (tag `v*`, 5 alvos, `.sha256` e `SHA256SUMS`, dry-run por
+   `workflow_dispatch`), `scripts/release/{package,render-formula}.sh`, `install.sh` (Linux/macOS,
+   com checksum), fórmula Homebrew publicada no tap por um job, `codegraph pr-report` (exit 0/1/3),
+   `action.yml` com comentário sticky, `docs/GITHUB_ACTION.md`, README/CONTRIBUTING/CHANGELOG
+   atualizados e workflows legados removidos. Falta: cortar o primeiro tag/release; criar o
+   repositório do tap e o secret `HOMEBREW_TAP_TOKEN`; os workflows YAML nunca rodaram num runner
+   e `ruby -c`/`brew` nunca foram executados; o relatório v1 não tem seções de impacto nem de
+   lacunas de teste porque o `detect_changes` real não retorna esses dados; o Windows não tem
+   script de instalação (só o zip).
 
 Adiado ("por ora não"): linguagens restantes da Fase 2 (item 6), demais itens da Fase 5
 (refactor, multi-repo, wiki, visualização, plataformas extras, embeddings) e o plano de
@@ -556,7 +565,8 @@ paridade de risco (TESTED_BY por nome solto, migrations, fallback de flow_count)
 
 1. ~~Fechar a Fase 0~~ ✅.
 2. ~~Fase 1 (storage)~~ ✅.
-3. Harness da Fase 2 antes de qualquer ferramenta nova, para medir regressões desde o início.
-4. Fase 2.5 (IDs canônicos, `line` das arestas, convivência com o CRG v9).
-5. Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code.
+3. ~~Harness da Fase 2 antes de qualquer ferramenta nova~~ ✅.
+4. ~~Fase 2.5 (IDs canônicos, `line` das arestas, convivência com o CRG v9)~~ ✅.
+5. ~~Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code~~ ✅.
 6. ~~Fase 4 (análise de grafo)~~ ✅; Fase 5 conforme o uso real pedir.
+7. ~~Distribuição (release, Homebrew, Action)~~ ✅ entregue; resta o primeiro release.

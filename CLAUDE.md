@@ -42,7 +42,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings   # what CI
 - `docs/TESTING.md` uses feature names (`onnx`, `ollama`, `cloud-jina`, ...) and a `test_mcp_tools.py` that don't match the current tree.
 - The feature flags are on `codegraph-mcp-server`: `daemon` (default), `server-http`, `full`.
 - The indexer still carries the always-off inference stages (`policy.rs`, `embeddings`/`inference_*` stats fields, `CODEGRAPH_EMBEDDING_POLICY`). Old `[embedding]`/`[rerank]` TOML sections are ignored; from `[llm]` only `context_window` is read.
-- The guides listed under "Legacy" in `docs/README.md` (installation, usage, agentic CLI, AI providers, prompt tiers, testing) still describe the removed agentic tools and embedding providers; the root `README.md` and `install-codegraph.sh` are current.
+- The guides listed under "Legacy" in `docs/README.md` (clean install, agentic CLI, AI providers, prompt tiers, testing) still describe the removed agentic tools and embedding providers. The installation and usage guides were deleted; the root `README.md`, `docs/GITHUB_ACTION.md` and `install-codegraph.sh` are current.
 
 ### Tests that need external services
 
@@ -69,6 +69,10 @@ Storage is one SQLite file per repository at `<project>/.code-review-graph/graph
 Config resolution (`crates/codegraph-core/src/config_manager.rs`): `./.codegraph.toml`, then `~/.codegraph/config.toml`, overridden by `.env` (cwd, then `~/.codegraph.env`) and `CODEGRAPH_*` env vars. See `.env.example` and `config/example.toml`. The loader ignores unknown TOML keys silently; `[performance]` and `[logging]` are parsed but have little effect. `ConfigManager::agent_context_window()` (`CODEGRAPH_CONTEXT_WINDOW`, then `[llm] context_window`) sizes graph tool results.
 
 Project init runs before application configuration or the async runtime. `project_init.rs` offers Claude/Codex/both/none, reuses existing CodeGraph hooks, validates both guide files and selected settings, then merges owned instruction blocks. `agent_hooks.rs` preserves unrelated project settings and reuses Codex inline TOML hooks without rewriting TOML. `--no-index` stops after setup; otherwise init loads the selected project's `.env` and configuration and uses the normal index command. Explicit `--config` paths stay relative to the invoking directory. This is separate from global `codegraph config init`; no user-level hooks are created. Test with `cargo test -p codegraph-mcp-server --lib` and `cargo test -p codegraph-mcp-server --test project_init_integration --test tool_cli_integration`.
+
+### Distribution
+
+Releases are built by `.github/workflows/release.yml` (tag `v*`, or `workflow_dispatch` as a dry run) for five targets and published with `.sha256` files and `SHA256SUMS`; the tag must equal `codegraph --version`. `scripts/release/` packages assets and renders the Homebrew formula (pushed to the tap by the `homebrew` job). `install.sh` is the checksum-verified prebuilt installer (Linux/macOS), distinct from the source-install `install-codegraph.sh`. `action.yml` is a composite Action that runs `codegraph pr-report` (exit 0 ok, 1 analysis failed, 3 risk gate hit); see `docs/GITHUB_ACTION.md`. Shell tests: `scripts/**/test-*.sh`; workflow lint: `scripts/ci/check-workflows.sh`. Release steps: `CONTRIBUTING.md`.
 
 ## Architecture
 

@@ -4,7 +4,7 @@ Thanks for helping improve CodeGraph. This repo is a Rust workspace with multipl
 
 ## Quick start
 
-1. Install Rust (via `rustup`) and any platform prerequisites from `docs/INSTALLATION_GUIDE.md`.
+1. Install Rust (via `rustup`) and any platform prerequisites (the README has the install options).
 2. Build and run a fast hygiene pass:
 
 ```bash
@@ -90,6 +90,18 @@ If your change affects configuration, providers, or language support, update:
 - `docs/AI_PROVIDERS.md`
 - `docs/AGENT_PROMPT_TIERS.md`
 - `docs/SUPPORTED_LANGUAGES.md`
+
+## Cutting a release
+
+1. Bump `[workspace.package] version` in `Cargo.toml` (and refresh `Cargo.lock`), and move the
+   `Unreleased` entries in `CHANGELOG.md` under the new version.
+2. Dry run first: run the `Release` workflow through `workflow_dispatch` (leave `publish` off). It
+   builds the five targets without publishing.
+3. Tag `vX.Y.Z` matching the version exactly (the workflow fails if `codegraph --version` differs)
+   and push the tag. A tag containing `-` is treated as a prerelease and does not update Homebrew.
+4. Repository settings: secret `HOMEBREW_TAP_TOKEN` (write access to
+   `isaiaspereira307/homebrew-codegraph`; without it the Homebrew job is skipped) and, optionally,
+   the variable `CODEGRAPH_DOGFOOD=true` to run the PR review Action on this repository.
 
 ## PR checklist
 

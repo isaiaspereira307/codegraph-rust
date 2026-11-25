@@ -15,13 +15,67 @@ costs ~376 KB, `get_review_context` ~47 KB and `get_minimal_context` ~4 KB.
 
 ## Install
 
+Prebuilt binaries and the Homebrew tap only exist once the first release is published
+(no `v*` tag has been cut yet). Until then, build from source.
+
+**Installer script** (Linux and macOS; verifies the release checksum; after the first release):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/isaiaspereira307/codegraph-rust/main/install.sh | sh
+```
+
+It installs to `~/.local/bin`. Environment variables: `CODEGRAPH_VERSION` (for example `1.2.3`,
+default latest), `CODEGRAPH_INSTALL_DIR`, `CODEGRAPH_RELEASE_BASE_URL`. `bash install.sh --help`
+lists them.
+
+**Homebrew** (after the first release; the formula lives in the tap
+`isaiaspereira307/homebrew-codegraph`, which must exist and be populated by the release workflow):
+
+```bash
+brew install isaiaspereira307/codegraph/codegraph
+```
+
+**GitHub Releases** (after the first release): download `codegraph-<version>-<target>.tar.gz`
+(Linux and macOS, x86_64 and aarch64) or `codegraph-<version>-x86_64-pc-windows-msvc.zip`
+(Windows) from the [releases page](https://github.com/isaiaspereira307/codegraph-rust/releases),
+and check it against the matching `.sha256` file or `SHA256SUMS`. There is no installer script for
+Windows; unzip and put `codegraph.exe` on your `PATH`.
+
+**From source** (works today; needs a Rust toolchain, the binary does not link OpenSSL):
+
 ```bash
 git clone https://github.com/isaiaspereira307/codegraph-rust && cd codegraph-rust
 ./install-codegraph.sh
 # or: cargo install --path crates/codegraph-mcp-server --bin codegraph --all-features --force
 ```
 
-Requires a Rust toolchain. The binary does not link OpenSSL.
+## GitHub Action
+
+The repository ships a composite Action that posts a sticky, risk-scored review comment on pull
+requests. It installs the released binary, so it also needs the first release; until then use
+`@main`.
+
+```yaml
+name: PR Review
+on: pull_request
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: isaiaspereira307/codegraph-rust@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-risk: none   # or high / critical to fail the job
+```
+
+Inputs, fork-PR behaviour and limits: [docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md). The same
+report is available locally with `codegraph pr-report --base origin/main`.
 
 ## Quick start
 
@@ -130,8 +184,8 @@ cargo fmt --all
 ```
 
 See [CLAUDE.md](CLAUDE.md) for the architecture and [CONTRIBUTING.md](CONTRIBUTING.md) for what
-to change where. Some guides under `docs/` still describe the previous product and are being
-rewritten; [docs/README.md](docs/README.md) says which.
+to change where (including how to cut a release). Some guides under `docs/` still describe the
+previous product and are pending a rewrite; [docs/README.md](docs/README.md) says which.
 
 ## License
 

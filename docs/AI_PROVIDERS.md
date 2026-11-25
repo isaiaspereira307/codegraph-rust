@@ -24,7 +24,7 @@ If you use `.env`, it’s loaded automatically at startup (you do not need `dire
 
 ## Minimal setup checklist
 
-1. The project has been indexed (the embedded store needs no setup; a SurrealDB server needs the schema applied, see `docs/INSTALLATION_GUIDE.md`).
+1. The project has been indexed (the embedded store needs no setup; a SurrealDB server needs the schema applied manually).
 2. You have a `./.codegraph.toml` or `~/.codegraph/config.toml` with at least:
    - `[embedding] provider = ...`
    - an LLM for the agentic tools: `[llm] provider` and `model` in the config file, or `CODEGRAPH_LLM_PROVIDER` and `CODEGRAPH_LLM_MODEL` in the environment, plus the provider's API key in the environment
@@ -301,4 +301,4 @@ The context window decides the prompt tier, the tool-round budget and the size l
 
 To use the experimental graph schema, set `CODEGRAPH_USE_GRAPH_SCHEMA=true` before the project's embedded store is created (or delete `<project>/.codegraph/db` and re-index).
 
-With a SurrealDB server, also set `CODEGRAPH_GRAPH_DB_DATABASE=codegraph_experimental` (or your chosen database name) and apply `schema/codegraph_graph_experimental.surql` to that database yourself (see `docs/INSTALLATION_GUIDE.md`).
+With a SurrealDB server, also set `CODEGRAPH_GRAPH_DB_DATABASE=codegraph_experimental` (or your chosen database name) and apply `schema/codegraph_graph_experimental.surql` to that database yourself.
