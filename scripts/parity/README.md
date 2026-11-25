@@ -67,3 +67,20 @@ python3 scripts/parity/check_p1.py --print /tmp/opencode/parity-p1  # all measur
 `check_p1.py` exits 1 if any metric with a frozen floor falls (tolerance 0.0006 for the
 three-decimal Markdown tables), and ignores improvements. Timing in `timing.json` is recorded
 for information; the release/debug target is checked separately by `docs/parity/changes.md`.
+
+## LSP tier evaluation
+
+`docs/parity/lsp-tier.md` records the `fast` × `balanced` × `full` comparison. The harness does
+not take a tier flag; set it in the environment for the Rust side (CRG is unaffected):
+
+```bash
+CODEGRAPH_INDEX_TIER=balanced python3 scripts/parity/parity.py run <src> \
+  --work $TMPDIR/tier-balanced --crg-repo ../code-review-graph \
+  --codegraph target/debug/codegraph --md $TMPDIR/tier-balanced.md
+```
+
+`balanced`/`full` require `pyright-langserver`, `typescript-language-server`, `gopls`, `jdtls`
+and `rust-analyzer` on PATH; missing tools abort the index in preflight. To time only the Rust
+`build`, point `--codegraph` at a wrapper that forwards to the real binary and appends the
+elapsed time of `index` invocations to a log. The measured conclusion was to keep `fast` as the
+default tier.
