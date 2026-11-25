@@ -37,8 +37,16 @@ a variação do Leiden nos dois lados (o parser python não mudou). Piso: 0.403.
 | python-imports | 1.000 | 0.684 | 0.786 | 0.846 | 1.000 | 0.909 | n/a | n/a | 1.000 (2/2) | 0.821 |
 | rust-imports | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.737 | IMPLEMENTS 1.000 | n/a | 1.000 | 0.611 |
 | inheritance | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.816 | INHERITS 1.000 | 1.000 | 1.000 | 1.000 |
+| typescript-js | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | n/a | n/a | 1.000 | 1.000 |
+| go-package | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | n/a | TESTED_BY 1.000 | 1.000 | 1.000 |
+| java-cross-file | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | INHERITS 1.000 / INJECTS 1.000 | n/a | 1.000 | 1.000 |
+| java-framework | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | n/a | n/a | 1.000 | 1.000 |
 
-CONTAINS menor nas sondas vem da hierarquia de diretórios que só o Rust grava. Em
+`java-cross-file` também mede CONSUMES 1.000; `java-framework` mede DEPENDS_ON_CONFIG,
+HANDLES, PUBLISHES, TEMPORAL_STUB e TRIGGERS em 1.000. Detalhes e decisões de escopo em
+[`p1-task8-java-cross-file.md`](p1-task8-java-cross-file.md).
+
+CONTAINS menor nas sondas antigas vem da hierarquia de diretórios que só o Rust grava. Em
 `python-imports` faltam os caminhos de módulo pontuado (`q.lib.f()`) e o construtor de módulo
 (`mod.Thing().go()`); em `python` a única chamada que falta é a de receptor tipado por
 anotação (`process_request` → `AuthService.authenticate`).

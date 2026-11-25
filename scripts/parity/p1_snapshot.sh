@@ -34,7 +34,7 @@ python3 scripts/parity/parity.py corpus --work "$OUT/work/corpus" \
     --crg-repo "$CRG_REPO" --codegraph "$CG" --md "$OUT/corpus.md"
 
 echo "[3/7] probes"
-for probe in python python-imports rust-imports inheritance typescript-js go-package; do
+for probe in python python-imports rust-imports inheritance typescript-js go-package java-cross-file java-framework; do
     python3 scripts/parity/parity.py run "$ROOT/scripts/parity/probes/$probe" \
         --work "$OUT/work/$probe" --crg-repo "$CRG_REPO" --codegraph "$CG" \
         --json "$OUT/probes/$probe.json" --md "$OUT/probes/$probe.md"

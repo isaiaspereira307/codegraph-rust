@@ -510,7 +510,7 @@ impl SymbolCatalog {
     /// A Java call on a typed receiver binds only to that type's method in its defining file.
     /// Unknown or ambiguous receivers keep the bare method name, as at CRG bbdda4b.
     pub(crate) fn java_call_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
-        if edge.edge_type != EdgeType::Calls {
+        if edge.edge_type != EdgeType::Calls || edge.metadata.contains_key("spring_resolved") {
             return None;
         }
         let type_name = edge.metadata.get("receiver_type")?;
@@ -540,7 +540,7 @@ impl SymbolCatalog {
                 })
             })
             .collect();
-        (candidates.len() == 1).then_some(candidates[0])
+        (candidates.len() == 1).then(|| candidates[0])
     }
 
     /// The File node an `Imports` edge names, when its text maps to one indexed file.
