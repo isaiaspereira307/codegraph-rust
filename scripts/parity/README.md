@@ -50,3 +50,20 @@ python3 scripts/parity/parity.py compare crg.db <crg_root> rust.db <rust_root>
 # Unit tests
 python3 -m unittest discover -s scripts/parity -v
 ```
+
+## P1 baseline and regression check
+
+`p1_snapshot.sh` runs the corpus, four probes (python, python-imports, rust-imports,
+inheritance) and the three change scenarios in one go. It pins the CRG checkout at
+`bbdda4b` (a throwaway clone in `<out-dir>/work/crg-repo`), builds the Rust CLI and writes only
+to `<out-dir>`; the frozen limits live in `docs/parity/p1-baseline.md`.
+
+```bash
+bash scripts/parity/p1_snapshot.sh /tmp/opencode/parity-p1
+python3 scripts/parity/check_p1.py /tmp/opencode/parity-p1
+python3 scripts/parity/check_p1.py --print /tmp/opencode/parity-p1  # all measured floors/values
+```
+
+`check_p1.py` exits 1 if any metric with a frozen floor falls (tolerance 0.0006 for the
+three-decimal Markdown tables), and ignores improvements. Timing in `timing.json` is recorded
+for information; the release/debug target is checked separately by `docs/parity/changes.md`.

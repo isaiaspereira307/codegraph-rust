@@ -6,6 +6,8 @@ import sqlite3
 import subprocess
 import sys
 
+from risk import equal_risk_count
+
 crg_json, rust_dir, crg_dir, base, cg = sys.argv[1:6]
 # Resolve before run() switches cwd to rust_dir: a relative cg would be looked up from there,
 # and node paths in both DBs are absolute, so the roots must be too for strip().
@@ -90,7 +92,18 @@ rust_flows = [f["name"] for f in rfl["affected_flows"]]
 rows.append(show("affected flows (entry name)", crg_flows, rust_flows))
 
 crg_gaps = [strip(g.get("qualified_name", g.get("name", "")), crg_dir) for g in dc["test_gaps"]]
+crg_risks = {
+    strip(f["qualified_name"], crg_dir): float(f.get("risk_score", 0.0))
+    for f in dc["changed_functions"]
+}
+rust_risks = {
+    rqn(n): float(n.get("risk_score", 0.0))
+    for n in rdc["changed_nodes"]
+    if n["kind"] != "File"
+}
+risk_equal, risk_common = equal_risk_count(crg_risks, rust_risks)
 print(f"\nCRG test_gaps={dc['test_gaps_total']}  CRG risk={dc['risk_score']}  Rust risk={rdc['risk_score']}")
+print(f"RISK_EQUAL {risk_equal}/{risk_common}")
 for label, only_crg, only_rust in rows:
     if only_crg or only_rust:
         print(f"\n**{label}** only CRG ({len(only_crg)}): {only_crg[:12]}")

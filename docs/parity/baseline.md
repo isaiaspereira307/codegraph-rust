@@ -1,5 +1,8 @@
 # Parity baseline
 
+> Os limites congelados do P1 estão em [`p1-baseline.md`](p1-baseline.md), com detector
+> `scripts/parity/check_p1.py`. Este arquivo é o log histórico das fases 2–4.
+
 Linha de base depois do formato de grafo CRG (Fase 2, plano 1: commits d5f4e09..HEAD).
 Jaccard por linguagem; "antes" e o baseline do commit 55495fc (mantido abaixo em "Antes").
 

@@ -1,6 +1,7 @@
 # ABOUTME: Unit tests for the parity graph.db comparator, using synthetic SQLite databases.
 # ABOUTME: Run with: python3 -m unittest discover -s scripts/parity -v
 import json
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -9,6 +10,8 @@ from pathlib import Path
 
 import subprocess
 
+from changes.risk import equal_risk_count
+from check_p1 import collect_metrics, evaluate, parse_report
 from parity import (
     GIT, Graph, adjusted_rand_index, check_crg_commit, compare, load_graph, main, prepare_copies,
     render_markdown, run_corpus,
@@ -271,6 +274,110 @@ class ParityTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run_corpus(corpus, repo, self.d / "work", repo / "fixtures", "codegraph")
         self.assertFalse((self.d / "work").exists())
+
+
+class P1RegressionTest(unittest.TestCase):
+    """The P1 baseline check parses the raw harness output, not re-indexes anything."""
+
+    REPORT = """# Parity report
+
+### Nodes by language
+
+| language | crg | rust | both | jaccard | divergent |
+|---|---|---|---|---|---|
+| python | 31 | 31 | 31 | 1.000 | 0 |
+
+#### Edges by kind
+
+| kind | crg | rust | both | jaccard | resolved jaccard | line agreement |
+|---|---|---|---|---|---|---|
+| CALLS | 25 | 25 | 24 | 0.923 | 0.833 | 1.000 |
+| IMPORTS_FROM | 5 | 5 | 5 | 1.000 | 1.000 | 1.000 |
+
+### Flows by language
+
+| language | crg | rust | both | entry jaccard | members jaccard (mean/min) | criticality delta (mean/max) |
+|---|---|---|---|---|---|---|
+| python | 3 | 4 | 3 | 0.750 | 0.833 / 0.500 | 0.020 / 0.020 |
+
+### Communities
+
+| crg | rust | crg detector | rust detector | common nodes | ARI |
+|---|---|---|---|---|---|
+| 8 | 5 | leiden | leiden | 16 | 0.403 |
+"""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        (self.d / "corpus.md").write_text(
+            "## Language corpus: python\n\n" + "\n".join(
+                "#" + line if line.startswith("#") else line
+                for line in self.REPORT.splitlines()
+            ) + "\n"
+        )
+        (self.d / "probes").mkdir()
+        (self.d / "probes" / "rust-imports.md").write_text(self.REPORT)
+        (self.d / "inheritance").mkdir()
+        (self.d / "inheritance" / "compare.md").write_text(
+            "| language | set | compared | identical | Σ∩ | Σ∪ | Jaccard |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| py | inheritors_of | 7 | 4 | 1 | 4 | 0.250 |\n"
+        )
+        (self.d / "changes").mkdir()
+        (self.d / "changes" / "rust-head3").mkdir()
+        (self.d / "changes" / "rust-head3" / "compare.md").write_text(
+            "| set | CRG | Rust | both | Jaccard |\n"
+            "|---|---|---|---|---|\n"
+            "| changed files | 15 | 15 | 15 | 1.000 |\n"
+            "| impacted nodes (depth 2, ≤1000) | 186 | 192 | 184 | 0.948 |\n"
+            "\nRISK_EQUAL 31/35\n"
+        )
+        (self.d / "timing.json").write_text(json.dumps({"rust_update_s_debug": 70.0}))
+
+    def test_parse_report_reads_four_tables(self):
+        r = parse_report(self.REPORT)
+        self.assertEqual(r["nodes"]["python"]["jaccard"], 1.0)
+        self.assertEqual(r["edges"]["CALLS"]["jaccard"], 0.923)
+        self.assertEqual(r["edges"]["CALLS"]["resolved jaccard"], 0.833)
+        self.assertEqual(r["edges"]["CALLS"]["line agreement"], 1.0)
+        self.assertEqual(r["flows"]["python"]["entry jaccard"], 0.750)
+        self.assertEqual(r["flows"]["python"]["members jaccard (mean/min)"], "0.833 / 0.500")
+        self.assertEqual(r["ari"], 0.403)
+
+    def test_collect_metrics_from_snapshot_dir(self):
+        m = collect_metrics(self.d)
+        self.assertEqual(m["corpus.python.nodes"], 1.0)
+        self.assertEqual(m["corpus.python.CALLS"], 0.923)
+        self.assertEqual(m["probes.rust-imports.IMPORTS_FROM"], 1.0)
+        self.assertEqual(m["inheritance.py.inheritors_of"], 0.250)
+        self.assertEqual(m["changes.rust-head3.impacted"], 0.948)
+        self.assertEqual(m["changes.rust-head3.risk_equal"], 31 / 35)
+        self.assertEqual(m["timing.rust_update_s_debug"], 70.0)
+
+    def test_evaluate_fails_only_on_a_drop(self):
+        limits = {"corpus.python.CALLS": 0.923, "changes.rust-head3.impacted": 0.948}
+        failures = evaluate(
+            {"corpus.python.CALLS": 0.923, "changes.rust-head3.impacted": 1.0}, limits
+        )
+        self.assertEqual(failures, [])
+        failures = evaluate(
+            {"corpus.python.CALLS": 0.922, "changes.rust-head3.impacted": 0.947}, limits
+        )
+        self.assertEqual(len(failures), 2)
+        self.assertTrue(any("corpus.python.CALLS" in f for f in failures))
+
+
+class RiskEqualityTest(unittest.TestCase):
+    def test_counts_equal_scores_within_tolerance(self):
+        equal, common = equal_risk_count(
+            {"a": 0.5, "b": 0.2}, {"a": 0.5005, "b": 0.3}, 0.001
+        )
+        self.assertEqual((equal, common), (1, 2))
+
+    def test_missing_function_is_not_a_match(self):
+        equal, common = equal_risk_count({"a": 0.5, "b": 0.2}, {"a": 0.5}, 0.001)
+        self.assertEqual((equal, common), (1, 1))
 
 
 if __name__ == "__main__":
