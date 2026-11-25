@@ -6,7 +6,7 @@ use codegraph_parser::languages::python::{PythonModuleEvidence, python_module_ev
 use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Extensions code-review-graph appends to a relative TS/JS import, in order.
@@ -99,6 +99,20 @@ pub(crate) fn normalize(path: &str) -> String {
     }
 }
 
+/// Whether `path` is `dir` itself or one of its descendants.
+fn is_under(path: &str, dir: &str) -> bool {
+    dir.is_empty() || path == dir || path.starts_with(&format!("{}/", dir.trim_end_matches('/')))
+}
+
+/// The suffix of a Go import below a module path, if it is that module or one of its packages.
+fn go_suffix<'a>(text: &'a str, module: &str) -> Option<&'a str> {
+    if text == module {
+        Some("")
+    } else {
+        text.strip_prefix(&format!("{module}/"))
+    }
+}
+
 /// The module path of `file` below `source_root`: its directories plus the file stem, except
 /// that `lib.rs`/`main.rs`/`mod.rs` name their directory's module. Outside the root: none.
 fn rust_current_module_parts<'a>(file: &'a str, source_root: &str) -> Vec<&'a str> {
@@ -126,6 +140,98 @@ struct JsPackage {
     manifest: Value,
 }
 
+/// A `go.mod` above an indexed file: its module path and local `replace` targets.
+struct GoModule {
+    dir: String,
+    path: String,
+    /// `old module path` → `new module path` (local targets are absolute directories).
+    replaces: Vec<(String, String)>,
+}
+
+/// Reads the nearest `go.mod` of every ancestor directory, like CRG's `_go_module_chain`.
+/// `root` turns the indexer's project-relative file names into real manifest paths; the
+/// stored directories stay in the same spelling as `files`.
+fn go_modules(files: &HashMap<String, String>, root: Option<&Path>) -> Vec<GoModule> {
+    let mut found = BTreeMap::new();
+    for file in files.values() {
+        let path = Path::new(file);
+        let mut dir = if path.is_absolute() || root.is_none() {
+            path.to_path_buf()
+        } else {
+            root.unwrap().join(path)
+        };
+        loop {
+            let key = dir.to_string_lossy().into_owned();
+            let stored = |path: &Path| -> String {
+                root.and_then(|root| path.strip_prefix(root).ok())
+                    .map(|relative| relative.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned())
+            };
+            if !found.contains_key(&key) {
+                let manifest = dir.join("go.mod");
+                let value = std::fs::read_to_string(manifest).ok().and_then(|text| {
+                    let mut path = None;
+                    let mut replaces = Vec::new();
+                    let mut in_block = false;
+                    for line in text.lines() {
+                        let line = line.split("//").next().unwrap_or("").trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        if in_block {
+                            if line == ")" {
+                                in_block = false;
+                            } else if let Some((old, new)) = replace_directive(line) {
+                                let new = local_go_target(&dir, new);
+                                replaces.push((old.to_string(), new));
+                            }
+                            continue;
+                        }
+                        if line == "replace (" {
+                            in_block = true;
+                        } else if let Some(value) = line.strip_prefix("module ") {
+                            path = Some(value.trim().trim_matches('"').to_string());
+                        } else if let Some(rest) = line.strip_prefix("replace ") {
+                            if let Some((old, new)) = replace_directive(rest) {
+                                let new = local_go_target(&dir, new);
+                                replaces.push((old.to_string(), new));
+                            }
+                        }
+                    }
+                    path.map(|path| GoModule {
+                        dir: stored(&dir),
+                        path,
+                        replaces,
+                    })
+                });
+                found.insert(key, value);
+            }
+            let Some(parent) = dir.parent() else {
+                break;
+            };
+            dir = parent.to_path_buf();
+        }
+    }
+    found.into_values().flatten().collect()
+}
+
+/// A relative `replace` target is a directory next to the `go.mod` that declares it.
+fn local_go_target(dir: &Path, target: &str) -> String {
+    if target.starts_with('.') || target.starts_with('/') {
+        normalize(&join_path(&dir.to_string_lossy(), target))
+    } else {
+        target.to_string()
+    }
+}
+
+/// `old [version] => new [version]` from a single `replace` line.
+fn replace_directive(line: &str) -> Option<(&str, &str)> {
+    let (old, new) = line.split_once("=>")?;
+    let old = old.split_whitespace().next()?;
+    let new = new.split_whitespace().next()?;
+    Some((old, new))
+}
+
 pub(crate) struct ModuleIndex {
     /// Normalized path → the indexed file path as given.
     files: HashMap<String, String>,
@@ -136,6 +242,10 @@ pub(crate) struct ModuleIndex {
     npm_aliases: HashMap<String, String>,
     /// Cargo layouts that anchor Rust paths; empty means every Rust import stays text.
     rust_crates: RustCrates,
+    /// Go modules above the indexed files; their imports name directories, not files.
+    go_modules: Vec<GoModule>,
+    /// Project root used to find `go.mod` for project-relative file names.
+    go_root: Option<PathBuf>,
     /// Lazily read top-level Python shim/re-export evidence, keyed by the indexed file path.
     python_evidence: RefCell<HashMap<String, Arc<PythonModuleEvidence>>>,
     /// Files currently being followed through `sys.modules`, to stop shim cycles.
@@ -263,6 +373,7 @@ impl ModuleIndex {
             .map(|file| (normalize(file), file.to_string()))
             .collect();
         let manifests = npm_manifests(&files);
+        let go_modules = go_modules(&files, None);
         let mut js_packages = HashMap::new();
         let mut npm_aliases = HashMap::new();
         for (dir, manifest) in &manifests {
@@ -327,6 +438,8 @@ impl ModuleIndex {
             js_packages,
             npm_aliases,
             rust_crates: RustCrates::default(),
+            go_modules,
+            go_root: None,
             python_evidence: RefCell::new(HashMap::new()),
             shim_stack: RefCell::new(Vec::new()),
         }
@@ -338,8 +451,95 @@ impl ModuleIndex {
         self
     }
 
+    /// Supplies the project root so Go manifests can be found from relative file names.
+    pub(crate) fn set_go_root(&mut self, root: &Path) {
+        self.go_root = Some(root.to_path_buf());
+        self.go_modules = go_modules(&self.files, Some(root));
+    }
+
     fn file(&self, path: &str) -> Option<&str> {
         self.files.get(&normalize(path)).map(String::as_str)
+    }
+
+    /// The package directory a Go import names, when it holds indexed source. Unlike other
+    /// languages, a Go import resolves to a directory; the edge keeps that directory as text.
+    pub(crate) fn go_package(&self, importer: &str, text: &str) -> Option<String> {
+        let importer = normalize(importer);
+        let importer_dir = Path::new(&importer)
+            .parent()?
+            .to_string_lossy()
+            .into_owned();
+        let first = text.split('/').next().unwrap_or(text);
+        if !first.contains('.') {
+            return None;
+        }
+        let mut modules: Vec<&GoModule> = self
+            .go_modules
+            .iter()
+            .filter(|module| is_under(&importer_dir, &module.dir))
+            .collect();
+        modules.sort_by(|a, b| b.dir.len().cmp(&a.dir.len()));
+        for module in modules {
+            if let Some(suffix) = go_suffix(text, &module.path) {
+                let dir = if suffix.is_empty() {
+                    module.dir.clone()
+                } else {
+                    join_path(&module.dir, suffix)
+                };
+                if self.go_holds_source(&dir) {
+                    return Some(self.go_absolute(&dir));
+                }
+            }
+            for (old, new) in &module.replaces {
+                if !new.starts_with('/') {
+                    continue;
+                }
+                if let Some(suffix) = go_suffix(text, old) {
+                    let dir = if suffix.is_empty() {
+                        new.clone()
+                    } else {
+                        join_path(new, suffix)
+                    };
+                    if self.go_holds_source(&dir) {
+                        return Some(self.go_absolute(&dir));
+                    }
+                }
+            }
+        }
+        for ancestor in Path::new(&importer_dir).ancestors() {
+            let dir = join_path(&ancestor.to_string_lossy(), &format!("vendor/{text}"));
+            if self.go_holds_source(&dir) {
+                return Some(self.go_absolute(&dir));
+            }
+        }
+        None
+    }
+
+    /// Emits directory targets in the same absolute spelling as indexed node paths.
+    fn go_absolute(&self, dir: &str) -> String {
+        match &self.go_root {
+            Some(root) if !Path::new(dir).is_absolute() => {
+                normalize(&join_path(&root.to_string_lossy(), dir))
+            }
+            _ => normalize(dir),
+        }
+    }
+
+    /// Whether an indexed `.go` file sits directly in `dir`, as CRG's package source check.
+    fn go_holds_source(&self, dir: &str) -> bool {
+        let dir = self
+            .go_root
+            .as_ref()
+            .and_then(|root| Path::new(dir).strip_prefix(root).ok())
+            .map(|relative| relative.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir.to_string());
+        let prefix = format!("{}/", normalize(&dir).trim_end_matches('/'));
+        self.files.values().any(|file| {
+            let file = normalize(file);
+            file.starts_with(&prefix)
+                && file.ends_with(".go")
+                && !file[prefix.len()..].contains('/')
+        })
     }
 
     /// The indexed file the import `text`, written in `importer`, names.
@@ -1012,6 +1212,69 @@ mod tests {
         assert_eq!(
             lower.resolve("crate/src/lib.rs", "crate::glob::x"),
             Some("crate/src/glob.rs")
+        );
+    }
+
+    #[test]
+    fn go_packages_resolve_to_directories_through_module_replace_and_vendor() {
+        let (dir, paths) = py_repo(&[
+            (
+                "go.mod",
+                "module example.com/probe\n\ngo 1.21\n\nreplace example.com/dep => ./third_party/dep\n",
+            ),
+            ("app/main.go", "package app\n"),
+            ("pkg/helper/helper.go", "package helper\n"),
+            ("third_party/dep/go.mod", "module example.com/dep\n"),
+            ("third_party/dep/dep.go", "package dep\n"),
+            (
+                "vendor/example.com/vendored/vendored.go",
+                "package vendored\n",
+            ),
+        ]);
+        let index = ModuleIndex::new(paths.iter().map(String::as_str));
+        let main = &paths[1];
+        let root = dir.path().to_string_lossy();
+        assert_eq!(
+            index.go_package(main, "example.com/probe/pkg/helper"),
+            Some(format!("{root}/pkg/helper"))
+        );
+        assert_eq!(
+            index.go_package(main, "example.com/dep"),
+            Some(format!("{root}/third_party/dep"))
+        );
+        assert_eq!(
+            index.go_package(main, "example.com/vendored"),
+            Some(format!("{root}/vendor/example.com/vendored"))
+        );
+        assert_eq!(index.go_package(main, "errors"), None);
+        assert_eq!(index.go_package(main, "fmt"), None);
+    }
+
+    #[test]
+    fn relative_go_files_resolve_through_the_project_root() {
+        let (dir, _paths) = py_repo(&[
+            (
+                "go.mod",
+                "module example.com/probe\n\nreplace example.com/dep => ./third_party/dep\n",
+            ),
+            ("app/main.go", "package app\n"),
+            ("pkg/helper/helper.go", "package helper\n"),
+            ("third_party/dep/dep.go", "package dep\n"),
+        ]);
+        let mut index = ModuleIndex::new([
+            "app/main.go",
+            "pkg/helper/helper.go",
+            "third_party/dep/dep.go",
+        ]);
+        index.set_go_root(dir.path());
+        let root = dir.path().to_string_lossy();
+        assert_eq!(
+            index.go_package("app/main.go", "example.com/probe/pkg/helper"),
+            Some(format!("{root}/pkg/helper"))
+        );
+        assert_eq!(
+            index.go_package("app/main.go", "example.com/dep"),
+            Some(format!("{root}/third_party/dep"))
         );
     }
 

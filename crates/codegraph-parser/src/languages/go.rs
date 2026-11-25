@@ -388,8 +388,11 @@ impl<'a> GoCollector<'a> {
         .with_content(self.node_text(node));
         code.span = Some(self.span_for(node));
 
-        if let Some(alias) = self.field_text(node, "name") {
-            code.metadata.attributes.insert("alias".into(), alias);
+        let alias = self.field_text(node, "name");
+        if let Some(alias) = &alias {
+            code.metadata
+                .attributes
+                .insert("alias".into(), alias.clone());
         }
         let is_stdlib = !clean_path.contains('.');
         if is_stdlib {
@@ -410,6 +413,9 @@ impl<'a> GoCollector<'a> {
         ]);
         if is_stdlib {
             metadata.insert("stdlib".to_string(), "true".to_string());
+        }
+        if let Some(alias) = alias {
+            metadata.insert("alias".into(), alias);
         }
         self.edges.push(EdgeRelationship {
             from: code.id,
@@ -504,10 +510,24 @@ impl<'a> GoCollector<'a> {
         let Some(callee) = node.child_by_field_name("function") else {
             return;
         };
+        let mut qualifier = None;
         let target = match callee.kind() {
             "identifier" => self.node_text(&callee),
             "selector_expression" => match callee.child_by_field_name("field") {
-                Some(field) => self.resolve_on_receiver(node, &callee, self.node_text(&field)),
+                Some(field) => {
+                    let name = self.node_text(&field);
+                    let operand = callee
+                        .child_by_field_name("operand")
+                        .filter(|operand| operand.kind() == "identifier")
+                        .map(|operand| self.node_text(&operand));
+                    if operand
+                        .as_ref()
+                        .is_some_and(|text| self.receiver.as_ref().is_none_or(|r| r.name != *text))
+                    {
+                        qualifier = operand;
+                    }
+                    self.resolve_on_receiver(node, &callee, name)
+                }
                 None => return,
             },
             // Func literals, parenthesized and index callees, calls of calls: no edge.
@@ -518,6 +538,9 @@ impl<'a> GoCollector<'a> {
             ("call_type".to_string(), "go_call".to_string()),
             ("source_file".to_string(), self.file_path.to_string()),
         ]);
+        if let Some(qualifier) = qualifier {
+            metadata.insert("go_package_qualifier".to_string(), qualifier);
+        }
         let from = match self.functions.last() {
             Some(&id) => id,
             None => {
@@ -723,6 +746,27 @@ mod tests {
             set(&["Printf", "Save", "h", "inner"])
         );
         assert_eq!(calls_from(&r, "m.go"), set(&["mk"]));
+    }
+
+    #[test]
+    fn selector_calls_keep_a_package_qualifier_without_changing_the_target() {
+        let r = extract_go("package p\nfunc f() { helper.Save(); x.Load() }\n", "m.go");
+        let calls: Vec<_> = edges(&r, EdgeType::Calls)
+            .into_iter()
+            .map(|(from, to)| (from, to))
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls.iter().map(|(_, to)| to.as_str()).collect::<Vec<_>>(),
+            vec!["Load", "Save"]
+        );
+        let qualified = r
+            .edges
+            .iter()
+            .filter(|edge| edge.edge_type == EdgeType::Calls)
+            .filter_map(|edge| edge.metadata.get("go_package_qualifier"))
+            .collect::<Vec<_>>();
+        assert_eq!(qualified, vec!["helper", "x"]);
     }
 
     #[test]

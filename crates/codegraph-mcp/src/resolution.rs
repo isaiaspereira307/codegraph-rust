@@ -6,6 +6,7 @@ use crate::rust_crates::RustCrates;
 use codegraph_core::{CodeNode, EdgeRelationship, EdgeType, NodeId, NodeType};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
 struct Symbol {
@@ -37,6 +38,12 @@ pub(crate) struct SymbolCatalog {
     imported_files: HashMap<String, HashSet<String>>,
     /// Per Rust file, each `use` alias and the path it imports (`cfg` -> `crate::config`).
     rust_aliases: HashMap<String, HashMap<String, String>>,
+    /// Per Go file, each selector qualifier and the package directory its import names.
+    go_imports: HashMap<String, HashMap<String, String>>,
+    /// Indexed `.go` files directly inside each package directory.
+    go_package_files: HashMap<String, Vec<String>>,
+    /// Project root, to compare relative symbol paths with absolute package directories.
+    go_root: Option<PathBuf>,
 }
 
 fn is_bare(name: &str) -> bool {
@@ -114,6 +121,39 @@ impl SymbolCatalog {
             ModuleIndex::new(self.file_nodes.keys().map(String::as_str)).with_rust_crates(crates);
     }
 
+    /// Go manifests live under the project root, while indexed file keys are project-relative.
+    pub(crate) fn set_go_root(&mut self, root: &Path) {
+        self.go_root = Some(root.to_path_buf());
+        self.modules.set_go_root(root);
+        self.go_package_files.clear();
+        for file in self.file_nodes.keys().filter(|file| file.ends_with(".go")) {
+            let absolute = self.absolute_go_path(file);
+            let Some(dir) = Path::new(&absolute).parent() else {
+                continue;
+            };
+            self.go_package_files
+                .entry(dir.to_string_lossy().into_owned())
+                .or_default()
+                .push(absolute);
+        }
+        for files in self.go_package_files.values_mut() {
+            files.sort();
+        }
+    }
+
+    fn absolute_go_path(&self, file: &str) -> String {
+        if Path::new(file).is_absolute() {
+            crate::module_index::normalize(file)
+        } else {
+            let root = self
+                .go_root
+                .as_ref()
+                .map(|root| root.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            crate::module_index::normalize(&format!("{}/{}", root.trim_end_matches('/'), file))
+        }
+    }
+
     /// Indexed `.rs` files, sorted: the importers `RustCrates::discover` reads manifests for.
     pub(crate) fn rust_files(&self) -> std::collections::BTreeSet<String> {
         self.file_nodes
@@ -133,6 +173,9 @@ impl SymbolCatalog {
             modules: ModuleIndex::new([]),
             imported_files: HashMap::new(),
             rust_aliases: HashMap::new(),
+            go_imports: HashMap::new(),
+            go_package_files: HashMap::new(),
+            go_root: None,
         };
         for node in nodes {
             if node.node_type == Some(NodeType::Other("File".into())) {
@@ -162,6 +205,22 @@ impl SymbolCatalog {
                     ids.push(node.id);
                 }
             }
+        }
+        for file in catalog.file_nodes.keys() {
+            if !file.ends_with(".go") {
+                continue;
+            }
+            let Some(dir) = Path::new(file).parent() else {
+                continue;
+            };
+            catalog
+                .go_package_files
+                .entry(dir.to_string_lossy().into_owned())
+                .or_default()
+                .push(file.clone());
+        }
+        for files in catalog.go_package_files.values_mut() {
+            files.sort();
         }
         catalog.modules = ModuleIndex::new(catalog.file_nodes.keys().map(String::as_str));
         for ids in catalog.aliases.values_mut() {
@@ -326,6 +385,20 @@ impl SymbolCatalog {
                     .or_default()
                     .insert(alias.clone(), edge.to.clone());
             }
+            if importer.file.ends_with(".go")
+                && let Some(dir) = self.modules.go_package(&importer.file, &edge.to)
+            {
+                // Go's import names a package directory, not a file: evidence for a unique
+                // selector candidate in that package, and the edge target stays the directory.
+                let alias =
+                    edge.metadata.get("alias").cloned().unwrap_or_else(|| {
+                        edge.to.rsplit('/').next().unwrap_or(&edge.to).to_string()
+                    });
+                self.go_imports
+                    .entry(importer.file.clone())
+                    .or_default()
+                    .insert(alias, dir);
+            }
             if let Some(file) = self.modules.resolve(&importer.file, &edge.to) {
                 self.imported_files
                     .entry(importer.file.clone())
@@ -333,6 +406,48 @@ impl SymbolCatalog {
                     .insert(file.to_string());
             }
         }
+    }
+
+    /// The package directory a parsed Go import names, kept as edge text like CRG's
+    /// `import_scope="package"` target.
+    pub(crate) fn go_import_dir(&self, edge: &EdgeRelationship) -> Option<String> {
+        if edge.edge_type != EdgeType::Imports {
+            return None;
+        }
+        let importer = self.symbols.get(&edge.from)?;
+        if !importer.file.ends_with(".go") {
+            return None;
+        }
+        self.modules.go_package(&importer.file, &edge.to)
+    }
+
+    /// A Go selector call binds only when the imported package supports exactly one
+    /// candidate; an ambiguous name stays bare, as at CRG bbdda4b.
+    pub(crate) fn go_call_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        if edge.edge_type != EdgeType::Calls {
+            return None;
+        }
+        let qualifier = edge.metadata.get("go_package_qualifier")?;
+        let caller = self.symbols.get(&edge.from)?;
+        if !caller.file.ends_with(".go") {
+            return None;
+        }
+        let dir = self.go_imports.get(&caller.file)?.get(qualifier)?;
+        let files = self.go_package_files.get(dir)?;
+        let mut candidates: Vec<_> = self
+            .aliases
+            .get(&edge.to)?
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.symbols
+                    .get(id)
+                    .is_some_and(|symbol| files.contains(&self.absolute_go_path(&symbol.file)))
+            })
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        (candidates.len() == 1).then_some(candidates[0])
     }
 
     /// The File node an `Imports` edge names, when its text maps to one indexed file.

@@ -1220,6 +1220,7 @@ impl ProjectIndexer {
                 info!("   🌱 Spring DI calls resolved: {spring_resolved}");
             }
             let mut catalog = crate::resolution::SymbolCatalog::new(&nodes);
+            catalog.set_go_root(&self.project_root);
             // Rust `use` paths resolve through the Cargo.toml layouts above the indexed files.
             let rust_files = catalog.rust_files();
             if !rust_files.is_empty() {
@@ -1227,6 +1228,7 @@ impl ProjectIndexer {
                     &self.project_root,
                     &rust_files,
                 ));
+                catalog.set_go_root(&self.project_root);
             }
             // Python `from M import x` candidates that name no file leave, without text.
             catalog.retain_python_imports(&mut edges);
@@ -1234,6 +1236,7 @@ impl ProjectIndexer {
             let symbol_map = catalog.unique_aliases();
             let mut normalized = HashMap::new();
             let mut targets = Vec::with_capacity(edges.len());
+            let mut go_import_dirs = Vec::with_capacity(edges.len());
             let mut resolution_provenance = Vec::with_capacity(edges.len());
             let mut exact_count = 0;
             let mut lexical_count = 0;
@@ -1243,11 +1246,22 @@ impl ProjectIndexer {
                 // names; otherwise it stays text. It never binds to a symbol. Analyzer
                 // imports (module linker `module::` targets) keep their exact resolution.
                 if edge.edge_type == EdgeType::Imports && !edge.metadata.contains_key("analyzer") {
-                    let target = catalog.import_target(edge);
+                    let go_dir = catalog.go_import_dir(edge);
+                    let target = go_dir
+                        .as_ref()
+                        .map_or_else(|| catalog.import_target(edge), |_| None);
                     if target.is_some() {
                         exact_count += 1;
                     }
                     targets.push(target);
+                    go_import_dirs.push(go_dir);
+                    resolution_provenance.push(("import", 1.0f64));
+                    continue;
+                }
+                if let Some(target) = catalog.go_call_target(edge) {
+                    exact_count += 1;
+                    targets.push(Some(target));
+                    go_import_dirs.push(None);
                     resolution_provenance.push(("import", 1.0f64));
                     continue;
                 }
@@ -1259,6 +1273,7 @@ impl ProjectIndexer {
                     && !edge.metadata.contains_key("analyzer")
                 {
                     targets.push(None);
+                    go_import_dirs.push(None);
                     resolution_provenance.push(("inherits", 1.0f64));
                     continue;
                 }
@@ -1272,6 +1287,7 @@ impl ProjectIndexer {
                     }
                 }
                 targets.push(target);
+                go_import_dirs.push(None);
                 resolution_provenance.push(provenance);
             }
             phase_ms.insert(
@@ -1281,8 +1297,11 @@ impl ProjectIndexer {
             let edge_persistence_start = std::time::Instant::now();
             let resolved_count = targets.iter().filter(|target| target.is_some()).count();
             let mut edge_records = Vec::with_capacity(edges.len());
-            for ((edge, target), (method, score)) in
-                edges.iter().zip(targets).zip(resolution_provenance)
+            for (((edge, target), go_dir), (method, score)) in edges
+                .iter()
+                .zip(targets)
+                .zip(go_import_dirs)
+                .zip(resolution_provenance)
             {
                 let mut record = match target {
                     Some(target) => {
@@ -1298,10 +1317,16 @@ impl ProjectIndexer {
                     }
                     // Like code-review-graph, keep an unresolved CRG-kind target as its text.
                     None if Self::keeps_unresolved_target(edge) => {
-                        let text = Self::unbound_target(&catalog, edge);
+                        let is_package = go_dir.is_some();
+                        let text = go_dir.unwrap_or_else(|| Self::unbound_target(&catalog, edge));
                         let mut record =
                             CodeEdge::unresolved(edge.from, &text, edge.edge_type.clone());
                         record.metadata.extend(edge.metadata.clone());
+                        if is_package {
+                            record
+                                .metadata
+                                .insert("import_scope".into(), "package".into());
+                        }
                         if text != edge.to {
                             let claimed = catalog
                                 .rust_path_claim(edge)
