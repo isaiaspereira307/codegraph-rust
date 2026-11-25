@@ -23,6 +23,7 @@ if [ -f "$out/$asset.tar.gz" ]; then
   for f in codegraph LICENSE-MIT LICENSE-APACHE README.md; do
     echo "$listing" | grep -qx "$asset/$f" && ok "tar has $asset/$f" || bad "tar missing $asset/$f"
   done
+  if echo "$listing" | grep -q "\._"; then bad "tar contains ._ entries"; else ok "tar has no ._ entries"; fi
   tar -xzOf "$out/$asset.tar.gz" "$asset/codegraph" | cmp -s - "$tmp/fake" && ok "binary content" || bad "binary content differs"
   (cd "$out" && sha256sum -c "$asset.tar.gz.sha256") && ok "sha256 verifies" || bad "sha256 mismatch"
 else

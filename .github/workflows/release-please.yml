@@ -16,6 +16,7 @@ jobs:
       - name: Release Please
         uses: google-github-actions/release-please-action@v4
         with:
+          skip-github-release: true
           release-type: rust
           package-name: codegraph
           changelog-types: |

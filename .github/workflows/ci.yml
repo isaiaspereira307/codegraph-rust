@@ -17,11 +17,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Windows is excluded until the port (mmap.rs windows_sys, unix-only `nix` usage).
+        os: [ubuntu-latest, macos-latest]
         rust: [stable, beta]
         exclude:
-          - os: windows-latest
-            rust: beta
           - os: macos-latest
             rust: beta
 

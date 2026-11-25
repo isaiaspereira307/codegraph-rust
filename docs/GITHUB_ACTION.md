@@ -84,7 +84,7 @@ unusable.
 
 ## Limitations
 
-- Linux and macOS runners only; on Windows the Action fails with an explicit error.
+- Linux and macOS runners only (Windows is not supported yet); on Windows the Action fails with an explicit error.
 - Pull requests should check out with `fetch-depth: 0`: the diff base is `origin/<base branch>`.
   On other events the base is `HEAD~1`, which needs `fetch-depth: 2` at least.
 - The graph uses the default `fast` index tier (core AST edges).

@@ -36,8 +36,7 @@ os="${CODEGRAPH_TEST_UNAME_S:-$(uname -s)}"
 arch="${CODEGRAPH_TEST_UNAME_M:-$(uname -m)}"
 case "$os" in
   MINGW*|MSYS*|CYGWIN*|Windows*)
-    err "Windows is not supported by this script."
-    echo "Download the .zip for Windows from the Releases page: $DEFAULT_BASE" >&2
+    err "Windows is not supported yet."
     echo "Supported targets: $SUPPORTED" >&2
     exit 1 ;;
 esac

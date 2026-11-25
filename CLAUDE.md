@@ -72,7 +72,7 @@ Project init runs before application configuration or the async runtime. `projec
 
 ### Distribution
 
-Releases are built by `.github/workflows/release.yml` (tag `v*`, or `workflow_dispatch` as a dry run) for five targets and published with `.sha256` files and `SHA256SUMS`; the tag must equal `codegraph --version`. `scripts/release/` packages assets and renders the Homebrew formula (pushed to the tap by the `homebrew` job). `install.sh` is the checksum-verified prebuilt installer (Linux/macOS), distinct from the source-install `install-codegraph.sh`. `action.yml` is a composite Action that runs `codegraph pr-report` (exit 0 ok, 1 analysis failed, 3 risk gate hit); see `docs/GITHUB_ACTION.md`. Shell tests: `scripts/**/test-*.sh`; workflow lint: `scripts/ci/check-workflows.sh`. Release steps: `CONTRIBUTING.md`.
+Releases are built by `.github/workflows/release.yml` (tag `v*`, or `workflow_dispatch` as a dry run) for four targets (Linux/macOS, x86_64/aarch64; Windows is not supported until `mmap.rs` is ported to `windows_sys` and `nix` is gated to unix) and published with `.sha256` files and `SHA256SUMS`; the tag must equal `codegraph --version`. `scripts/release/` packages assets and renders the Homebrew formula (pushed to the tap by the `homebrew` job). `install.sh` is the checksum-verified prebuilt installer (Linux/macOS), distinct from the source-install `install-codegraph.sh`. `action.yml` is a composite Action that runs `codegraph pr-report` (exit 0 ok, 1 analysis failed, 3 risk gate hit); see `docs/GITHUB_ACTION.md`. Shell tests: `scripts/**/test-*.sh`; workflow lint: `scripts/ci/check-workflows.sh`. Release steps: `CONTRIBUTING.md`.
 
 ## Architecture
 

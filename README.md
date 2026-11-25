@@ -36,10 +36,10 @@ brew install isaiaspereira307/codegraph/codegraph
 ```
 
 **GitHub Releases** (after the first release): download `codegraph-<version>-<target>.tar.gz`
-(Linux and macOS, x86_64 and aarch64) or `codegraph-<version>-x86_64-pc-windows-msvc.zip`
-(Windows) from the [releases page](https://github.com/isaiaspereira307/codegraph-rust/releases),
-and check it against the matching `.sha256` file or `SHA256SUMS`. There is no installer script for
-Windows; unzip and put `codegraph.exe` on your `PATH`.
+(Linux and macOS, x86_64 and aarch64) from the
+[releases page](https://github.com/isaiaspereira307/codegraph-rust/releases), and check it against
+the matching `.sha256` file or `SHA256SUMS`. Linux binaries are built on Ubuntu 22.04, glibc >= 2.35.
+Windows is not supported yet.
 
 **From source** (works today; needs a Rust toolchain, the binary does not link OpenSSL):
 

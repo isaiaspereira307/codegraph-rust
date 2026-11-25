@@ -42,6 +42,8 @@ if [ "$ext" = "zip" ]; then
     exit 1
   fi
 else
+  # macOS bsdtar would otherwise add ._* AppleDouble entries
+  export COPYFILE_DISABLE=1
   (cd "$stage" && tar -czf "$out_dir/$asset" "$name")
 fi
 

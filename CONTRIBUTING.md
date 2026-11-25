@@ -96,7 +96,7 @@ If your change affects configuration, providers, or language support, update:
 1. Bump `[workspace.package] version` in `Cargo.toml` (and refresh `Cargo.lock`), and move the
    `Unreleased` entries in `CHANGELOG.md` under the new version.
 2. Dry run first: run the `Release` workflow through `workflow_dispatch` (leave `publish` off). It
-   builds the five targets without publishing.
+   builds the four targets (Linux and macOS, x86_64 and aarch64) without publishing.
 3. Tag `vX.Y.Z` matching the version exactly (the workflow fails if `codegraph --version` differs)
    and push the tag. A tag containing `-` is treated as a prerelease and does not update Homebrew.
 4. Repository settings: secret `HOMEBREW_TAP_TOKEN` (write access to
@@ -104,8 +104,9 @@ If your change affects configuration, providers, or language support, update:
    the variable `CODEGRAPH_DOGFOOD=true` to run the PR review Action on this repository.
 
 Note: `.github/workflows/release-please.yml` also runs on every push to `main` (release-type
-`rust`, package `codegraph`) and opens its own version-bump PRs; merge one only if you want it to
-bump the version, and never let the two disagree, since the release workflow requires
+`rust`, package `codegraph`, `skip-github-release: true`) and only opens version-bump/changelog PRs.
+Tags and GitHub Releases are created only by pushing a `v*` tag; merge a release-please PR only if
+you want it to bump the version, and never let the two disagree, since the release workflow requires
 `codegraph --version` to equal the tag.
 
 ## PR checklist

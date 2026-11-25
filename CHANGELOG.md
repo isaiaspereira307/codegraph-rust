@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added - Distribution
 
 - Release workflow (`.github/workflows/release.yml`): on a `v*` tag it builds native binaries for
-  x86_64/aarch64 Linux, x86_64/aarch64 macOS and x86_64 Windows, checks that `codegraph --version`
+  x86_64/aarch64 Linux (Ubuntu 22.04, glibc >= 2.35) and x86_64/aarch64 macOS (Windows is not supported yet), checks that `codegraph --version`
   matches the tag, and publishes `codegraph-<version>-<target>` archives with `.sha256` files and
   `SHA256SUMS`. `workflow_dispatch` runs a build-only dry run.
 - `install.sh`: curl-pipe installer for the prebuilt binary (Linux/macOS), checksum-verified,

@@ -480,7 +480,7 @@ Fica para depois:
   gemini-cli, qwen, kiro, copilot…), skills para o Codex e instalação global.
 - Embeddings opcionais (feature desligada por padrão) via ONNX local, se a busca FTS5 se
   mostrar insuficiente.
-- ✅ Distribuição: release com binários (Linux/macOS/Windows), Homebrew, GitHub Action
+- ✅ Distribuição: release com binários (Linux/macOS), Homebrew, GitHub Action
   equivalente ao `action.yml` do CRG (ver Próximos passos, item 3; falta cortar o primeiro release).
 - ✅ `README.md` reescrito e `install-codegraph.sh` simplificado (as 3 variantes saíram); os guias legados de `docs/` ganharam aviso e seguem pendentes de reescrita. O renomear do binário/crates foi cancelado (Decisão 2).
 
@@ -546,16 +546,18 @@ Em ordem; cada item ganha plano próprio em `docs/superpowers/plans/`:
    - Qualificador pontuado além do último segmento (`a.Shared` vs `b.Shared`) não desempata.
    - `OVERRIDES` não é gerado nem seguido.
 3. ✅ **Distribuição** (plano `docs/superpowers/plans/2026-11-25-distribuicao.md`): release com
-   binários (Linux/macOS/Windows), Homebrew, GitHub Action, README final. Entregue:
-   `.github/workflows/release.yml` (tag `v*`, 5 alvos, `.sha256` e `SHA256SUMS`, dry-run por
+   binários (Linux/macOS; 4 alvos), Homebrew, GitHub Action, README final. Entregue:
+   `.github/workflows/release.yml` (tag `v*`, 4 alvos, `.sha256` e `SHA256SUMS`, dry-run por
    `workflow_dispatch`), `scripts/release/{package,render-formula}.sh`, `install.sh` (Linux/macOS,
    com checksum), fórmula Homebrew publicada no tap por um job, `codegraph pr-report` (exit 0/1/3),
    `action.yml` com comentário sticky, `docs/GITHUB_ACTION.md`, README/CONTRIBUTING/CHANGELOG
    atualizados e workflows legados removidos. Falta: cortar o primeiro tag/release; criar o
    repositório do tap e o secret `HOMEBREW_TAP_TOKEN`; os workflows YAML nunca rodaram num runner
    e `ruby -c`/`brew` nunca foram executados; o relatório v1 não tem seções de impacto nem de
-   lacunas de teste porque o `detect_changes` real não retorna esses dados; o Windows não tem
-   script de instalação (só o zip).
+   lacunas de teste porque o `detect_changes` real não retorna esses dados; o Windows não é
+   suportado ainda (revisão final: não compila; precisa corrigir `mmap.rs` (`windows_sys`) e mover
+   `nix` para `[target.'cfg(unix)'.dependencies]` com guardas `cfg(unix)` em `process.rs` e
+   `codegraph.rs`).
 
 Adiado ("por ora não"): linguagens restantes da Fase 2 (item 6), demais itens da Fase 5
 (refactor, multi-repo, wiki, visualização, plataformas extras, embeddings) e o plano de

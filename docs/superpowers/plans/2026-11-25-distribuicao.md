@@ -15,6 +15,7 @@
 - Repositório: `isaiaspereira307/codegraph-rust`; sem PR, push direto na `main`; sem interação com o upstream (`PLANO.md`, Fase 0).
 - Binário e crates continuam `codegraph` (Decisão 2); nome do asset: `codegraph-<versão>-<target>.tar.gz` (`.zip` no Windows), com `codegraph` (ou `codegraph.exe`), `LICENSE-MIT`, `LICENSE-APACHE`, `README.md`.
 - Targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
+  - Nota (2026-11-25, revisão final): Windows foi removido do v1 (não compila: `mmap.rs` usa `windows_sys` incorretamente e `nix` é dependência incondicional). Release e CI cobrem 4 alvos; `package.sh` mantém o suporte a zip.
 - Sem `libssl`: o binário release não pode linkar OpenSSL (Fase 1, Task 7); nenhum passo de CI instala `libssl-dev`.
 - Licença `MIT OR Apache-2.0`; schema do banco v15 (`.code-review-graph/graph.db`).
 - Limiares de risco da Action, como no CRG: `high` ≥ 0.70, `critical` ≥ 0.85.
