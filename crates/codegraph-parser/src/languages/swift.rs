@@ -131,6 +131,8 @@ impl<'a> SwiftCollector<'a> {
                     code.metadata
                         .attributes
                         .insert("kind".into(), "class".into());
+                    let id = code.id;
+                    self.inheritance_edges(node, id);
                     self.nodes.push(code);
                     ctx.current_type = Some(name);
                 }
@@ -299,64 +301,77 @@ impl<'a> SwiftCollector<'a> {
 
             // Swift Imports
             "import_declaration" => {
-                if let Some(module) = self.child_text_by_field(node, "module") {
-                    let loc = self.location(&node);
-                    let mut code = CodeNode::new(
-                        format!("import {}", module),
-                        Some(NodeType::Import),
-                        Some(Language::Swift),
-                        loc,
-                    )
-                    .with_content(self.node_text(&node));
-                    code.span = Some(self.span_for(&node));
+                // tree-sitter-swift exposes the module as a plain `identifier` child, not as the
+                // `module` field. CRG keeps the whole statement (`import XCTest`,
+                // `@testable import App`) as the unresolved edge target.
+                let module = self
+                    .child_text_by_field(node, "module")
+                    .or_else(|| node.named_children(&mut node.walk()).next().map(|c| self.node_text(&c)));
+                let Some(module) = module else {
+                    return;
+                };
+                let statement = self.node_text(&node).trim().to_string();
+                let loc = self.location(&node);
+                let mut code = CodeNode::new(
+                    statement.clone(),
+                    Some(NodeType::Import),
+                    Some(Language::Swift),
+                    loc,
+                )
+                .with_content(self.node_text(&node));
+                code.span = Some(self.span_for(&node));
 
+                code.metadata
+                    .attributes
+                    .insert("kind".into(), "import".into());
+                code.metadata
+                    .attributes
+                    .insert("module".into(), module.clone());
+
+                // Detect framework imports
+                let is_framework =
+                    module == "SwiftUI" || module == "UIKit" || module == "Foundation";
+                if is_framework {
                     code.metadata
                         .attributes
-                        .insert("kind".into(), "import".into());
-                    code.metadata
-                        .attributes
-                        .insert("module".into(), module.clone());
-
-                    // Detect framework imports
-                    let is_framework =
-                        module == "SwiftUI" || module == "UIKit" || module == "Foundation";
-                    if is_framework {
-                        code.metadata
-                            .attributes
-                            .insert("framework".into(), module.clone());
-                    }
-
-                    // Create import edge
-                    let edge = EdgeRelationship {
-                        from: code.id,
-                        to: module.clone(),
-                        edge_type: EdgeType::Imports,
-                        metadata: {
-                            let mut meta = HashMap::new();
-                            meta.insert("import_type".to_string(), "swift_import".to_string());
-                            meta.insert("source_file".to_string(), self.file_path.to_string());
-                            if is_framework {
-                                meta.insert("framework".to_string(), "true".to_string());
-                            }
-                            meta
-                        },
-                        span: Some(self.span_for(&node)),
-                    };
-                    self.edges.push(edge);
-                    self.nodes.push(code);
+                        .insert("framework".into(), module.clone());
                 }
+
+                // Create import edge
+                let edge = EdgeRelationship {
+                    from: code.id,
+                    to: statement,
+                    edge_type: EdgeType::Imports,
+                    metadata: {
+                        let mut meta = HashMap::new();
+                        meta.insert("import_type".to_string(), "swift_import".to_string());
+                        meta.insert("source_file".to_string(), self.file_path.to_string());
+                        if is_framework {
+                            meta.insert("framework".to_string(), "true".to_string());
+                        }
+                        meta
+                    },
+                    span: Some(self.span_for(&node)),
+                };
+                self.edges.push(edge);
+                self.nodes.push(code);
             }
 
             // Swift Call Expressions - extract call edges
             "call_expression" => {
                 if let Some(current_fn) = self.current_function_id {
-                    // Extract the function being called
-                    if let Some(callee) = node.child_by_field_name("function") {
-                        let callee_name = self.node_text(&callee);
-                        if !callee_name.is_empty() {
+                    // A call's callee is its first named child (`simple_identifier` or an
+                    // expression); tree-sitter-swift has no `function` field.
+                    let callee = node
+                        .child_by_field_name("function")
+                        .or_else(|| node.named_children(&mut node.walk()).next());
+                    if let Some(callee) = callee {
+                        let name = self.node_text(&callee);
+                        let name = name.rsplit('.').next().unwrap_or(&name).trim().to_string();
+                        if !name.is_empty() {
                             let edge = EdgeRelationship {
                                 from: current_fn,
-                                to: callee_name,
+                                to: name,
                                 edge_type: EdgeType::Calls,
                                 metadata: {
                                     let mut meta = HashMap::new();
@@ -386,6 +401,31 @@ impl<'a> SwiftCollector<'a> {
         }
     }
 
+    /// CRG emits one `INHERITS` edge per `inheritance_specifier`, naming the base type as
+    /// written (generic arguments dropped, like its class metadata).
+    fn inheritance_edges(&mut self, node: Node, id: NodeId) {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if child.kind() != "inheritance_specifier" {
+                continue;
+            }
+            let Some(base) = child.child_by_field_name("inherits_from") else {
+                continue;
+            };
+            let text = self.node_text(&base);
+            let name = text.split('<').next().unwrap_or(&text).trim().to_string();
+            if !name.is_empty() {
+                self.edges.push(EdgeRelationship {
+                    from: id,
+                    to: name,
+                    edge_type: EdgeType::Extends,
+                    metadata: HashMap::from([("inherit_type".to_string(), "swift".to_string())]),
+                    span: Some(self.span_for(&child)),
+                });
+            }
+        }
+    }
+
     fn child_text_by_field(&self, node: Node, field_name: &str) -> Option<String> {
         node.child_by_field_name(field_name)
             .map(|child| self.node_text(&child))
@@ -405,5 +445,76 @@ impl<'a> SwiftCollector<'a> {
             end_line: Some((node.end_position().row + 1) as u32),
             end_column: Some((node.end_position().column + 1) as u32),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ExtractionPolicy;
+    use crate::languages::extract_for_language_at;
+    use tree_sitter::Parser;
+
+    fn extract(source: &str) -> ExtractionResult {
+        let mut parser = Parser::new();
+        parser.set_language(&tree_sitter_swift::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        extract_for_language_at(
+            &Language::Swift,
+            &tree,
+            source,
+            "App/Client.swift",
+            "App/Client.swift",
+            ExtractionPolicy::default(),
+        )
+        .unwrap()
+    }
+
+    fn qualified(result: &ExtractionResult, id: &NodeId) -> String {
+        result
+            .nodes
+            .iter()
+            .find(|n| &n.id == id)
+            .and_then(|n| n.metadata.attributes.get("qualified_name"))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn targets(result: &ExtractionResult, kind: EdgeType) -> Vec<(String, String)> {
+        result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == kind)
+            .map(|e| (qualified(result, &e.from), e.to.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn swift_imports_keep_crg_raw_statement_text() {
+        let result = extract("import Domain\npublic func goClient() {}\n");
+        assert_eq!(
+            targets(&result, EdgeType::Imports),
+            [("App/Client.swift".to_string(), "import Domain".to_string())]
+        );
+    }
+
+    #[test]
+    fn swift_calls_are_attributed_to_the_enclosing_function() {
+        let result = extract("public func runService() {}\npublic struct Client {\n  public func go() { runService() }\n}\n");
+        assert_eq!(
+            targets(&result, EdgeType::Calls),
+            [(
+                "App/Client.swift::Client.go".to_string(),
+                "runService".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn swift_inheritance_names_the_base_type() {
+        let result = extract("final class ClientTests: XCTestCase {\n  func test_go() {}\n}\n");
+        assert!(targets(&result, EdgeType::Extends)
+            .iter()
+            .any(|(_, to)| to == "XCTestCase"));
     }
 }
