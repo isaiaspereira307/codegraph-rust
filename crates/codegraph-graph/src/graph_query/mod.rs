@@ -4,6 +4,7 @@
 mod analysis_queries;
 mod changes;
 mod coverage;
+mod heritage;
 mod impact;
 mod large;
 mod query;

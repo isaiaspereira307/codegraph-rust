@@ -1,6 +1,7 @@
 // ABOUTME: Immutable petgraph copy of the SQLite graph, keyed by node uuid and qualified name.
-// ABOUTME: Built in one pass over nodes ⟕ cg_nodes and edges; edges to unknown targets are skipped.
+// ABOUTME: Built from nodes ⟕ cg_nodes and edges; text INHERITS/IMPLEMENTS bind by name, else skip.
 
+use super::heritage::{HeritageNode, is_heritage, last_segment, resolve_heritage};
 use super::types::{CallerInfo, NodeInfo, NodeLocation, NodeReference};
 use anyhow::Result;
 use petgraph::Direction;
@@ -27,6 +28,10 @@ pub(crate) struct NodeData {
 pub(crate) struct Snapshot {
     pub graph: DiGraph<NodeData, String>,
     index: HashMap<String, NodeIndex>,
+    /// Bare base name → number of text INHERITS/IMPLEMENTS edges naming it that matched
+    /// several type nodes and so were left unbound.
+    #[allow(dead_code)] // read by query_graph's `inheritors_of` pattern
+    pub ambiguous_heritage: HashMap<String, usize>,
 }
 
 impl Snapshot {
@@ -63,17 +68,85 @@ impl Snapshot {
             index.insert(qualified.clone(), ix);
             by_qn.insert(qualified, ix);
         }
+        // Edges whose target is a qualified name bind directly. Text heritage targets
+        // (`Base`, `unittest.TestCase`) are resolved by name below; other edges to unknown
+        // targets are skipped.
+        let mut heritage: Vec<(String, usize, String)> = Vec::new();
+        // File path → file paths of the File nodes it imports (IMPORTS_FROM File → File).
+        let mut imports: HashMap<String, Vec<String>> = HashMap::new();
         let mut stmt =
             conn.prepare("SELECT kind, source_qualified, target_qualified FROM edges")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let (kind, source, target): (String, String, String) =
                 (row.get(0)?, row.get(1)?, row.get(2)?);
-            if let (Some(&s), Some(&t)) = (by_qn.get(&source), by_qn.get(&target)) {
-                graph.add_edge(s, t, kind);
+            let Some(&s) = by_qn.get(&source) else {
+                continue;
+            };
+            match by_qn.get(&target) {
+                Some(&t) => {
+                    let is_file = |ix: NodeIndex| graph[ix].kind.as_deref() == Some("File");
+                    if kind == "IMPORTS_FROM" && is_file(s) && is_file(t) {
+                        imports
+                            .entry(graph[s].file_path.clone())
+                            .or_default()
+                            .push(graph[t].file_path.clone());
+                    }
+                    graph.add_edge(s, t, kind);
+                }
+                None if is_heritage(&kind) => {
+                    heritage.push((kind, s.index(), target));
+                }
+                None => {}
             }
         }
-        Ok(Self { graph, index })
+        let mut ambiguous_heritage = HashMap::new();
+        if !heritage.is_empty() {
+            let nodes: Vec<HeritageNode<'_>> = graph
+                .node_weights()
+                .map(|n| HeritageNode {
+                    qualified: &n.qualified,
+                    name: &n.name,
+                    kind: n.kind.as_deref(),
+                    file_path: &n.file_path,
+                    language: n.language.as_deref(),
+                })
+                .collect();
+            let imported = |ix: usize| {
+                imports
+                    .get(nodes[ix].file_path)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            // One call per kind, so every derived edge keeps the kind it was written with;
+            // each call indexes the candidates once.
+            let mut derived = Vec::new();
+            for kind in ["INHERITS", "IMPLEMENTS"] {
+                let edges: Vec<(usize, String)> = heritage
+                    .iter()
+                    .filter(|(k, _, _)| *k == kind)
+                    .map(|(_, s, t)| (*s, t.clone()))
+                    .collect();
+                if edges.is_empty() {
+                    continue;
+                }
+                let r = resolve_heritage(&nodes, &edges, &imported);
+                derived.extend(r.bound.into_iter().map(|(s, t)| (s, t, kind)));
+                for (_, text) in r.ambiguous {
+                    *ambiguous_heritage
+                        .entry(last_segment(&text).to_string())
+                        .or_insert(0) += 1;
+                }
+            }
+            for (s, t, kind) in derived {
+                graph.add_edge(NodeIndex::new(s), NodeIndex::new(t), kind.to_string());
+            }
+        }
+        Ok(Self {
+            graph,
+            index,
+            ambiguous_heritage,
+        })
     }
 
     /// Accepts a uuid, a qualified name, or the SurrealDB forms `nodes:id`, ``nodes:`id` ``
