@@ -1,0 +1,141 @@
+# ABOUTME: Composite GitHub Action that posts a risk-scored, graph-aware codegraph review comment on pull requests.
+# ABOUTME: Linux/macOS runners only; installs the released codegraph binary via install.sh. See docs for usage.
+name: "codegraph PR Review"
+description: >-
+  Post a risk-scored, graph-aware review comment on pull requests.
+  Local-first: the graph is built on the runner and no code leaves it.
+branding:
+  icon: "git-pull-request"
+  color: "purple"
+
+inputs:
+  github-token:
+    description: >-
+      Token used to post the sticky PR comment via the GitHub API.
+      Needs `pull-requests: write` (the default GITHUB_TOKEN works).
+    required: true
+  comment:
+    description: "Post (and keep updated) a sticky PR comment with the report."
+    required: false
+    default: "true"
+  fail-on-risk:
+    description: >-
+      Fail the job when the overall risk reaches this level: none (never
+      fail), high, or critical.
+    required: false
+    default: "none"
+  version:
+    description: "codegraph release to install (for example 1.2.3 or latest)."
+    required: false
+    default: "latest"
+
+outputs:
+  comment-file:
+    description: >-
+      Runner-local path to the rendered markdown report. Use with
+      `comment: false` when a separate trusted workflow publishes it.
+    value: ${{ steps.report.outputs.comment-file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Reject unsupported runners
+      if: ${{ runner.os == 'Windows' }}
+      shell: bash
+      run: |
+        echo "::error::The codegraph Action supports Linux and macOS runners only (install.sh does not support Windows)."
+        exit 1
+
+    - name: Install codegraph
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CODEGRAPH_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        export CODEGRAPH_INSTALL_DIR="${RUNNER_TEMP}/codegraph-bin"
+        bash "${ACTION_PATH}/install.sh"
+        echo "${CODEGRAPH_INSTALL_DIR}" >> "${GITHUB_PATH}"
+
+    # "schema15" tracks the graph database schema version; bump it when the
+    # schema changes so stale caches are not restored.
+    - name: Cache knowledge graph
+      uses: actions/cache@v4
+      with:
+        path: .code-review-graph
+        key: codegraph-schema15-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/package-lock.json', '**/uv.lock', '**/go.sum') }}
+        restore-keys: |
+          codegraph-schema15-${{ runner.os }}-
+
+    # Pull requests diff against origin/<base> (the caller should check out with
+    # fetch-depth: 0). Other events diff against HEAD~1, which needs fetch-depth >= 2.
+    - name: Resolve diff base
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        set -euo pipefail
+        if [ -n "${BASE_REF}" ]; then
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          echo "CODEGRAPH_BASE=origin/${BASE_REF}" >> "${GITHUB_ENV}"
+        else
+          echo "CODEGRAPH_BASE=HEAD~1" >> "${GITHUB_ENV}"
+        fi
+
+    - name: Build or update the graph
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -f .code-review-graph/graph.db ]; then
+          # Cache hit: re-index only changed files; fall back to a full build
+          # if the restored database is unusable.
+          codegraph update . || codegraph build .
+        else
+          codegraph build .
+        fi
+
+    # No `|| true`: a failed analysis must fail the job, never produce a
+    # reassuring comment about a pull request nobody analyzed. Exit 3 (risk
+    # threshold reached) still writes the report so it can be commented first.
+    - name: Run risk-scored change analysis
+      id: report
+      shell: bash
+      env:
+        FAIL_ON_RISK: ${{ inputs.fail-on-risk }}
+      run: |
+        report="${RUNNER_TEMP}/codegraph-comment.md"
+        set +e
+        codegraph pr-report --base "${CODEGRAPH_BASE}" \
+          --fail-on-risk "${FAIL_ON_RISK}" --output "${report}"
+        status=$?
+        set -e
+        if [ "${status}" -ne 0 ] && [ "${status}" -ne 3 ]; then
+          echo "::error::codegraph could not analyze the changes; this pull request has NOT been analyzed."
+          exit 1
+        fi
+        echo "PR_REPORT_STATUS=${status}" >> "${GITHUB_ENV}"
+        if [ -f "${report}" ]; then
+          echo "comment-file=${report}" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Upsert sticky PR comment
+      if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' && steps.report.outputs.comment-file != '' }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        COMMENT_FILE: ${{ steps.report.outputs.comment-file }}
+      run: bash "${ACTION_PATH}/scripts/action/upsert-comment.sh" "${COMMENT_FILE}"
+
+    - name: Enforce risk gate
+      if: ${{ inputs.fail-on-risk != 'none' }}
+      shell: bash
+      env:
+        FAIL_ON_RISK: ${{ inputs.fail-on-risk }}
+      run: |
+        if [ "${PR_REPORT_STATUS:-0}" -eq 3 ]; then
+          echo "::error::Risk reached the '${FAIL_ON_RISK}' threshold (fail-on-risk: ${FAIL_ON_RISK}); see the codegraph report."
+          exit 1
+        fi
