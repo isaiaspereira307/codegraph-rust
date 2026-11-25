@@ -52,8 +52,9 @@ git clone https://github.com/isaiaspereira307/codegraph-rust && cd codegraph-rus
 ## GitHub Action
 
 The repository ships a composite Action that posts a sticky, risk-scored review comment on pull
-requests. It installs the released binary, so it also needs the first release; until then use
-`@main`.
+requests. `@main` only selects the Action's own code: it still downloads a released binary with
+`install.sh`, so the Action cannot run before the first release is published. Once a release
+exists, `@main` (or a tag, once one exists) works.
 
 ```yaml
 name: PR Review

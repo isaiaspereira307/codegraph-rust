@@ -103,6 +103,11 @@ If your change affects configuration, providers, or language support, update:
    `isaiaspereira307/homebrew-codegraph`; without it the Homebrew job is skipped) and, optionally,
    the variable `CODEGRAPH_DOGFOOD=true` to run the PR review Action on this repository.
 
+Note: `.github/workflows/release-please.yml` also runs on every push to `main` (release-type
+`rust`, package `codegraph`) and opens its own version-bump PRs; merge one only if you want it to
+bump the version, and never let the two disagree, since the release workflow requires
+`codegraph --version` to equal the tag.
+
 ## PR checklist
 
 - `cargo test` passes for touched crates

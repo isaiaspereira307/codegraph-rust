@@ -6,8 +6,9 @@ result as one sticky comment that is updated on every push. Nothing leaves the r
 comment itself.
 
 The Action installs a released `codegraph` binary with `install.sh`, so it needs at least one
-published release. Until the first `v*` tag exists, reference it as `@main`; once released, a tag
-can be used the same way.
+published release: `@main` only selects the Action's own code, and `install.sh` still downloads a
+released binary, so the Action cannot run before the first release is published. Once a release
+exists, `uses: isaiaspereira307/codegraph-rust@main` (or a tag, once one exists) works.
 
 ## Example
 

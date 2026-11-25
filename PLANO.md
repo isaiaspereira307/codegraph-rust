@@ -106,7 +106,7 @@ sobre um repositório fixture.
 
 ---
 
-## Fase 2 — Paridade do parser ✅
+## Fase 2 — Paridade do parser ✅ (linguagens restantes adiadas, ver item 6)
 
 Risco principal do projeto: o `parser.py` do CRG tem ~25k linhas de regras por linguagem,
 mais resolvers específicos (C#, AOP, eventos, HCL, aliases npm, workspaces, jedi), contra
