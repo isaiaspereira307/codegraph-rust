@@ -88,6 +88,8 @@ pub fn canonical_file_key(project_root: &std::path::Path, file_path: &str) -> St
 pub enum Language {
     Rust,
     TypeScript,
+    /// `.tsx`: the same extractor as TypeScript, parsed with the JSX-capable grammar.
+    Tsx,
     JavaScript,
     Python,
     Go,

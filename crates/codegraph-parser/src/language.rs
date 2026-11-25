@@ -29,7 +29,15 @@ impl LanguageRegistry {
             Language::TypeScript,
             LanguageConfig {
                 language: tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                file_extensions: vec!["ts", "tsx"],
+                file_extensions: vec!["ts"],
+            },
+        );
+
+        configs.insert(
+            Language::Tsx,
+            LanguageConfig {
+                language: tree_sitter_typescript::LANGUAGE_TSX.into(),
+                file_extensions: vec!["tsx"],
             },
         );
 

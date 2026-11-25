@@ -128,8 +128,8 @@ fn extract_unshaped(
         Language::Rust => Some(RustExtractor::extract_with_policy(
             tree, content, file_path, policy,
         )),
-        // JavaScript uses the TypeScript extractor.
-        Language::TypeScript | Language::JavaScript => {
+        // JavaScript and TSX use the TypeScript extractor; the registry picks the grammar.
+        Language::TypeScript | Language::Tsx | Language::JavaScript => {
             Some(TypeScriptExtractor::extract_with_edges(
                 tree,
                 content,

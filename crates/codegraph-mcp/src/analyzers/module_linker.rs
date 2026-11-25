@@ -213,7 +213,7 @@ fn module_key(project_root: &Path, file_path: &Path, language: &Language) -> Opt
 
     let lang = match language {
         Language::Rust => "rust",
-        Language::TypeScript => "typescript",
+        Language::TypeScript | Language::Tsx => "typescript",
         Language::JavaScript => "javascript",
         Language::Python => "python",
         Language::Go => "go",
@@ -260,7 +260,8 @@ fn canonical_import_target(
 ) -> String {
     let (lang, exts) = match language {
         Language::Rust => ("rust", &["rs"][..]),
-        Language::TypeScript => ("typescript", &["ts", "tsx", "d.ts"][..]),
+        Language::TypeScript => ("typescript", &["ts", "d.ts"][..]),
+        Language::Tsx => ("typescript", &["tsx"][..]),
         Language::JavaScript => ("javascript", &["js", "jsx"][..]),
         Language::Python => ("python", &["py"][..]),
         Language::Go => ("go", &["go"][..]),

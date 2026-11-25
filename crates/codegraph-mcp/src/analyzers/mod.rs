@@ -148,6 +148,12 @@ pub fn lsp_server_for_language(language: &Language) -> Option<LspServerSpec> {
             language_id: "typescript",
             name_joiner: ".",
         }),
+        Language::Tsx => Some(LspServerSpec {
+            tool_name: "typescript-language-server",
+            args: &["--stdio"],
+            language_id: "typescriptreact",
+            name_joiner: ".",
+        }),
         Language::JavaScript => Some(LspServerSpec {
             tool_name: "typescript-language-server",
             args: &["--stdio"],

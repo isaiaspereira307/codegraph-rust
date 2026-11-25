@@ -140,7 +140,7 @@ impl PatternMatcher {
     ) -> ExtractionResult {
         let lang_prefix = match result.nodes.first().and_then(|n| n.language.as_ref()) {
             Some(codegraph_core::Language::Rust) => "rust:",
-            Some(codegraph_core::Language::TypeScript) => "ts:",
+            Some(codegraph_core::Language::TypeScript | codegraph_core::Language::Tsx) => "ts:",
             Some(codegraph_core::Language::JavaScript) => "js:",
             Some(codegraph_core::Language::Python) => "py:",
             Some(codegraph_core::Language::Go) => "go:",

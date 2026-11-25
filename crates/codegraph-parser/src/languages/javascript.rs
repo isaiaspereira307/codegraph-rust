@@ -80,6 +80,22 @@ const MAX_TEST_DESCRIPTION_LEN: usize = 200;
 /// Function values a variable or class field can name (`const f = () => {}`).
 const FUNCTION_VALUE_KINDS: &[&str] = &["arrow_function", "function_expression", "function"];
 
+/// CRG `_JS_COMPONENT_WRAPPERS`: calls known to return a component. A function argument alone
+/// is not evidence (`const n = evaluate(() => compute())` is not a component definition).
+const COMPONENT_WRAPPERS: &[&str] = &[
+    "forwardRef",
+    "memo",
+    "observer",
+    "withRouter",
+    "withStyles",
+    "withTheme",
+    "connect",
+    "styled",
+    "inject",
+    "withTranslation",
+    "withErrorBoundary",
+];
+
 struct TypeScriptCollector<'a> {
     content: &'a str,
     file_path: &'a str,
@@ -132,16 +148,29 @@ impl<'a> TypeScriptCollector<'a> {
             }
         } else if matches!(kind, "variable_declarator" | "public_field_definition") {
             let value = node.child_by_field_name("value");
-            if let (Some(name), Some(value)) = (self.field_text(&node, "name"), value)
-                && FUNCTION_VALUE_KINDS.contains(&value.kind())
-            {
-                // CRG spans a variable function over its whole declaration statement.
-                let extent = match node.parent() {
-                    Some(parent) if kind == "variable_declarator" => parent,
-                    _ => node,
-                };
-                return self.function(name, extent, node);
+            if let (Some(name), Some(value)) = (self.field_text(&node, "name"), value) {
+                if FUNCTION_VALUE_KINDS.contains(&value.kind()) {
+                    // CRG spans a variable function over its whole declaration statement.
+                    let extent = match node.parent() {
+                        Some(parent) if kind == "variable_declarator" => parent,
+                        _ => node,
+                    };
+                    return self.function(name, extent, node);
+                }
+                if let Some((body, wrappers)) = self.wrapped_function(&value) {
+                    let extent = match node.parent() {
+                        Some(parent) if kind == "variable_declarator" => parent,
+                        _ => node,
+                    };
+                    self.function(name, extent, body);
+                    for wrapper in wrappers {
+                        self.call(&wrapper);
+                    }
+                    return;
+                }
             }
+        } else if matches!(kind, "jsx_element" | "jsx_self_closing_element") {
+            self.jsx_call(&node);
         } else if kind == "assignment_expression" {
             let value = node.child_by_field_name("right");
             if let (Some(left), Some(value)) = (node.child_by_field_name("left"), value)
@@ -296,6 +325,82 @@ impl<'a> TypeScriptCollector<'a> {
         self.nodes.push(code);
     }
 
+    /// CRG `_js_wrapped_function`: a known wrapper with a function argument hides a component.
+    /// Returns the function to walk as the component and every wrapper call to record where the
+    /// declaration lives. Nested wrappers are bounded to three levels.
+    fn wrapped_function<'tree>(
+        &self,
+        value: &Node<'tree>,
+    ) -> Option<(Node<'tree>, Vec<Node<'tree>>)> {
+        let mut wrappers = Vec::new();
+        let body = self.unwrap_wrapper(value, 0, &mut wrappers)?;
+        Some((body, wrappers))
+    }
+
+    fn unwrap_wrapper<'tree>(
+        &self,
+        value: &Node<'tree>,
+        depth: usize,
+        wrappers: &mut Vec<Node<'tree>>,
+    ) -> Option<Node<'tree>> {
+        if depth > 3 || value.kind() != "call_expression" {
+            return None;
+        }
+        let name = self.wrapper_name(value)?;
+        let arguments = value.child_by_field_name("arguments")?;
+        let mut cursor = arguments.walk();
+        let args: Vec<_> = arguments
+            .named_children(&mut cursor)
+            .filter(|arg| !matches!(arg.kind(), "comment"))
+            .collect();
+        if args.is_empty() || args.len() > 2 || (args.len() == 2 && name != "memo") {
+            return None;
+        }
+        let first = args[0];
+        if FUNCTION_VALUE_KINDS.contains(&first.kind()) && first.kind() != "generator_function" {
+            wrappers.push(*value);
+            return Some(first);
+        }
+        let inner = self.unwrap_wrapper(&first, depth + 1, wrappers)?;
+        wrappers.push(*value);
+        Some(inner)
+    }
+
+    fn wrapper_name(&self, call: &Node) -> Option<String> {
+        let callee = call.child_by_field_name("function")?;
+        let name = match callee.kind() {
+            "identifier" => self.node_text(&callee),
+            "member_expression" => callee
+                .child_by_field_name("property")
+                .map(|property| self.node_text(&property))?,
+            _ => return None,
+        };
+        COMPONENT_WRAPPERS.contains(&name.as_str()).then_some(name)
+    }
+
+    /// CRG emits a `CALLS` edge for an uppercase JSX tag from the enclosing function; intrinsic
+    /// DOM tags (`div`, `span`, ...) name no component.
+    fn jsx_call(&mut self, node: &Node) {
+        let name_node = node
+            .child_by_field_name("name")
+            .or_else(|| {
+                node.child_by_field_name("opening_element")
+                    .and_then(|opening| opening.child_by_field_name("name"))
+            })
+            .or_else(|| {
+                node.child_by_field_name("closing_element")
+                    .and_then(|closing| closing.child_by_field_name("name"))
+            });
+        let Some(name_node) = name_node else {
+            return;
+        };
+        let name = self.node_text(&name_node);
+        if !name.chars().next().is_some_and(char::is_uppercase) {
+            return;
+        }
+        self.call_edge(name, node);
+    }
+
     /// `require('./x')` and `import('./x')` are module imports, not calls to `require`.
     fn module_import(&self, node: &Node) -> Option<(String, &'static str)> {
         if self.dead > 0 {
@@ -340,6 +445,13 @@ impl<'a> TypeScriptCollector<'a> {
         let Some(target) = self.call_name(node) else {
             return;
         };
+        self.call_edge(target, node);
+    }
+
+    fn call_edge(&mut self, target: String, node: &Node) {
+        if self.dead > 0 {
+            return;
+        }
         let mut metadata = HashMap::from([
             ("call_type".to_string(), "function_call".to_string()),
             ("source_file".to_string(), self.file_path.to_string()),
@@ -509,6 +621,23 @@ mod tests {
         let tree = parser.parse(source, None).unwrap();
         crate::languages::extract_for_language_at(
             &Language::TypeScript,
+            &tree,
+            source,
+            path,
+            path,
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn extract_tsx(source: &str, path: &str) -> ExtractionResult {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        crate::languages::extract_for_language_at(
+            &Language::Tsx,
             &tree,
             source,
             path,
@@ -707,6 +836,28 @@ mod tests {
             "m.ts",
         );
         assert_eq!(calls_from(&r, "m.ts::f"), vec!["live"]);
+    }
+
+    #[test]
+    fn tsx_jsx_and_wrapped_components_become_nodes_and_calls() {
+        let r = extract_tsx(
+            "const Node = React.memo(function Node() {\n  return <div onClick={() => helper()}>\
+             <Widget /></div>;\n});\nconst Forwarded = React.forwardRef((props, ref) => <Widget />);\n",
+            "a.tsx",
+        );
+        let qns = qualified_names(&r);
+        for q in ["a.tsx::Node", "a.tsx::Forwarded"] {
+            assert!(qns.contains(q), "{q} missing from {qns:?}");
+        }
+        assert!(calls_from(&r, "a.tsx::Node").contains(&"Widget".to_string()));
+        assert!(calls_from(&r, "a.tsx::Node").contains(&"helper".to_string()));
+        assert!(calls_from(&r, "a.tsx::Forwarded").contains(&"Widget".to_string()));
+        let file_calls = calls_from(&r, "a.tsx");
+        assert!(file_calls.contains(&"memo".to_string()), "{file_calls:?}");
+        assert!(
+            file_calls.contains(&"forwardRef".to_string()),
+            "{file_calls:?}"
+        );
     }
 
     #[test]

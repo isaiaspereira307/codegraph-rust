@@ -826,7 +826,8 @@ fn default_exts() -> HashSet<String> {
 fn detect_language(path: &Path) -> Language {
     match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
         "rs" => Language::Rust,
-        "ts" | "tsx" => Language::TypeScript,
+        "ts" => Language::TypeScript,
+        "tsx" => Language::Tsx,
         "js" | "jsx" => Language::JavaScript,
         "py" => Language::Python,
         "go" => Language::Go,
@@ -867,6 +868,7 @@ fn normalize_source(src: &str, lang: &Language) -> String {
         Language::Rust
         | Language::JavaScript
         | Language::TypeScript
+        | Language::Tsx
         | Language::Go
         | Language::Java
         | Language::Cpp => minify_c_like(src),
@@ -1042,7 +1044,7 @@ fn extract_symbols(src: &str, lang: &Language) -> HashMap<String, String> {
                     None => (false, String::new()),
                 },
             },
-            Language::JavaScript | Language::TypeScript => {
+            Language::JavaScript | Language::TypeScript | Language::Tsx => {
                 // Handle optional `export` and `export default` prefixes
                 let mut cur = line;
                 if let Some(rest) = cur.strip_prefix("export ") {
@@ -1109,7 +1111,7 @@ fn extract_symbols(src: &str, lang: &Language) -> HashMap<String, String> {
                         l.starts_with("fn ") || l.starts_with("struct ") || l.starts_with("enum ")
                     }
                     Language::Python => l.starts_with("def ") || l.starts_with("class "),
-                    Language::JavaScript | Language::TypeScript => {
+                    Language::JavaScript | Language::TypeScript | Language::Tsx => {
                         l.starts_with("function ") || l.starts_with("class ")
                     }
                     Language::Go => l.starts_with("func "),
