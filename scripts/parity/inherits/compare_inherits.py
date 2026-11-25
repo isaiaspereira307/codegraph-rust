@@ -1,12 +1,16 @@
 # ABOUTME: Compares Rust inheritors_of and file impact radius (depth 1, 2) with a crg_inherits.py dump.
 # ABOUTME: Args: crg.json rust_root crg_root codegraph; prints per-language Jaccards and every divergence.
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 from collections import defaultdict
 
 crg_json, rust_dir, crg_dir, cg = sys.argv[1:5]
+# Resolve before run() switches cwd to rust_dir: a relative cg would be looked up from there,
+# and node paths in both DBs are absolute, so the roots must be too for strip().
+rust_dir, crg_dir, cg = (os.path.abspath(p) for p in (rust_dir, crg_dir, cg))
 crg = json.load(open(crg_json))
 
 

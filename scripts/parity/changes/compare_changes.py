@@ -1,11 +1,15 @@
 # ABOUTME: Compares the Rust change analysis (detect_changes, impact, affected flows) with a CRG dump.
 # ABOUTME: Args: crg.json rust_repo crg_repo base codegraph [depth]; prints a Markdown table of Jaccards.
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 
 crg_json, rust_dir, crg_dir, base, cg = sys.argv[1:6]
+# Resolve before run() switches cwd to rust_dir: a relative cg would be looked up from there,
+# and node paths in both DBs are absolute, so the roots must be too for strip().
+rust_dir, crg_dir, cg = (os.path.abspath(p) for p in (rust_dir, crg_dir, cg))
 DEPTH = int(sys.argv[6]) if len(sys.argv) > 6 else 2
 crg = json.load(open(crg_json))
 

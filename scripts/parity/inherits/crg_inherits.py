@@ -1,6 +1,7 @@
 # ABOUTME: Dumps code-review-graph inheritors_of per type node and file impact radius (depth 1, 2).
 # ABOUTME: Run inside the CRG uv env; writes JSON for compare_inherits.py. Args: root out.json.
 import json
+import os
 import sys
 
 from code_review_graph.tools._common import _get_store
@@ -8,7 +9,7 @@ from code_review_graph.tools.query import query_graph
 
 TYPE_KINDS = ("Class", "Interface", "Type", "Struct", "Enum", "Trait")
 
-root, out = sys.argv[1], sys.argv[2]
+root, out = os.path.abspath(sys.argv[1]), sys.argv[2]
 store, _ = _get_store(root)
 try:
     rows = store._conn.execute(
