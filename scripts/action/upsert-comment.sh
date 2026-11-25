@@ -28,7 +28,7 @@ soft_fail() { # $1 = captured stderr
 # an installation token cannot, so fall back to any Bot author (PR participants
 # are Users, never Bots).
 author="$(gh api user --jq '.login' 2>/dev/null || true)"
-if [ -n "$author" ]; then
+if [ -n "$author" ] && printf '%s' "$author" | grep -qE '^[]A-Za-z0-9_.[-]+$'; then
   author_filter=".user.login == \"${author}\""
 else
   author_filter='.user.type == "Bot"'
@@ -38,7 +38,7 @@ err="$(mktemp)"
 trap 'rm -f "$err"' EXIT
 
 if ! ids="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate \
-  --jq ".[] | select(${author_filter} and (.body | startswith(\"${marker}\"))) | .id" 2>"$err")"; then
+  --jq ".[] | select(${author_filter} and ((.body // \"\") | startswith(\"${marker}\"))) | .id" 2>"$err")"; then
   soft_fail "$(cat "$err")"
 fi
 comment_id="$(printf '%s\n' "$ids" | head -n 1)"

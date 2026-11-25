@@ -19,9 +19,6 @@ if [ "$2" = user ]; then
   [ -n "${FAKE_USER_LOGIN:-}" ] && { echo "$FAKE_USER_LOGIN"; exit 0; }
   echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1
 fi
-if [ "${FAKE_FAIL:-}" = 403 ]; then
-  echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1
-fi
 method=GET; jq=""
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
@@ -30,6 +27,15 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     --jq) jq="${args[$((i + 1))]}" ;;
   esac
 done
+# FAKE_FAIL=<code> fails the call selected by FAKE_FAIL_CALL (GET|POST|PATCH; default all).
+if [ -n "${FAKE_FAIL:-}" ] && { [ -z "${FAKE_FAIL_CALL:-}" ] || [ "$FAKE_FAIL_CALL" = "$method" ]; }; then
+  if [ "$FAKE_FAIL" = 403 ]; then
+    echo "gh: Resource not accessible by integration (HTTP 403)" >&2
+  else
+    echo "gh: server error (HTTP $FAKE_FAIL)" >&2
+  fi
+  exit 1
+fi
 if [ "$method" = GET ]; then
   python3 -I - "$jq" "${FAKE_COMMENTS:-/dev/null}" <<'PY'
 import json, re, sys
@@ -41,11 +47,18 @@ except Exception:
 m = re.search(r'\.user\.login == \\?"([^"\\]+)\\?"', jq)
 marker = re.search(r'startswith\(\\?"(.*?)\\?"\)', jq).group(1)
 for c in data:
+    body = c["body"]
+    if body is None:
+        if '.body // ""' in jq:
+            body = ""
+        else:
+            sys.stderr.write("jq: error: null (null) cannot be matched, as it is not a string\n")
+            sys.exit(5)
     if m:
         ok = c["user"]["login"] == m.group(1)
     else:
         ok = c["user"]["type"] == "Bot"
-    if ok and c["body"].startswith(marker):
+    if ok and body.startswith(marker):
         print(c["id"])
 PY
 fi
@@ -112,6 +125,54 @@ run
 [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '::warning::'
 check "gh 403 -> ::warning:: and exit 0" $?
 unset FAKE_FAIL
+
+# 8. null body in the listing: not a match, no failure
+comments '[{"id":666,"user":{"login":"github-actions[bot]","type":"Bot"},"body":null},{"id":667,"user":{"login":"github-actions[bot]","type":"Bot"},"body":"<!-- codegraph-report -->\nmine"}]'
+run
+[ "$RC" -eq 0 ] && [ "$(count 'method PATCH')" -eq 1 ] && grep -q 'issues/comments/667' "$work/log"
+check "null body comment is skipped without failing" $?
+
+# 9. unsafe author login never reaches the jq string; Bot filter used instead
+export FAKE_USER_LOGIN='ev"il x'
+comments '[]'
+run
+[ "$RC" -eq 0 ] && ! grep -q 'ev"il' <(grep -v '^gh api user' "$work/log") && grep -q 'Bot' "$work/log"
+check "unsafe login falls back to Bot filter" $?
+unset FAKE_USER_LOGIN
+
+# 10. non-403 gh error on listing -> ::error:: and exit 1
+export FAKE_FAIL=500 FAKE_FAIL_CALL=GET
+run
+[ "$RC" -eq 1 ] && printf '%s' "$OUT" | grep -q '::error::'
+check "non-403 listing error -> ::error:: exit 1" $?
+unset FAKE_FAIL FAKE_FAIL_CALL
+
+# 11. several matches -> PATCH targets the first
+comments '[{"id":701,"user":{"login":"github-actions[bot]","type":"Bot"},"body":"<!-- codegraph-report -->\na"},{"id":702,"user":{"login":"github-actions[bot]","type":"Bot"},"body":"<!-- codegraph-report -->\nb"}]'
+run
+[ "$(count 'method PATCH')" -eq 1 ] && grep -q 'issues/comments/701' "$work/log" && ! grep -q 'issues/comments/702' "$work/log"
+check "several matches -> PATCH the first" $?
+
+# 12. listing call passes --paginate
+comments '[]'
+run
+grep 'issues/7/comments' "$work/log" | grep -q -- '--paginate'
+check "listing uses --paginate" $?
+
+# 13. 403 on POST -> warning, exit 0
+export FAKE_FAIL=403 FAKE_FAIL_CALL=POST
+comments '[]'
+run
+[ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '::warning::'
+check "403 on POST -> ::warning:: exit 0" $?
+
+# 14. 403 on PATCH -> warning, exit 0
+export FAKE_FAIL=403 FAKE_FAIL_CALL=PATCH
+comments '[{"id":111,"user":{"login":"github-actions[bot]","type":"Bot"},"body":"<!-- codegraph-report -->\nold"}]'
+run
+[ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q '::warning::'
+check "403 on PATCH -> ::warning:: exit 0" $?
+unset FAKE_FAIL FAKE_FAIL_CALL
 
 # 7. missing comment file -> non-zero
 OUT="$(PATH="$work/bin:$PATH" FAKE_LOG="$work/log" GH_TOKEN=x GITHUB_REPOSITORY=o/r PR_NUMBER=7 bash "$script" "$work/nope.md" 2>&1)"

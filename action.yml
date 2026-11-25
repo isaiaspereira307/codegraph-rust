@@ -1,5 +1,11 @@
 # ABOUTME: Composite GitHub Action that posts a risk-scored, graph-aware codegraph review comment on pull requests.
 # ABOUTME: Linux/macOS runners only; installs the released codegraph binary via install.sh. See docs for usage.
+# Notes:
+# - If posting the comment gets a 403 (fork PR, or the token lacks
+#   `pull-requests: write`), it downgrades to a warning; the report stays
+#   available in the `comment-file` output.
+# - On non-pull_request events the diff base is HEAD~1, so check out with
+#   `fetch-depth: 2` (pull requests should use `fetch-depth: 0`).
 name: "codegraph PR Review"
 description: >-
   Post a risk-scored, graph-aware review comment on pull requests.
@@ -46,6 +52,19 @@ runs:
         echo "::error::The codegraph Action supports Linux and macOS runners only (install.sh does not support Windows)."
         exit 1
 
+    - name: Validate inputs
+      shell: bash
+      env:
+        FAIL_ON_RISK: ${{ inputs.fail-on-risk }}
+      run: |
+        case "${FAIL_ON_RISK}" in
+          none|high|critical) ;;
+          *)
+            echo "::error::fail-on-risk must be one of none, high, critical"
+            exit 1
+            ;;
+        esac
+
     - name: Install codegraph
       shell: bash
       env:
@@ -90,7 +109,11 @@ runs:
         if [ -f .code-review-graph/graph.db ]; then
           # Cache hit: re-index only changed files; fall back to a full build
           # if the restored database is unusable.
-          codegraph update . || codegraph build .
+          codegraph update . || {
+            echo "::warning::codegraph update failed; rebuilding the graph from scratch"
+            rm -rf .code-review-graph
+            codegraph build .
+          }
         else
           codegraph build .
         fi
@@ -130,12 +153,12 @@ runs:
       run: bash "${ACTION_PATH}/scripts/action/upsert-comment.sh" "${COMMENT_FILE}"
 
     - name: Enforce risk gate
-      if: ${{ inputs.fail-on-risk != 'none' }}
+      if: ${{ env.PR_REPORT_STATUS == '3' }}
       shell: bash
       env:
         FAIL_ON_RISK: ${{ inputs.fail-on-risk }}
       run: |
-        if [ "${PR_REPORT_STATUS:-0}" -eq 3 ]; then
+        if true; then
           echo "::error::Risk reached the '${FAIL_ON_RISK}' threshold (fail-on-risk: ${FAIL_ON_RISK}); see the codegraph report."
           exit 1
         fi
