@@ -92,3 +92,9 @@ debug com 3 repetições na Task 11; estes valores são apenas o registro da lin
   `/tmp/opencode/parity-p1-t5`: 82 pisos OK. A/B release (`build . --skip-postprocess`, 10 pares)
   mediana 16,46 s → 15,51 s. Medição em
   [`p1-task5-rust-resolution.md`](p1-task5-rust-resolution.md).
+- Task 6: probe `typescript-js` com JSX/`memo`/`forwardRef`, `require`/`import()`, alias de
+  workspace/npm, funções atribuídas a membro e guarda morta. Sonda: nós 0.714/0.333 → 1.000 em
+  JS/TSX, CALLS 0.200 → 1.000, CONTAINS 0.471 → 1.000, IMPORTS_FROM 0.500 → 1.000; corpus TS
+  segue em 1.000. Nós sintéticos de diretório saíram da indexação (o CRG não os emite). Snapshot
+  completo `/tmp/opencode/parity-p1-t6`: 86 pisos OK (82 + 4 novos pisos do probe). Medição em
+  [`p1-task6-ts-js.md`](p1-task6-ts-js.md), incluindo a divergência conhecida de receptor tipado.
