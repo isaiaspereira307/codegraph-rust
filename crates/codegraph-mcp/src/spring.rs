@@ -354,6 +354,50 @@ pub(crate) fn resolve_spring_events(
     emitted
 }
 
+/// Points a functional WebFlux HANDLES edge at the handler named by its method reference. The
+/// parser records the reference's receiver and byte span; the matching CALLS edge is resolved by
+/// the same Java type lookup, so its target is the handler's real `NodeId`.
+pub(crate) fn resolve_webflux_handlers(
+    edges: &mut [EdgeRelationship],
+    targets: &[Option<NodeId>],
+) -> usize {
+    let span_key = |span: &Span| format!("{}:{}", span.start_byte, span.end_byte);
+    let mut resolved = 0;
+    for index in 0..edges.len() {
+        let (receiver, handler, handler_span) = {
+            let edge = &edges[index];
+            if edge.edge_type != EdgeType::Other(HANDLES.into())
+                || !edge.metadata.contains_key("webflux_handler")
+            {
+                continue;
+            }
+            let (Some(receiver), Some(handler), Some(handler_span)) = (
+                edge.metadata.get("handler_receiver"),
+                edge.metadata.get("handler"),
+                edge.metadata.get("handler_span"),
+            ) else {
+                continue;
+            };
+            (receiver.clone(), handler.clone(), handler_span.clone())
+        };
+        let candidate = (0..edges.len()).find(|&other| {
+            let edge = &edges[other];
+            edge.edge_type == EdgeType::Calls
+                && edge.metadata.get("receiver").map(String::as_str) == Some(receiver.as_str())
+                && edge.to.rsplit('.').next() == Some(handler.as_str())
+                && edge
+                    .span
+                    .as_ref()
+                    .is_some_and(|span| span_key(span) == handler_span)
+        });
+        if let Some(Some(id)) = candidate.and_then(|other| targets.get(other)) {
+            edges[index].from = *id;
+            resolved += 1;
+        }
+    }
+    resolved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

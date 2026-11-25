@@ -1314,6 +1314,10 @@ impl ProjectIndexer {
                 "resolution_exact_lexical".into(),
                 resolution_start.elapsed().as_millis() as u64,
             );
+            let webflux_resolved = crate::spring::resolve_webflux_handlers(&mut edges, &targets);
+            if webflux_resolved > 0 {
+                info!("   🌐 WebFlux route handlers resolved: {webflux_resolved}");
+            }
             let edge_persistence_start = std::time::Instant::now();
             let resolved_count = targets.iter().filter(|target| target.is_some()).count();
             let mut edge_records = Vec::with_capacity(edges.len());

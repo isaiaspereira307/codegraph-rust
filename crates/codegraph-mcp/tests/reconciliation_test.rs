@@ -391,6 +391,40 @@ async fn java_spring_events_bind_publisher_to_listener() -> Result<()> {
     Ok(())
 }
 
+/// A functional WebFlux route is owned by the handler its method reference names, even when that
+/// handler lives in another file.
+#[tokio::test]
+async fn java_webflux_route_binds_to_its_handler() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(module_path!(), "::java_webflux_route_binds_to_its_handler"),
+        &[
+            ("com/x/Handler.java", "package com.x;\npublic class Handler { public void handle() {} }\n"),
+            (
+                "com/x/WebRoutes.java",
+                "package com.x;\nimport static org.springframework.web.reactive.function.server.RouterFunctions.route;\n\
+                 import org.springframework.web.reactive.function.server.RouterFunction;\n\
+                 public class WebRoutes {\n\
+                 public RouterFunction routes(Handler handler) {\n\
+                 return route()\n\
+                     .GET(\"/web\", handler::handle)\n\
+                     .build();\n\
+                 }\n\
+                 }\n",
+            ),
+        ],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let edges = edges_of(&indexer.graph_store(), dir.path(), "'HANDLES'")?;
+    assert!(
+        edges.contains(&"HANDLES|com/x/Handler.java::Handler.handle|com/x/WebRoutes.java::WebRoutes.handle@WebFlux[6] GET /web".to_string()),
+        "{edges:?}"
+    );
+    Ok(())
+}
+
 /// Rust `use` paths bind to File nodes through Cargo layouts: `crate::` inside the importer's
 /// crate, a path dependency's name to that crate's modules; `std` stays text.
 #[tokio::test]

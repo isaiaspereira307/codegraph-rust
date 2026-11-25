@@ -55,6 +55,7 @@ const REQUEST_MAPPINGS: &[&str] = &[
     "PatchMapping",
     "RequestMapping",
 ];
+const WEBFLUX_VERBS: &[&str] = &["DELETE", "GET", "PATCH", "POST", "PUT"];
 
 /// CRG `_SPRING_INJECT_ANNOTATIONS`.
 const INJECT_ANNOTATIONS: &[&str] = &["Autowired", "Inject", "Resource"];
@@ -1475,6 +1476,137 @@ impl<'a> JavaCollector<'a> {
             }
         }
         self.publish_event_edges(node, function_id);
+        self.webflux_route_edges(node, function_id);
+    }
+
+    /// CRG's `route().GET("/path", handler::method)` endpoint: the virtual node is owned by the
+    /// enclosing router, but the HANDLES source is rewritten to the referenced handler later.
+    fn webflux_route_edges(&mut self, function: &Node, function_id: NodeId) {
+        if !self
+            .content
+            .contains("org.springframework.web.reactive.function.server")
+        {
+            return;
+        }
+        let mut stack = vec![*function];
+        while let Some(current) = stack.pop() {
+            if current.kind() == "method_invocation" {
+                let (method, _) = self.method_and_receiver(&current);
+                if method
+                    .as_deref()
+                    .is_some_and(|method| WEBFLUX_VERBS.contains(&method))
+                    && self.java_invocation_chain_has_route(&current)
+                    && !self.inside_lambda(current)
+                    && let Some((route, reference)) = self.webflux_route_arguments(&current)
+                {
+                    let http_method = method.unwrap_or_default();
+                    let handler_span =
+                        format!("{}:{}", reference.start_byte(), reference.end_byte());
+                    let named: Vec<Node> = named_children(&reference).collect();
+                    if let (Some(first), Some(last)) = (named.first(), named.last()) {
+                        let receiver = self.node_text(first);
+                        let handler = self.node_text(last);
+                        let line = current.start_position().row + 1;
+                        let endpoint_name =
+                            format!("{handler}@WebFlux[{line}] {http_method} {route}");
+                        let qualified = self.qualified_here(&endpoint_name);
+                        let owner = self.classes.last().cloned();
+                        let metadata = HashMap::from([
+                            ("handler".to_string(), handler.clone()),
+                            ("http_method".to_string(), http_method),
+                            (
+                                "mapping_style".to_string(),
+                                "webflux_functional".to_string(),
+                            ),
+                            ("route".to_string(), route),
+                        ]);
+                        self.framework_node(
+                            endpoint_name,
+                            "Endpoint",
+                            qualified.clone(),
+                            self.file_path.to_string(),
+                            line as u32,
+                            owner.as_deref(),
+                            metadata.clone(),
+                        );
+                        if let Some(node) = self.nodes.last_mut() {
+                            node.location.end_line = Some((current.end_position().row + 1) as u32);
+                        }
+                        let mut edge_metadata = metadata;
+                        edge_metadata.insert("webflux_handler".to_string(), "true".to_string());
+                        edge_metadata.insert("handler_receiver".to_string(), receiver);
+                        edge_metadata.insert("handler_span".to_string(), handler_span);
+                        self.framework_edge(
+                            function_id,
+                            HANDLES,
+                            qualified,
+                            edge_metadata,
+                            &current,
+                        );
+                    }
+                }
+            }
+            let mut children: Vec<Node> = children(&current).collect();
+            children.reverse();
+            stack.extend(children);
+        }
+    }
+
+    /// Whether a fluent invocation is rooted at `route()`, following nested invocations.
+    fn java_invocation_chain_has_route(&self, invocation: &Node) -> bool {
+        let mut current = *invocation;
+        for _ in 0..32 {
+            if current.kind() != "method_invocation" {
+                return false;
+            }
+            let (method, _) = self.method_and_receiver(&current);
+            if method.as_deref() == Some("route") {
+                return true;
+            }
+            let Some(next) = children(&current).find(|child| child.kind() == "method_invocation")
+            else {
+                return false;
+            };
+            current = next;
+        }
+        false
+    }
+
+    /// CRG skips functional routes built inside a lambda: there is no single handler to name.
+    fn inside_lambda(&self, node: Node) -> bool {
+        let mut parent = node.parent();
+        while let Some(current) = parent {
+            if is_function(current.kind()) {
+                return false;
+            }
+            if current.kind() == "lambda_expression" {
+                return true;
+            }
+            parent = current.parent();
+        }
+        false
+    }
+
+    /// The literal path and direct method reference of one WebFlux verb call.
+    fn webflux_route_arguments<'t>(&self, invocation: &Node<'t>) -> Option<(String, Node<'t>)> {
+        let arguments = children(invocation).find(|child| child.kind() == "argument_list")?;
+        let named: Vec<Node> = named_children(&arguments).collect();
+        if named.len() < 2 || named[0].kind() != "string_literal" {
+            return None;
+        }
+        let route = self
+            .node_text(&named[0])
+            .trim()
+            .trim_matches('"')
+            .to_string();
+        if !route.starts_with('/') {
+            return None;
+        }
+        let reference = named[1..]
+            .iter()
+            .find(|child| child.kind() == "method_reference")
+            .copied()?;
+        Some((route, reference))
     }
 
     /// `publishEvent(new Event())` edges, with the event type CRG resolves from the import map.
@@ -2004,6 +2136,29 @@ class Order {
         );
         let node = node(&result, "event::LocalEvent");
         assert_eq!(node.name.as_str(), "LocalEvent");
+    }
+
+    #[test]
+    fn webflux_functional_route_emits_endpoint_and_handler_edge() {
+        let source = "import static org.springframework.web.reactive.function.server.RouterFunctions.route;\n\
+                       import org.springframework.web.reactive.function.server.RouterFunction;\n\
+                       class WebRoutes {\n\
+                       RouterFunction routes(Handler handler) {\n\
+                       return route()\n\
+                           .GET(\"/web\", handler::handle)\n\
+                           .build();\n\
+                       }\n\
+                       }\n";
+        let result = extract_java(source, "W.java");
+        let endpoint = "W.java::WebRoutes.handle@WebFlux[5] GET /web";
+        assert!(
+            edges(&result, EdgeType::Other("handles".into()))
+                .contains(&("W.java::WebRoutes.routes".into(), endpoint.to_string()))
+        );
+        let node = node(&result, endpoint);
+        assert_eq!(node.name.as_str(), "handle@WebFlux[5] GET /web");
+        assert_eq!(node.location.line, 5);
+        assert_eq!(node.location.end_line, Some(6));
     }
 
     #[test]
