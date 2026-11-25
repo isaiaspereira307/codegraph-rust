@@ -190,7 +190,9 @@ enum Commands {
 
     #[command(about = "Run one relationship query from a node")]
     Query {
-        #[arg(help = "callers_of | callees_of | imports_of | importers_of | tests_for | inheritors_of")]
+        #[arg(
+            help = "callers_of | callees_of | imports_of | importers_of | tests_for | inheritors_of"
+        )]
         pattern: String,
         #[arg(long, help = "Node id")]
         node_id: Option<String>,

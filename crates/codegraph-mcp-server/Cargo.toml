@@ -1,6 +1,9 @@
 [package]
 name = "codegraph-mcp-server"
-version = "0.1.0"
+version.workspace = true
+repository.workspace = true
+description = "CodeGraph CLI and MCP server: SQLite code knowledge graph with deterministic graph tools"
+readme = "../../README.md"
 edition.workspace = true
 rust-version.workspace = true
 authors = ["Solita CodeGraph"]

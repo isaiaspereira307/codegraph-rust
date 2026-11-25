@@ -22,7 +22,7 @@ edition = "2024"
 rust-version = "1.95"
 authors = ["CodeGraph Team"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/codegraph/embedding-system"
+repository = "https://github.com/isaiaspereira307/codegraph-rust"
 
 [workspace.dependencies]
 fastrand = "2.5.0"
