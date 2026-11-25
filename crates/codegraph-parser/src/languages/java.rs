@@ -15,8 +15,46 @@ use tree_sitter::{Node, Tree};
 /// (`_resolve_call_targets`). Spring DI calls are resolved later, across files, by the indexer.
 pub struct JavaExtractor;
 
-/// Edge kind of a Spring injection point (CRG `INJECTS`).
+/// Edge kinds CRG emits from Java framework annotations and fields.
 pub const INJECTS: &str = "injects";
+pub const CONSUMES: &str = "consumes";
+pub const PRODUCES: &str = "produces";
+pub const DEPENDS_ON_CONFIG: &str = "depends_on_config";
+pub const HANDLES: &str = "handles";
+pub const TRIGGERS: &str = "triggers";
+pub const PUBLISHES: &str = "publishes";
+pub const TEMPORAL_STUB: &str = "temporal_stub";
+
+/// CRG keeps textual targets for every edge kind it extracts from Java source.
+pub fn is_framework_edge(kind: &str) -> bool {
+    matches!(
+        kind,
+        INJECTS
+            | CONSUMES
+            | PRODUCES
+            | DEPENDS_ON_CONFIG
+            | HANDLES
+            | TRIGGERS
+            | PUBLISHES
+            | TEMPORAL_STUB
+    )
+}
+
+const KAFKA_LISTENER_ANNOTATIONS: &[&str] = &["KafkaListener", "KafkaHandler"];
+const KAFKA_CONSUMER_TYPES: &[&str] = &["KafkaReceiver", "ReactiveKafkaConsumerTemplate"];
+const KAFKA_PRODUCER_TYPES: &[&str] = &[
+    "KafkaTemplate",
+    "KafkaOperations",
+    "ReactiveKafkaProducerTemplate",
+];
+const REQUEST_MAPPINGS: &[&str] = &[
+    "GetMapping",
+    "PostMapping",
+    "PutMapping",
+    "DeleteMapping",
+    "PatchMapping",
+    "RequestMapping",
+];
 
 /// CRG `_SPRING_INJECT_ANNOTATIONS`.
 const INJECT_ANNOTATIONS: &[&str] = &["Autowired", "Inject", "Resource"];
@@ -107,6 +145,8 @@ struct JavaCollector<'a> {
     symbols: Vec<(String, String)>,
     /// Indices of CALLS edges written without a receiver.
     bare_calls: Vec<usize>,
+    /// Virtual `event::` nodes already emitted in this file.
+    virtual_events: HashMap<String, NodeId>,
 }
 
 impl<'a> JavaCollector<'a> {
@@ -124,6 +164,7 @@ impl<'a> JavaCollector<'a> {
             classes: Vec::new(),
             symbols: Vec::new(),
             bare_calls: Vec::new(),
+            virtual_events: HashMap::new(),
         };
         collector.scan_declarations(root);
         collector
@@ -317,7 +358,7 @@ impl<'a> JavaCollector<'a> {
         let id = code.id;
         self.push_symbol(&name, &code);
         self.nodes.push(code);
-        self.classes.push(name);
+        self.classes.push(name.clone());
 
         for base in self.bases(node) {
             let java_type = self.java_type(&base);
@@ -333,6 +374,7 @@ impl<'a> JavaCollector<'a> {
             });
         }
         self.injections(node, id, &annotations);
+        self.framework_class_edges(node, id, &name);
         true
     }
 
@@ -384,9 +426,11 @@ impl<'a> JavaCollector<'a> {
             attributes.insert(crg_shape::DECORATORS_ATTR.into(), annotations.join(","));
         }
 
+        let id = code.id;
         self.push_symbol(&name, &code);
-        self.functions.push(code.id);
+        self.functions.push(id);
         self.nodes.push(code);
+        self.framework_method_edges(node, id, &name);
         true
     }
 
@@ -906,6 +950,571 @@ impl<'a> JavaCollector<'a> {
             .collect()
     }
 
+    /// Annotation nodes of one declaration, in source order.
+    fn annotation_nodes<'t>(&self, node: &Node<'t>) -> Vec<Node<'t>> {
+        children(node)
+            .filter(|c| c.kind() == "modifiers")
+            .flat_map(|modifiers| children(&modifiers).collect::<Vec<_>>())
+            .filter(|c| matches!(c.kind(), "marker_annotation" | "annotation"))
+            .collect()
+    }
+
+    /// Simple name of an annotation, even when written with a package prefix.
+    fn annotation_name(&self, annotation: &Node) -> Option<String> {
+        children(annotation).find_map(|child| match child.kind() {
+            "identifier" => Some(self.node_text(&child)),
+            "scoped_identifier" => self
+                .node_text(&child)
+                .rsplit('.')
+                .next()
+                .map(str::to_string),
+            _ => None,
+        })
+    }
+
+    /// String literals under a node, in depth-first source order.
+    fn string_literals(&self, node: &Node) -> Vec<String> {
+        let mut values = Vec::new();
+        let mut stack = vec![*node];
+        while let Some(current) = stack.pop() {
+            if current.kind() == "string_literal" {
+                values.push(
+                    self.node_text(&current)
+                        .trim()
+                        .trim_matches('"')
+                        .to_string(),
+                );
+            }
+            let mut children: Vec<Node> = children(&current).collect();
+            children.reverse();
+            stack.extend(children);
+        }
+        values
+    }
+
+    /// Named and positional annotation arguments, kept as strings for framework edges.
+    fn annotation_values(&self, annotation: &Node) -> HashMap<String, Vec<String>> {
+        let mut values: HashMap<String, Vec<String>> = HashMap::new();
+        let mut stack = vec![*annotation];
+        while let Some(current) = stack.pop() {
+            if current.kind() == "element_value_pair" {
+                let key = current
+                    .child_by_field_name("key")
+                    .or_else(|| children(&current).find(|child| child.kind() == "identifier"));
+                let value = current
+                    .child_by_field_name("value")
+                    .or_else(|| children(&current).nth(1));
+                if let (Some(key), Some(value)) = (key, value) {
+                    let strings = self.string_literals(&value);
+                    if !strings.is_empty() {
+                        values
+                            .entry(self.node_text(&key))
+                            .or_default()
+                            .extend(strings);
+                    }
+                }
+            }
+            let mut children: Vec<Node> = children(&current).collect();
+            children.reverse();
+            stack.extend(children);
+        }
+        if values.is_empty() {
+            let positional = self.string_literals(annotation);
+            if !positional.is_empty() {
+                values.insert("value".into(), positional);
+            }
+        }
+        values
+    }
+
+    fn annotation_value(&self, annotation: &Node, keys: &[&str]) -> Option<String> {
+        let values = self.annotation_values(annotation);
+        keys.iter()
+            .find_map(|key| values.get(*key))
+            .and_then(|found| found.first())
+            .cloned()
+    }
+
+    /// `${key:default}` keys, without the default, as CRG's config emitter keeps them.
+    fn config_placeholders(&self, value: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        let bytes = value.as_bytes();
+        let mut index = 0;
+        while let Some(start) = value[index..].find("${").map(|offset| index + offset + 2) {
+            let Some(end) = bytes[start..]
+                .iter()
+                .position(|byte| *byte == b'}')
+                .map(|offset| start + offset)
+            else {
+                break;
+            };
+            let key = value[start..end]
+                .split_once(':')
+                .map(|(key, _)| key)
+                .unwrap_or(&value[start..end])
+                .trim();
+            if !key.is_empty() {
+                keys.push(key.to_string());
+            }
+            index = end + 1;
+        }
+        keys
+    }
+
+    fn first_parameter_type(&self, function: &Node) -> Option<String> {
+        children(function)
+            .find(|child| child.kind() == "formal_parameters")
+            .and_then(|parameters| {
+                children(&parameters).find(|child| child.kind() == "formal_parameter")
+            })
+            .and_then(|parameter| parameter.child_by_field_name("type"))
+            .map(|type_node| self.node_text(&type_node))
+    }
+
+    /// Type identities in `Foo.class` values or, failing that, the first parameter.
+    fn event_types(&self, annotation: &Node, function: &Node) -> Vec<String> {
+        let mut types = Vec::new();
+        let mut stack = vec![*annotation];
+        while let Some(current) = stack.pop() {
+            if current.kind() == "class_literal"
+                && let Some(name) = self.java_type_name(&current)
+            {
+                types.push(name);
+            }
+            let mut children: Vec<Node> = children(&current).collect();
+            children.reverse();
+            stack.extend(children);
+        }
+        if types.is_empty()
+            && let Some(name) = self.first_parameter_type(function)
+        {
+            types.push(name);
+        }
+        types
+            .into_iter()
+            .map(|name| self.java_type(&name))
+            .filter(|identity| !identity.is_empty())
+            .collect()
+    }
+
+    fn http_method(&self, annotation: &Node, name: &str) -> Option<String> {
+        if !REQUEST_MAPPINGS.contains(&name) {
+            return None;
+        }
+        let method = match name {
+            "GetMapping" => "GET",
+            "PostMapping" => "POST",
+            "PutMapping" => "PUT",
+            "DeleteMapping" => "DELETE",
+            "PatchMapping" => "PATCH",
+            "RequestMapping" => &self
+                .annotation_value(annotation, &["method"])
+                .filter(|value| !value.is_empty())?,
+            _ => return None,
+        };
+        Some(method.to_string())
+    }
+
+    /// A synthetic CRG node (Endpoint/Scheduler/Event), with the qualified name the edge names.
+    fn framework_node(
+        &mut self,
+        name: String,
+        kind: &str,
+        qualified: String,
+        file_path: String,
+        line: u32,
+        parent: Option<&str>,
+        metadata: HashMap<String, String>,
+    ) -> NodeId {
+        let mut node = CodeNode::new(
+            name,
+            Some(NodeType::Other(kind.into())),
+            Some(Language::Java),
+            Location {
+                file_path,
+                line,
+                column: 0,
+                end_line: Some(line),
+                end_column: Some(0),
+            },
+        );
+        let attributes = &mut node.metadata.attributes;
+        attributes.insert("qualified_name".into(), qualified);
+        if let Some(parent) = parent {
+            attributes.insert("parent_name".into(), parent.to_string());
+        }
+        attributes.extend(metadata);
+        let id = node.id;
+        self.nodes.push(node);
+        id
+    }
+
+    fn event_node(&mut self, event_type: &str) -> NodeId {
+        let identity = format!("event::{event_type}");
+        if let Some(&id) = self.virtual_events.get(&identity) {
+            return id;
+        }
+        let name = event_type
+            .rsplit('.')
+            .next()
+            .unwrap_or(event_type)
+            .to_string();
+        let metadata = HashMap::from([
+            ("event_type".to_string(), event_type.to_string()),
+            ("virtual".to_string(), "true".to_string()),
+        ]);
+        let id = self.framework_node(
+            name,
+            "Event",
+            identity.clone(),
+            "event".to_string(),
+            0,
+            None,
+            metadata,
+        );
+        self.virtual_events.insert(identity, id);
+        id
+    }
+
+    fn framework_edge(
+        &mut self,
+        from: NodeId,
+        kind: &str,
+        to: String,
+        mut metadata: HashMap<String, String>,
+        node: &Node,
+    ) {
+        metadata.insert("source_file".to_string(), self.file_path.to_string());
+        self.edges.push(EdgeRelationship {
+            from,
+            to,
+            edge_type: EdgeType::Other(kind.into()),
+            metadata,
+            span: Some(self.span_for(node)),
+        });
+    }
+
+    fn qualified_here(&self, symbol: &str) -> String {
+        let owner = self.classes.join(".");
+        if owner.is_empty() {
+            format!("{}::{symbol}", self.file_path)
+        } else {
+            format!("{}::{owner}.{symbol}", self.file_path)
+        }
+    }
+
+    /// Class-level framework edges: config keys, Temporal stubs and Kafka field templates.
+    fn framework_class_edges(&mut self, node: &Node, class_id: NodeId, _class_name: &str) {
+        let class_annotations = self.annotation_nodes(node);
+        for annotation in &class_annotations {
+            if self.annotation_name(&annotation).as_deref() != Some("ConfigurationProperties") {
+                continue;
+            }
+            let Some(prefix) = self.annotation_value(&annotation, &["prefix", "value"]) else {
+                continue;
+            };
+            let key = prefix.trim();
+            if key.is_empty() {
+                continue;
+            }
+            self.framework_edge(
+                class_id,
+                DEPENDS_ON_CONFIG,
+                format!("config:{key}.*"),
+                HashMap::from([
+                    ("config_key".to_string(), key.to_string()),
+                    (
+                        "resolution".to_string(),
+                        "configuration_properties".to_string(),
+                    ),
+                ]),
+                &annotation,
+            );
+        }
+        let Some(body) = children(node).find(|child| child.kind() == "class_body") else {
+            return;
+        };
+        for member in children(&body).filter(|child| child.kind() == "field_declaration") {
+            let static_field = children(&member)
+                .find(|child| child.kind() == "modifiers")
+                .is_some_and(|modifiers| {
+                    modifier_keywords(&modifiers)
+                        .iter()
+                        .any(|keyword| keyword == "static")
+                });
+            if static_field {
+                continue;
+            }
+            let field_type = children(&member).find_map(|child| match child.kind() {
+                "type_identifier" => Some(self.node_text(&child)),
+                "generic_type" => children(&child)
+                    .find(|inner| inner.kind() == "type_identifier")
+                    .map(|inner| self.node_text(&inner)),
+                _ => None,
+            });
+            let field_name = children(&member)
+                .find(|child| child.kind() == "variable_declarator")
+                .and_then(|declarator| {
+                    children(&declarator)
+                        .find(|child| child.kind() == "identifier")
+                        .map(|child| self.node_text(&child))
+                });
+            let (Some(field_type), Some(field_name)) = (field_type, field_name) else {
+                continue;
+            };
+            if field_type.ends_with("Activity") || field_type.ends_with("Workflow") {
+                self.framework_edge(
+                    class_id,
+                    TEMPORAL_STUB,
+                    field_type.clone(),
+                    HashMap::from([
+                        ("field_name".to_string(), field_name.clone()),
+                        (
+                            "stub_type".to_string(),
+                            if field_type.ends_with("Activity") {
+                                "activity".to_string()
+                            } else {
+                                "workflow".to_string()
+                            },
+                        ),
+                    ]),
+                    &member,
+                );
+            }
+            let kafka_kind = if KAFKA_CONSUMER_TYPES.contains(&field_type.as_str()) {
+                Some(CONSUMES)
+            } else {
+                KAFKA_PRODUCER_TYPES
+                    .contains(&field_type.as_str())
+                    .then_some(PRODUCES)
+            };
+            if let Some(kind) = kafka_kind {
+                let mut metadata = HashMap::from([
+                    ("field_name".to_string(), field_name),
+                    ("kafka_type".to_string(), field_type),
+                ]);
+                let generics: Vec<String> = children(&member)
+                    .filter(|child| child.kind() == "generic_type")
+                    .flat_map(|generic| self.string_literals(&generic))
+                    .collect();
+                if let Some(message_type) = generics.last() {
+                    metadata.insert("message_type".into(), message_type.clone());
+                }
+                self.framework_edge(
+                    class_id,
+                    kind,
+                    "kafka:config".to_string(),
+                    metadata,
+                    &member,
+                );
+            }
+            let field_annotations = self.annotation_nodes(&member);
+            for annotation in &field_annotations {
+                if self.annotation_name(annotation).as_deref() != Some("Value") {
+                    continue;
+                }
+                for value in self.annotation_values(&annotation).values().flatten() {
+                    for key in self.config_placeholders(value) {
+                        self.framework_edge(
+                            class_id,
+                            DEPENDS_ON_CONFIG,
+                            format!("config:{key}"),
+                            HashMap::from([
+                                ("config_key".to_string(), key.clone()),
+                                ("resolution".to_string(), "value_annotation".to_string()),
+                            ]),
+                            &annotation,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Method-level framework edges: listeners, mappings, schedules, events and WebFlux routes.
+    fn framework_method_edges(&mut self, node: &Node, function_id: NodeId, method_name: &str) {
+        let direct = self.annotation_nodes(node);
+        let mut mapping_index = 0;
+        let mut emitted = 0;
+        for annotation in &direct {
+            let Some(name) = self.annotation_name(annotation) else {
+                continue;
+            };
+            if KAFKA_LISTENER_ANNOTATIONS.contains(&name.as_str()) {
+                let values = self.annotation_values(annotation);
+                let topics: Vec<String> = values
+                    .get("topics")
+                    .cloned()
+                    .unwrap_or_else(|| values.get("value").cloned().unwrap_or_default());
+                if topics.is_empty() {
+                    self.framework_edge(
+                        function_id,
+                        CONSUMES,
+                        "kafka:config".to_string(),
+                        HashMap::from([("kafka_type".to_string(), name.clone())]),
+                        node,
+                    );
+                } else {
+                    for topic in topics {
+                        self.framework_edge(
+                            function_id,
+                            CONSUMES,
+                            format!("kafka:{topic}"),
+                            HashMap::from([
+                                ("topic".to_string(), topic.clone()),
+                                ("kafka_type".to_string(), "KafkaListener".to_string()),
+                            ]),
+                            node,
+                        );
+                    }
+                }
+            }
+            if let Some(http_method) = self.http_method(annotation, &name) {
+                let route = self
+                    .annotation_value(annotation, &["path", "value"])
+                    .map(|route| {
+                        if route.starts_with('/') {
+                            route
+                        } else {
+                            format!("/{route}")
+                        }
+                    })
+                    .unwrap_or_else(|| "/".to_string());
+                let endpoint_name = format!(
+                    "{method_name}@{name}[{mapping_index}:{emitted}] {http_method} {route}"
+                );
+                let metadata = HashMap::from([
+                    ("annotation".to_string(), name.clone()),
+                    ("handler".to_string(), method_name.to_string()),
+                    ("http_method".to_string(), http_method.clone()),
+                    ("route".to_string(), route.clone()),
+                ]);
+                let qualified = self.qualified_here(&endpoint_name);
+                let owner = self.classes.last().cloned();
+                self.framework_node(
+                    endpoint_name,
+                    "Endpoint",
+                    qualified.clone(),
+                    self.file_path.to_string(),
+                    (annotation.start_position().row + 1) as u32,
+                    owner.as_deref(),
+                    metadata.clone(),
+                );
+                self.framework_edge(function_id, HANDLES, qualified, metadata, annotation);
+                emitted += 1;
+                mapping_index += 1;
+            }
+            if name == "Scheduled" || name == "Schedules" {
+                let values = self.annotation_values(annotation);
+                let schedule_kind = [
+                    "cron",
+                    "fixedRate",
+                    "fixedRateString",
+                    "fixedDelay",
+                    "fixedDelayString",
+                    "initialDelay",
+                    "initialDelayString",
+                ]
+                .iter()
+                .find(|key| values.contains_key(**key))
+                .copied()
+                .unwrap_or("scheduled");
+                let schedule_name =
+                    format!("{method_name}@Scheduled[{mapping_index}]:{schedule_kind}");
+                let mut metadata = HashMap::from([
+                    ("annotation".to_string(), "Scheduled".to_string()),
+                    ("schedule_kind".to_string(), schedule_kind.to_string()),
+                ]);
+                if let Some(value) = values.get(schedule_kind).and_then(|v| v.first()) {
+                    metadata.insert(schedule_kind.to_string(), value.clone());
+                }
+                let qualified = self.qualified_here(&schedule_name);
+                let owner = self.classes.last().cloned();
+                let scheduler = self.framework_node(
+                    schedule_name,
+                    "Scheduler",
+                    qualified,
+                    self.file_path.to_string(),
+                    (annotation.start_position().row + 1) as u32,
+                    owner.as_deref(),
+                    metadata.clone(),
+                );
+                self.framework_edge(
+                    scheduler,
+                    TRIGGERS,
+                    self.qualified_here(method_name),
+                    metadata,
+                    annotation,
+                );
+                mapping_index += 1;
+            }
+            if name == "EventListener" {
+                for identity in self.event_types(annotation, node) {
+                    self.framework_edge(
+                        function_id,
+                        HANDLES,
+                        format!("event::{identity}"),
+                        HashMap::from([
+                            ("event_type".to_string(), identity.clone()),
+                            (
+                                "resolution".to_string(),
+                                "spring_event_listener".to_string(),
+                            ),
+                        ]),
+                        annotation,
+                    );
+                    self.event_node(&identity);
+                }
+            }
+        }
+        self.publish_event_edges(node, function_id);
+    }
+
+    /// `publishEvent(new Event())` edges, with the event type CRG resolves from the import map.
+    fn publish_event_edges(&mut self, node: &Node, function_id: NodeId) {
+        let mut stack = vec![*node];
+        while let Some(current) = stack.pop() {
+            if current.kind() == "method_invocation" {
+                let identifiers: Vec<Node> = children(&current)
+                    .filter(|child| child.kind() == "identifier")
+                    .collect();
+                let method = identifiers.last().map(|child| self.node_text(child));
+                if method.as_deref() == Some("publishEvent") {
+                    let mut created_nodes = Vec::new();
+                    let mut stack = vec![current];
+                    while let Some(node) = stack.pop() {
+                        if node.kind() == "object_creation_expression" {
+                            created_nodes.push(node);
+                        }
+                        let mut descendants: Vec<Node> = children(&node).collect();
+                        descendants.reverse();
+                        stack.extend(descendants);
+                    }
+                    for created in created_nodes {
+                        if let Some(name) = self.java_type_name(&created) {
+                            let identity = self.java_type(&name);
+                            self.framework_edge(
+                                function_id,
+                                PUBLISHES,
+                                format!("event::{identity}"),
+                                HashMap::from([
+                                    ("event_type".to_string(), identity.clone()),
+                                    ("resolution".to_string(), "spring_publish_event".to_string()),
+                                    ("receiver".to_string(), "publisher".to_string()),
+                                ]),
+                                &created,
+                            );
+                            self.event_node(&identity);
+                        }
+                    }
+                }
+            }
+            let mut children: Vec<Node> = children(&current).collect();
+            children.reverse();
+            stack.extend(children);
+        }
+    }
+
     fn span_for(&self, node: &Node) -> Span {
         Span {
             start_byte: node.start_byte() as u32,
@@ -1360,6 +1969,34 @@ class Order {
             set(&["total", "T.java::Cart.make"])
         );
         assert_eq!(calls_from(&result, "T.java::Shop.d"), set(&["total"]));
+    }
+
+    #[test]
+    fn spring_framework_edges_match_crg() {
+        let source = "import org.springframework.context.ApplicationEventPublisher;\n\
+                       import org.springframework.context.event.EventListener;\n\
+                       class Events {\n\
+                       private final ApplicationEventPublisher publisher;\n\
+                       void publish() { publisher.publishEvent(new LocalEvent()); }\n\
+                       @EventListener(LocalEvent.class) void on(LocalEvent event) {}\n\
+                       }\n";
+        let result = extract_java(source, "E.java");
+        let publishes = edges(&result, EdgeType::Other("publishes".into()));
+        assert_eq!(
+            publishes,
+            BTreeSet::from([(
+                "E.java::Events.publish".to_string(),
+                "event::LocalEvent".to_string()
+            )])
+        );
+        let handles = edges(&result, EdgeType::Other("handles".into()));
+        assert!(
+            handles
+                .iter()
+                .any(|(from, to)| from == "E.java::Events.on" && to == "event::LocalEvent")
+        );
+        let node = node(&result, "event::LocalEvent");
+        assert_eq!(node.name.as_str(), "LocalEvent");
     }
 
     #[test]

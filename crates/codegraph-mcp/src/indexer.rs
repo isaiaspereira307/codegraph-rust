@@ -2307,7 +2307,11 @@ impl ProjectIndexer {
                     | EdgeType::Implements
                     | EdgeType::References
             )
-            || edge.edge_type == EdgeType::Other(codegraph_parser::languages::java::INJECTS.into())
+            || matches!(
+                &edge.edge_type,
+                EdgeType::Other(kind)
+                    if codegraph_parser::languages::java::is_framework_edge(kind)
+            )
     }
 
     fn normalize_symbol_target(target: &str) -> Vec<String> {
