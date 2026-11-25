@@ -1204,3 +1204,12 @@ ser ligada a uma classe homonima sem relacao no repo. Exemplos: Python
 `vendor/shared` quando ha um unico `Shared` Go no repo (na sonda ha dois, por isso fica
 ambiguo). O import externo nao gera aresta `File -> File`, entao a camada (b) nao decide. O
 `inheritors_of` do CRG faz o mesmo pelo fallback de nome solto.
+
+P1, Task 3 (receptores tipados): corpus/sonda python com o `fast` padrao passam a CALLS 1.000
+(resolvido 1.000) e ARI de corpus 0.403 -> 0.478; nos e IMPORTS_FROM seguem 1.000. Decisao
+sobre `REFERENCES` no tier `fast` (plano, Step 4): **nao habilitar**. `full`/`balanced` nao
+rodam neste ambiente (falta `pyright-langserver`), entao a comparacao foi feita com um binario
+temporario que liga a extracao/filtro de `References` no `fast`, sem LSP. Nessa simulacao,
+REFERENCES sobe de 0.000 para 1.000 e o ARI de corpus para 1.000, mas o grafo Rust cresce de
+63 para 68 arestas no corpus (+7,9%) e de 139 para 144 na sonda (+3,6%). Como o crescimento no
+corpus excede o limite de 5% do plano, o default permanece `fast` sem `References`.

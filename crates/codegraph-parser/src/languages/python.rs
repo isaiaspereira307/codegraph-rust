@@ -213,6 +213,9 @@ struct Frame {
     /// `TYPE_CHECKING` names and `typing` modules still unshadowed in this scope.
     type_checking: HashSet<String>,
     typing_modules: HashSet<String>,
+    /// Local names bound to a class by an annotation (`service: AuthService`) or a
+    /// constructor assignment (`svc = AuthService()`).
+    types: HashMap<String, String>,
 }
 
 struct PythonCollector<'a> {
@@ -259,7 +262,10 @@ impl<'a> PythonCollector<'a> {
             "argument_list" => self.argument_references(&node),
             "list" => self.list_references(&node),
             "pair" => self.pair_reference(&node),
-            "assignment" | "augmented_assignment" => self.assignment_reference(&node),
+            "assignment" | "augmented_assignment" => {
+                self.record_assignment_type(&node);
+                self.assignment_reference(&node);
+            }
             _ => {}
         }
         self.walk_children(node);
@@ -417,8 +423,10 @@ impl<'a> PythonCollector<'a> {
                 bindings(statement, self.content, &mut bound);
             }
         }
+        let mut types = HashMap::new();
         if let Some(parameters) = node.child_by_field_name("parameters") {
             parameter_names(&parameters, self.content, &mut bound);
+            typed_parameter_types(&parameters, self.content, &mut types);
         }
         let (type_checking, typing_modules) = self.scoped_type_checking(&bound);
         self.frames.push(Frame {
@@ -426,6 +434,7 @@ impl<'a> PythonCollector<'a> {
             local_defs,
             type_checking,
             typing_modules,
+            types,
         });
         self.walk_children(node);
         self.frames.pop();
@@ -476,6 +485,7 @@ impl<'a> PythonCollector<'a> {
             local_defs: HashMap::new(),
             type_checking,
             typing_modules,
+            types: HashMap::new(),
         });
         let chain = match self.class_chains.last() {
             Some(outer) => format!("{outer}.{name}"),
@@ -716,6 +726,89 @@ impl<'a> PythonCollector<'a> {
         name.to_string()
     }
 
+    fn record_assignment_type(&mut self, node: &Node) {
+        let Some(left) = node.child_by_field_name("left") else {
+            return;
+        };
+        let name = left.child_by_field_name("name").unwrap_or(left);
+        if name.kind() != "identifier" {
+            return;
+        }
+        let name = self.text(&name);
+        let annotation = node
+            .child_by_field_name("type")
+            .and_then(|t| self.python_type(&t));
+        let constructor = annotation
+            .is_none()
+            .then(|| {
+                node.child_by_field_name("right")
+                    .filter(|r| r.kind() == "call")
+                    .and_then(|r| r.child_by_field_name("function"))
+                    .and_then(|f| match f.kind() {
+                        "identifier" => Some(self.text(&f)),
+                        "attribute" => self.dotted(&f),
+                        _ => None,
+                    })
+            })
+            .flatten();
+        let Some(ty) = annotation.or(constructor) else {
+            return;
+        };
+        if let Some(frame) = self.frames.last_mut() {
+            frame.types.insert(name, ty);
+        }
+    }
+
+    /// Annotation spelling, unwrapping `Optional[T]`/`list[T]` to `T`.
+    fn python_type(&self, node: &Node) -> Option<String> {
+        match node.kind() {
+            "identifier" => Some(self.text(node)),
+            "attribute" => self.dotted(node),
+            "subscript" => node.named_child(1).and_then(|t| self.python_type(&t)),
+            "string" => Some(self.text(node).trim_matches(['\'', '"']).to_string()),
+            _ => node.named_child(0).and_then(|t| self.python_type(&t)),
+        }
+    }
+
+    fn dotted(&self, node: &Node) -> Option<String> {
+        match node.kind() {
+            "identifier" => Some(self.text(node)),
+            "attribute" => Some(format!(
+                "{}.{}",
+                self.dotted(&node.child_by_field_name("object")?)?,
+                self.text(&node.child_by_field_name("attribute")?)
+            )),
+            "call" => self.dotted(&node.child_by_field_name("function")?),
+            _ => None,
+        }
+    }
+
+    /// A name typed as a local class or as `module.Class` (CRG's class receiver evidence).
+    fn typed_receiver(
+        &self,
+        ty: &str,
+        method: &str,
+        metadata: &mut HashMap<String, String>,
+    ) -> Option<String> {
+        if self.scope.classes.contains(ty) {
+            metadata.insert("receiver_binding".into(), "class".into());
+            metadata.insert("receiver_class".into(), ty.to_string());
+            return Some(format!("{}::{ty}.{method}", self.file_path));
+        }
+        if let Some((module, class)) = ty.split_once('.')
+            && self.scope.module_aliases.contains_key(module)
+        {
+            metadata.insert(
+                crg_shape::PY_IMPORT_ATTR.to_string(),
+                format!("{module}|{class}"),
+            );
+            metadata.insert("receiver_binding".into(), "class".into());
+            metadata.insert("receiver_class".into(), ty.to_string());
+            return Some(method.to_string());
+        }
+        None
+    }
+
     /// `object.method()` by what `object` is: `self`/`cls` in a class and local classes name
     /// `<file>::Class.method`; names imported with `from` or `import a.b as c` carry
     /// `crg_py_import`; `X()` stands for a local class or `from` import `X`; anything else
@@ -726,7 +819,7 @@ impl<'a> PythonCollector<'a> {
         method: String,
         metadata: &mut HashMap<String, String>,
     ) -> String {
-        let receiver = match object.kind() {
+        let (receiver, constructor) = match object.kind() {
             "identifier" => {
                 let name = self.text(object);
                 if matches!(name.as_str(), "self" | "cls")
@@ -734,21 +827,53 @@ impl<'a> PythonCollector<'a> {
                 {
                     return format!("{}::{class}.{method}", self.file_path);
                 }
-                Some(name)
+                (Some(name), false)
             }
-            "call" => object
-                .child_by_field_name("function")
-                .filter(|f| f.kind() == "identifier")
-                .map(|f| self.text(&f))
-                .filter(|x| {
-                    self.scope.classes.contains(x) || self.scope.from_imports.contains_key(x)
-                }),
-            _ => None,
+            "call" => (
+                object
+                    .child_by_field_name("function")
+                    .and_then(|f| match f.kind() {
+                        "identifier" => Some(self.text(&f)),
+                        "attribute" => self.dotted(&f),
+                        _ => None,
+                    }),
+                true,
+            ),
+            "attribute" => (self.dotted(object), false),
+            _ => (None, false),
         };
         let Some(receiver) = receiver else {
             metadata.insert(crg_shape::UNBOUND_ATTR.to_string(), "true".to_string());
             return method;
         };
+        // A typed local (`service: AuthService`, `svc = AuthService()`) names the class
+        // method. `q.Thing()` is the same case with a class from a dotted module path.
+        let typed = if constructor {
+            Some(receiver.as_str())
+        } else {
+            self.frames
+                .iter()
+                .rev()
+                .find_map(|frame| frame.types.get(&receiver))
+                .map(String::as_str)
+        };
+        if let Some(ty) = typed
+            && let Some(target) = self.typed_receiver(ty, &method, metadata)
+        {
+            return target;
+        }
+        // `q.lib.f()` names a module path, not a symbol of the importing file.
+        if !constructor
+            && let Some((module, _)) = receiver.split_once('.')
+            && self.scope.module_aliases.contains_key(module)
+        {
+            metadata.insert(
+                crg_shape::PY_IMPORT_ATTR.to_string(),
+                format!("{receiver}|"),
+            );
+            metadata.insert("receiver_binding".into(), "module".into());
+            return method;
+        }
         if self.scope.classes.contains(&receiver) {
             return format!("{}::{receiver}.{method}", self.file_path);
         }
@@ -949,6 +1074,40 @@ fn parameter_names(parameters: &Node, content: &str, out: &mut HashSet<String>) 
         if let Some(name) = name.filter(|n| n.kind() == "identifier") {
             out.insert(node_text(&name, content));
         }
+    }
+}
+
+/// Typed parameters (`service: AuthService`, `x: Optional[Child] = None`): local name -> type.
+fn typed_parameter_types(parameters: &Node, content: &str, out: &mut HashMap<String, String>) {
+    for parameter in named_children(parameters) {
+        let name = match parameter.kind() {
+            "typed_parameter" => parameter.named_child(0),
+            "typed_default_parameter" => parameter.child_by_field_name("name"),
+            _ => continue,
+        };
+        let (Some(name), Some(ty)) = (name, parameter.child_by_field_name("type")) else {
+            continue;
+        };
+        if let Some(annotation) = annotation_type(&ty, content) {
+            out.insert(node_text(&name, content), annotation);
+        }
+    }
+}
+
+/// Class name inside a type annotation (`AuthService`, `Optional[Child]`, `pkg.Thing`).
+/// The last identifier is the actual type, not a wrapper like `Optional` or `list`.
+fn annotation_type(node: &Node, content: &str) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(node_text(node, content)),
+        "attribute" => Some(format!(
+            "{}.{}",
+            annotation_type(&node.child_by_field_name("object")?, content)?,
+            node_text(&node.child_by_field_name("attribute")?, content)
+        )),
+        "type" | "generic_type" | "type_parameter" | "subscript" => named_children(node)
+            .filter_map(|child| annotation_type(&child, content))
+            .last(),
+        _ => None,
     }
 }
 
@@ -1186,6 +1345,91 @@ mod tests {
         assert_eq!(
             edge_attr(&r, EdgeType::Calls, "y", crg_shape::PY_IMPORT_ATTR).as_deref(),
             Some("..p|y")
+        );
+    }
+
+    #[test]
+    fn annotated_parameter_receiver_names_the_method() {
+        let r = extract_py(
+            "class AuthService:\n    def authenticate(self):\n        pass\n\n\
+             def process_request(service: AuthService):\n    service.authenticate()\n",
+            "m.py",
+        );
+        let calls = calls_from(&r, "m.py::process_request");
+        assert_eq!(calls, names(&["m.py::AuthService.authenticate"]));
+        let edge = r
+            .edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::Calls && e.to == "m.py::AuthService.authenticate")
+            .unwrap();
+        assert_eq!(
+            edge.metadata.get("receiver").map(String::as_str),
+            Some("service")
+        );
+        assert_eq!(
+            edge.metadata.get("receiver_binding").map(String::as_str),
+            Some("class")
+        );
+        assert!(!edge.metadata.contains_key(crg_shape::UNBOUND_ATTR));
+    }
+
+    #[test]
+    fn constructor_assignment_receiver_names_the_method() {
+        let r = extract_py(
+            "class AuthService:\n    def authenticate(self):\n        pass\n\n\
+             def make():\n    svc = AuthService()\n    svc.authenticate()\n",
+            "m.py",
+        );
+        let calls = calls_from(&r, "m.py::make");
+        assert_eq!(
+            calls,
+            names(&["m.py::AuthService", "m.py::AuthService.authenticate"])
+        );
+        let edge = r
+            .edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::Calls && e.to == "m.py::AuthService.authenticate")
+            .unwrap();
+        assert_eq!(
+            edge.metadata.get("receiver").map(String::as_str),
+            Some("svc")
+        );
+        assert!(!edge.metadata.contains_key(crg_shape::UNBOUND_ATTR));
+    }
+
+    #[test]
+    fn dotted_module_receivers_carry_the_module_binding() {
+        let r = extract_py(
+            "import q\n\ndef f():\n    q.lib.f()\n    q.Thing().go()\n",
+            "m.py",
+        );
+        let f = r
+            .edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::Calls && e.to == "f")
+            .unwrap();
+        assert_eq!(
+            f.metadata
+                .get(crg_shape::PY_IMPORT_ATTR)
+                .map(String::as_str),
+            Some("q.lib|")
+        );
+        assert_eq!(
+            f.metadata.get("receiver_binding").map(String::as_str),
+            Some("module")
+        );
+        let go = r
+            .edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::Calls && e.to == "go")
+            .unwrap();
+        assert_eq!(
+            go.metadata.get("receiver_binding").map(String::as_str),
+            Some("class")
+        );
+        assert_eq!(
+            go.metadata.get("receiver_class").map(String::as_str),
+            Some("q.Thing")
         );
     }
 

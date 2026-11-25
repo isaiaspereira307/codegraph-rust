@@ -69,3 +69,15 @@ O cenário 3 só é comparável em arquivos/funções alterados (ambos truncam o
 Medição da mesma rodada do snapshot (binário debug, pós-processo completo). Os números
 históricos de `docs/parity/changes.md` são CRG 18 s e Rust 70 s. O alvo do P1 é medir release e
 debug com 3 repetições na Task 11; estes valores são apenas o registro da linha de base.
+
+## Atualizações P1
+
+- Task 3: receptores tipados portados (`service: AuthService`, `svc = AuthService()`,
+  `q.lib.f()`, `q.Thing().go()`). Corpus e sonda python: CALLS e resolvido 1.000; ARI de corpus
+  0.403 -> 0.478; entry points/membros do corpus 1.000; nós/IMPORTS_FROM inalterados em 1.000.
+  Snapshot completo `/tmp/opencode/parity-p1-t3`: 82 pisos OK. Medição em
+  [`p1-task3-python-receivers.md`](p1-task3-python-receivers.md). `REFERENCES` continua **desligado no
+  `fast`**: a simulação com extração/filtro ligados (sem LSP, porque `full`/`balanced` exigem
+  `pyright-langserver` ausente) leva REFERENCES a 1.000 e ARI a 1.000, mas cresce o grafo Rust
+  7,9% no corpus (63 -> 68 arestas), acima do limite de 5% do plano. Detalhes em
+  [`baseline.md`](baseline.md).
