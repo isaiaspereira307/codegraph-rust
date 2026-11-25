@@ -217,6 +217,39 @@ mod tests {
     }
 
     #[test]
+    fn several_same_file_candidates_are_ambiguous_even_with_one_imported() {
+        // A nested `Outer.Base` next to `Base`, or TS `interface Foo` merged with `class Foo`:
+        // the local declarations shadow the import, so the import must not win.
+        let nodes = [
+            n("a.py::Child", "Class", "a.py", "python"),
+            n("a.py::Base", "Class", "a.py", "python"),
+            HeritageNode {
+                name: "Base",
+                ..n("a.py::Outer.Base", "Class", "a.py", "python")
+            },
+            n("b.py::Base", "Class", "b.py", "python"),
+        ];
+        let imports = |_: usize| vec!["b.py".to_string()];
+        let r = resolve_heritage(&nodes, &edge(0, "Base"), &imports);
+        assert!(r.bound.is_empty());
+        assert_eq!(r.ambiguous, vec![(0, "Base".to_string())]);
+    }
+
+    #[test]
+    fn several_imported_candidates_are_ambiguous_even_with_one_elsewhere() {
+        let nodes = [
+            n("a.py::Child", "Class", "a.py", "python"),
+            n("b.py::Base", "Class", "b.py", "python"),
+            n("c.py::Base", "Class", "c.py", "python"),
+            n("d.py::Base", "Class", "d.py", "python"),
+        ];
+        let imports = |_: usize| vec!["b.py".to_string(), "c.py".to_string()];
+        let r = resolve_heritage(&nodes, &edge(0, "Base"), &imports);
+        assert!(r.bound.is_empty());
+        assert_eq!(r.ambiguous, vec![(0, "Base".to_string())]);
+    }
+
+    #[test]
     fn self_edge_is_dropped() {
         let nodes = [n("a.py::A", "Class", "a.py", "python")];
         let r = resolve_heritage(&nodes, &edge(0, "A"), &no_imports);

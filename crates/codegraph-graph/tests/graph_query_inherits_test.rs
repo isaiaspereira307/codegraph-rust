@@ -142,3 +142,26 @@ async fn existing_qualified_target_is_not_duplicated() {
         vec![("child.java::Child".to_string(), 1)]
     );
 }
+
+#[tokio::test]
+async fn imported_file_base_wins_over_unrelated_duplicate_through_the_snapshot() {
+    let (_dir, q) = fixture(
+        &[
+            ("File", "app.py", "app.py", "python"),
+            ("File", "models.py", "models.py", "python"),
+            ("File", "legacy.py", "legacy.py", "python"),
+            ("Class", "app.py::Child", "app.py", "python"),
+            ("Class", "models.py::Base", "models.py", "python"),
+            ("Class", "legacy.py::Base", "legacy.py", "python"),
+        ],
+        &[
+            ("IMPORTS_FROM", "app.py", "models.py"),
+            ("INHERITS", "app.py::Child", "models.Base"),
+        ],
+    );
+    assert_eq!(
+        inheritors(&q, "models.py::Base").await,
+        vec![("app.py::Child".to_string(), 1)]
+    );
+    assert!(inheritors(&q, "legacy.py::Base").await.is_empty());
+}
