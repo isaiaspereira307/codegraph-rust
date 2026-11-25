@@ -1,7 +1,7 @@
 // ABOUTME: Immutable petgraph copy of the SQLite graph, keyed by node uuid and qualified name.
 // ABOUTME: Built from nodes ⟕ cg_nodes and edges; text INHERITS/IMPLEMENTS bind by name, else skip.
 
-use super::heritage::{HeritageNode, is_heritage, last_segment, resolve_heritage};
+use super::heritage::{HeritageNode, is_heritage, resolve_heritage};
 use super::types::{CallerInfo, NodeInfo, NodeLocation, NodeReference};
 use anyhow::Result;
 use petgraph::Direction;
@@ -28,9 +28,9 @@ pub(crate) struct NodeData {
 pub(crate) struct Snapshot {
     pub graph: DiGraph<NodeData, String>,
     index: HashMap<String, NodeIndex>,
-    /// Bare base name → number of text INHERITS/IMPLEMENTS edges naming it that matched
-    /// several type nodes and so were left unbound.
-    pub ambiguous_heritage: HashMap<String, usize>,
+    /// Type node → number of text INHERITS/IMPLEMENTS edges that had it among several
+    /// equally ranked candidates and so were left unbound.
+    pub ambiguous_heritage: HashMap<NodeIndex, usize>,
 }
 
 impl Snapshot {
@@ -131,9 +131,9 @@ impl Snapshot {
                 }
                 let r = resolve_heritage(&nodes, &edges, &imported);
                 derived.extend(r.bound.into_iter().map(|(s, t)| (s, t, kind)));
-                for (_, text) in r.ambiguous {
+                for candidate in r.ambiguous.into_iter().flat_map(|(_, _, c)| c) {
                     *ambiguous_heritage
-                        .entry(last_segment(&text).to_string())
+                        .entry(NodeIndex::new(candidate))
                         .or_insert(0) += 1;
                 }
             }

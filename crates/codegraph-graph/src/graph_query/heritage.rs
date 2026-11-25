@@ -15,8 +15,9 @@ pub(crate) struct HeritageNode<'a> {
 pub(crate) struct HeritageResolution {
     /// Source node index → base node index.
     pub bound: Vec<(usize, usize)>,
-    /// Source node index and the heritage text that named more than one base.
-    pub ambiguous: Vec<(usize, String)>,
+    /// Source node index, the heritage text that named more than one base, and the
+    /// candidates of the tier that was ambiguous (sorted by file path, qualified name).
+    pub ambiguous: Vec<(usize, String, Vec<usize>)>,
 }
 
 /// Kinds a base may have (code-review-graph's `inheritors_of` list).
@@ -104,7 +105,7 @@ pub(crate) fn resolve_heritage(
         if let [base] = tier[..] {
             out.bound.push((*source, base));
         } else {
-            out.ambiguous.push((*source, text.clone()));
+            out.ambiguous.push((*source, text.clone(), tier));
         }
     }
     out
@@ -123,6 +124,13 @@ mod tests {
             file_path: file,
             language: Some(lang),
         }
+    }
+
+    fn ambiguous_edges(r: &HeritageResolution) -> Vec<(usize, String)> {
+        r.ambiguous
+            .iter()
+            .map(|(s, t, _)| (*s, t.clone()))
+            .collect()
     }
 
     fn no_imports(_: usize) -> Vec<String> {
@@ -200,7 +208,7 @@ mod tests {
         ];
         let r = resolve_heritage(&nodes, &edge(0, "Base"), &no_imports);
         assert!(r.bound.is_empty());
-        assert_eq!(r.ambiguous, vec![(0, "Base".to_string())]);
+        assert_eq!(ambiguous_edges(&r), vec![(0, "Base".to_string())]);
     }
 
     #[test]
@@ -243,7 +251,7 @@ mod tests {
         let imports = |_: usize| vec!["b.py".to_string()];
         let r = resolve_heritage(&nodes, &edge(0, "Base"), &imports);
         assert!(r.bound.is_empty());
-        assert_eq!(r.ambiguous, vec![(0, "Base".to_string())]);
+        assert_eq!(ambiguous_edges(&r), vec![(0, "Base".to_string())]);
     }
 
     #[test]
@@ -257,7 +265,7 @@ mod tests {
         let imports = |_: usize| vec!["b.py".to_string(), "c.py".to_string()];
         let r = resolve_heritage(&nodes, &edge(0, "Base"), &imports);
         assert!(r.bound.is_empty());
-        assert_eq!(r.ambiguous, vec![(0, "Base".to_string())]);
+        assert_eq!(ambiguous_edges(&r), vec![(0, "Base".to_string())]);
     }
 
     #[test]

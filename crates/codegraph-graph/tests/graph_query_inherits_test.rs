@@ -226,6 +226,23 @@ async fn inheritors_of_counts_ambiguous_bases_as_unresolved() {
 }
 
 #[tokio::test]
+async fn ambiguous_count_goes_only_to_the_candidates() {
+    // A TS edge ambiguous between two TS bases says nothing about a Python `Base`.
+    let (_dir, q) = fixture(
+        &[
+            ("Class", "a.py::Base", "a.py", "python"),
+            ("Class", "x.ts::Base", "x.ts", "typescript"),
+            ("Class", "y.ts::Base", "y.ts", "typescript"),
+            ("Class", "z.ts::Child", "z.ts", "typescript"),
+        ],
+        &[("INHERITS", "z.ts::Child", "Base")],
+    );
+    assert_eq!(inheritors_of(&q, "a.py::Base").await.unresolved, 0);
+    assert_eq!(inheritors_of(&q, "x.ts::Base").await.unresolved, 1);
+    assert_eq!(inheritors_of(&q, "y.ts::Base").await.unresolved, 1);
+}
+
+#[tokio::test]
 async fn inheritors_of_on_a_leaf_class_is_empty() {
     let (_dir, q) = fixture(
         &[

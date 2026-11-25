@@ -101,9 +101,8 @@ impl GraphQuery {
         };
         let qualified = snap.node(ix).qualified.clone();
         let unresolved: i64 = if inheritors {
-            // Bare-name heritage edges that named this class but could not be bound.
-            let name = &snap.node(ix).name;
-            snap.ambiguous_heritage.get(name).copied().unwrap_or(0) as i64
+            // Bare-name heritage edges that had this class among several candidates.
+            snap.ambiguous_heritage.get(&ix).copied().unwrap_or(0) as i64
         } else {
             let sql = if dir == Outgoing {
                 UNRESOLVED_OUT
