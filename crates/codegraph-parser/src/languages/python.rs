@@ -1142,6 +1142,124 @@ fn named_children<'t>(node: &Node<'t>) -> impl Iterator<Item = Node<'t>> {
     (0..node.named_child_count() as u32).filter_map(move |i| node.named_child(i))
 }
 
+/// Top-level module evidence an importer needs: a file that replaces itself in `sys.modules`
+/// hands callers another module, and `from M import X [as Y]` makes `Y` resolve to `M::X`.
+/// Only literal, unconditional top-level statements count (code-review-graph's shim/export rules).
+#[derive(Debug, Default, Clone)]
+pub struct PythonModuleEvidence {
+    /// Dotted module named by `sys.modules[__name__] = importlib.import_module("...")`.
+    pub shim_target: Option<String>,
+    /// Local export name -> (module as written, original name).
+    pub reexports: HashMap<String, (String, String)>,
+}
+
+/// Reads the evidence from one Python source file without extracting its graph.
+pub fn python_module_evidence(source: &str) -> PythonModuleEvidence {
+    let mut evidence = PythonModuleEvidence::default();
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .is_err()
+    {
+        return evidence;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return evidence;
+    };
+    let mut defined = HashSet::new();
+    for statement in named_children(&tree.root_node()) {
+        match statement.kind() {
+            "expression_statement" => {
+                if let Some(assignment) = statement
+                    .named_child(0)
+                    .filter(|node| node.kind() == "assignment")
+                {
+                    if let Some(left) = assignment.child_by_field_name("left")
+                        && left.kind() == "identifier"
+                    {
+                        defined.insert(node_text(&left, source));
+                    }
+                    if let Some(target) = shim_target(&assignment, source) {
+                        evidence.shim_target = Some(target);
+                    }
+                }
+            }
+            "function_definition" | "class_definition" => {
+                if let Some(name) = definition_name(&statement, source) {
+                    defined.insert(name);
+                }
+            }
+            "decorated_definition" => {
+                for child in named_children(&statement) {
+                    if matches!(child.kind(), "function_definition" | "class_definition")
+                        && let Some(name) = definition_name(&child, source)
+                    {
+                        defined.insert(name);
+                    }
+                }
+            }
+            "import_from_statement" => {
+                if let Some(module) = statement
+                    .child_by_field_name("module_name")
+                    .map(|node| node_text(&node, source))
+                {
+                    for (original, local) in imported_names(&statement, source) {
+                        evidence.reexports.insert(local, (module.clone(), original));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // A name the module defines itself is not a re-export (code-review-graph's star-export
+    // map overwrites import origins with local definitions).
+    evidence
+        .reexports
+        .retain(|name, _| !name.starts_with('_') && !defined.contains(name));
+    evidence
+}
+
+fn definition_name(node: &Node, content: &str) -> Option<String> {
+    node.child_by_field_name("name")
+        .map(|name| node_text(&name, content))
+}
+
+fn shim_target(assignment: &Node, content: &str) -> Option<String> {
+    let left = assignment.child_by_field_name("left")?;
+    let right = assignment.child_by_field_name("right")?;
+    let index = left.child_by_field_name("subscript")?;
+    if left.kind() != "subscript"
+        || index.kind() != "identifier"
+        || node_text(&index, content) != "__name__"
+        || right.kind() != "call"
+    {
+        return None;
+    }
+    let object = left.child_by_field_name("value")?;
+    let function = right.child_by_field_name("function")?;
+    let is_attribute = |node: &Node, base: &str, attribute: &str| {
+        node.kind() == "attribute"
+            && node
+                .child_by_field_name("object")
+                .is_some_and(|n| node_text(&n, content) == base)
+            && node
+                .child_by_field_name("attribute")
+                .is_some_and(|n| node_text(&n, content) == attribute)
+    };
+    if !is_attribute(&object, "sys", "modules")
+        || !is_attribute(&function, "importlib", "import_module")
+    {
+        return None;
+    }
+    let argument = right.child_by_field_name("arguments")?.named_child(0)?;
+    if argument.kind() != "string" {
+        return None;
+    }
+    let module = node_text(&argument, content);
+    let module = module.trim_matches(['\'', '"']);
+    (!module.is_empty() && !module.starts_with('.')).then(|| module.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::languages::crg_shape;
@@ -1346,6 +1464,30 @@ mod tests {
             edge_attr(&r, EdgeType::Calls, "y", crg_shape::PY_IMPORT_ATTR).as_deref(),
             Some("..p|y")
         );
+    }
+
+    #[test]
+    fn module_evidence_reads_top_level_shims_and_reexports() {
+        let evidence = super::python_module_evidence(
+            "from app.services.engine import run_model as infer\n\
+             import importlib\nimport sys\n\n\
+             sys.modules[__name__] = importlib.import_module(\"app.services.billing\")\n",
+        );
+        assert_eq!(
+            evidence.shim_target.as_deref(),
+            Some("app.services.billing")
+        );
+        assert_eq!(
+            evidence
+                .reexports
+                .get("infer")
+                .map(|(m, o)| (m.as_str(), o.as_str())),
+            Some(("app.services.engine", "run_model"))
+        );
+        let shadowed = super::python_module_evidence(
+            "from engine import run_model\n\ndef run_model():\n    pass\n",
+        );
+        assert!(shadowed.reexports.is_empty(), "a local definition wins");
     }
 
     #[test]

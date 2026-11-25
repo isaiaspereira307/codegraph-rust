@@ -387,12 +387,16 @@ impl SymbolCatalog {
                 // `from M import sub; sub()` / `run(sub)` names the module itself.
                 return self.file_nodes.get(file).copied();
             }
+            // `billing.run_model()` names the definition even when the module only
+            // re-exports it (code-review-graph `_python_reexport_origin`).
+            let file = self.modules.reexport_origin(file, &edge.to);
             return self.qualified_symbol(&format!("{file}::{}", edge.to), true);
         }
         if symbol.is_empty() {
             return None;
         }
         let file = self.modules.resolve(importer, module)?;
+        let file = self.modules.reexport_origin(file, symbol);
         let qualified = if edge.metadata.contains_key("receiver") {
             format!("{file}::{symbol}.{}", edge.to)
         } else {

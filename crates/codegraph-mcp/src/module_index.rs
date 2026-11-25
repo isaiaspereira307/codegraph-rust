@@ -2,7 +2,10 @@
 // ABOUTME: following code-review-graph's resolvers; anything else (Go, packages) stays text.
 
 use crate::rust_crates::{CrateLayout, RustCrates};
+use codegraph_parser::languages::python::{PythonModuleEvidence, python_module_evidence};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Extensions code-review-graph appends to a relative TS/JS import, in order.
 const JS_EXTENSIONS: [&str; 7] = [".ts", ".tsx", ".js", ".jsx", ".vue", ".mts", ".cts"];
@@ -120,6 +123,10 @@ pub(crate) struct ModuleIndex {
     files: HashMap<String, String>,
     /// Cargo layouts that anchor Rust paths; empty means every Rust import stays text.
     rust_crates: RustCrates,
+    /// Lazily read top-level Python shim/re-export evidence, keyed by the indexed file path.
+    python_evidence: RefCell<HashMap<String, Arc<PythonModuleEvidence>>>,
+    /// Files currently being followed through `sys.modules`, to stop shim cycles.
+    shim_stack: RefCell<Vec<String>>,
 }
 
 impl ModuleIndex {
@@ -130,6 +137,8 @@ impl ModuleIndex {
                 .map(|file| (normalize(file), file.to_string()))
                 .collect(),
             rust_crates: RustCrates::default(),
+            python_evidence: RefCell::new(HashMap::new()),
+            shim_stack: RefCell::new(Vec::new()),
         }
     }
 
@@ -157,6 +166,69 @@ impl ModuleIndex {
         }
     }
 
+    /// Top-level `sys.modules`/re-export evidence of one indexed Python file, read once.
+    fn python_evidence(&self, file: &str) -> Arc<PythonModuleEvidence> {
+        if let Some(evidence) = self.python_evidence.borrow().get(file) {
+            return evidence.clone();
+        }
+        let source = file
+            .ends_with(".py")
+            .then(|| std::fs::read(file).ok())
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok());
+        let evidence = Arc::new(
+            source
+                .as_deref()
+                .map(python_module_evidence)
+                .unwrap_or_default(),
+        );
+        self.python_evidence
+            .borrow_mut()
+            .insert(file.to_string(), evidence.clone());
+        evidence
+    }
+
+    /// A module that swaps itself in `sys.modules` hands importers the module it names.
+    fn follow_shim<'a>(&'a self, file: &'a str) -> &'a str {
+        if self.shim_stack.borrow().iter().any(|path| path == file) {
+            return file;
+        }
+        self.shim_stack.borrow_mut().push(file.to_string());
+        let resolved = self
+            .python_evidence(file)
+            .shim_target
+            .clone()
+            .and_then(|target| self.python(file, &target))
+            .map(|real| self.follow_shim(real))
+            .unwrap_or(file);
+        self.shim_stack.borrow_mut().pop();
+        resolved
+    }
+
+    /// The file that defines `symbol` even when `file` only re-exports it. Keeps `file` when
+    /// the origin is outside the repository or the exports form a cycle.
+    pub(crate) fn reexport_origin<'a>(&'a self, file: &'a str, symbol: &str) -> &'a str {
+        self.reexport(file, symbol, &mut Vec::new())
+    }
+
+    fn reexport<'a>(&'a self, file: &'a str, symbol: &str, seen: &mut Vec<String>) -> &'a str {
+        if seen.iter().any(|path| path == file) {
+            return file;
+        }
+        seen.push(file.to_string());
+        let Some((module, original)) = self.python_evidence(file).reexports.get(symbol).cloned()
+        else {
+            return file;
+        };
+        let Some(origin) = self.python(file, &module) else {
+            return file;
+        };
+        if origin == file {
+            return file;
+        }
+        self.reexport(origin, &original, seen)
+    }
+
     /// Relative modules climb one package per extra dot; absolute ones are looked up from
     /// the caller's directory upwards, package (`__init__.py`) before module.
     fn python(&self, importer: &str, text: &str) -> Option<&str> {
@@ -164,11 +236,13 @@ impl ModuleIndex {
         let level = text.len() - module.len();
         let relative = module.replace('.', "/");
         let candidates = |dir: &PathParts| -> Option<&str> {
-            if relative.is_empty() {
-                return self.file(&dir.join("__init__.py"));
-            }
-            self.file(&dir.join(&format!("{relative}/__init__.py")))
-                .or_else(|| self.file(&dir.join(&format!("{relative}.py"))))
+            let file = if relative.is_empty() {
+                self.file(&dir.join("__init__.py"))?
+            } else {
+                self.file(&dir.join(&format!("{relative}/__init__.py")))
+                    .or_else(|| self.file(&dir.join(&format!("{relative}.py"))))?
+            };
+            Some(self.follow_shim(file))
         };
         let mut dir = PathParts::new(importer).parent();
         if level > 0 {
@@ -365,6 +439,90 @@ mod tests {
             "j/src/com/example/Main.java",
         ];
         rust_index(&files, &[CRATE_MANIFEST])
+    }
+
+    /// Writes a small repository to a temp dir and indexes its paths.
+    fn py_repo(files: &[(&str, &str)]) -> (tempfile::TempDir, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for (relative, source) in files {
+            let path = dir.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, source).unwrap();
+            paths.push(path.to_string_lossy().into_owned());
+        }
+        (dir, paths)
+    }
+
+    #[test]
+    fn python_sys_modules_shim_resolves_to_the_real_module() {
+        let (_dir, paths) = py_repo(&[
+            (
+                "app/services/engine.py",
+                "def run_model(x):\n    return x\n",
+            ),
+            (
+                "app/services/billing.py",
+                "from app.services.engine import run_model\n\ndef charge(): pass\n",
+            ),
+            (
+                "billing.py",
+                "import importlib\nimport sys\n\n\
+                 sys.modules[__name__] = importlib.import_module(\"app.services.billing\")\n",
+            ),
+            ("caller.py", "import billing\n"),
+        ]);
+        let index = ModuleIndex::new(paths.iter().map(String::as_str));
+        let caller = &paths[3];
+        assert_eq!(
+            index.resolve(caller, "billing"),
+            Some(paths[1].as_str()),
+            "a shim hands the importer the module it swaps in"
+        );
+        assert_eq!(
+            index.reexport_origin(&paths[1], "run_model"),
+            paths[0].as_str(),
+            "a name re-exported by the real module is defined by its origin"
+        );
+    }
+
+    #[test]
+    fn python_shim_of_a_shim_terminates_at_the_real_module() {
+        let (_dir, paths) = py_repo(&[
+            ("billing.py", "def charge(): pass\n"),
+            (
+                "alias.py",
+                "import importlib\nimport sys\n\n\
+                 sys.modules[__name__] = importlib.import_module(\"billing\")\n",
+            ),
+            (
+                "legacy.py",
+                "import importlib\nimport sys\n\n\
+                 sys.modules[__name__] = importlib.import_module(\"alias\")\n",
+            ),
+            ("caller.py", "import legacy\n"),
+        ]);
+        let index = ModuleIndex::new(paths.iter().map(String::as_str));
+        assert_eq!(index.resolve(&paths[3], "legacy"), Some(paths[0].as_str()));
+    }
+
+    #[test]
+    fn python_shim_cycle_keeps_one_of_the_files() {
+        let (_dir, paths) = py_repo(&[
+            (
+                "a.py",
+                "import importlib\nimport sys\n\n\
+                 sys.modules[__name__] = importlib.import_module(\"b\")\n",
+            ),
+            (
+                "b.py",
+                "import importlib\nimport sys\n\n\
+                 sys.modules[__name__] = importlib.import_module(\"a\")\n",
+            ),
+            ("caller.py", "import a\n"),
+        ]);
+        let index = ModuleIndex::new(paths.iter().map(String::as_str));
+        assert!(index.resolve(&paths[2], "a").is_some());
     }
 
     #[test]
