@@ -51,7 +51,7 @@ dest="$tmp/bad dest"
 out="$(CODEGRAPH_TEST_UNAME_S=Linux CODEGRAPH_TEST_UNAME_M=x86_64 \
   CODEGRAPH_RELEASE_BASE_URL="file://$tmp/bad" CODEGRAPH_VERSION="$version" \
   CODEGRAPH_INSTALL_DIR="$dest" sh "$installer" 2>&1)"; rc=$?
-if [ $rc -eq 1 ] && { [ ! -e "$dest" ] || [ -z "$(ls -A "$dest")" ]; }; then
+if [ $rc -eq 1 ] && printf '%s' "$out" | grep -qi 'checksum' && { [ ! -e "$dest" ] || [ -z "$(ls -A "$dest")" ]; }; then
   ok "checksum mismatch exits 1 and leaves destination empty"
 else
   bad "checksum mismatch (rc=$rc): $out"
@@ -86,6 +86,51 @@ if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q 'CODEGRAPH_INSTALL_DIR'; then
   ok "--help exits 0"
 else
   bad "--help (rc=$rc): $out"
+fi
+
+# (f) invalid versions rejected before any download
+: > "$tmp/calls.log"; rm -f "$tmp/calls.log"
+for v in '../x' '1.2.3/evil' '1.2?x'; do
+  out="$(PATH="$stubs:$PATH" CODEGRAPH_TEST_UNAME_S=Linux CODEGRAPH_TEST_UNAME_M=x86_64 \
+    CODEGRAPH_RELEASE_BASE_URL="$base" CODEGRAPH_VERSION="$v" \
+    CODEGRAPH_INSTALL_DIR="$tmp/inv" sh "$installer" 2>&1)"; rc=$?
+  if [ $rc -eq 1 ] && printf '%s' "$out" | grep -qi 'invalid version' && [ ! -e "$tmp/calls.log" ]; then
+    ok "invalid version '$v' rejected without download"
+  else
+    bad "invalid version '$v' (rc=$rc): $out"
+  fi
+done
+
+# (g) SHA256SUMS without the asset's entry
+make_release "$tmp/miss" x86_64-unknown-linux-gnu
+echo "0000  other-file.tar.gz" > "$tmp/miss/download/v$version/SHA256SUMS"
+out="$(CODEGRAPH_TEST_UNAME_S=Linux CODEGRAPH_TEST_UNAME_M=x86_64 \
+  CODEGRAPH_RELEASE_BASE_URL="file://$tmp/miss" CODEGRAPH_VERSION="$version" \
+  CODEGRAPH_INSTALL_DIR="$tmp/miss dest" sh "$installer" 2>&1)"; rc=$?
+if [ $rc -eq 1 ] && [ ! -e "$tmp/miss dest" ]; then ok "missing SHA256SUMS entry exits 1"; else bad "missing entry (rc=$rc): $out"; fi
+
+# (h) overwrite existing binary: works, no temp files left
+dest="$tmp/over"; mkdir -p "$dest"
+printf '#!/bin/sh\necho old\n' > "$dest/codegraph"; chmod +x "$dest/codegraph"
+out="$(CODEGRAPH_TEST_UNAME_S=Linux CODEGRAPH_TEST_UNAME_M=x86_64 run_install "$dest")"; rc=$?
+if [ $rc -eq 0 ] && [ "$("$dest/codegraph" --version)" = "codegraph 1.2.3" ] \
+   && [ "$(ls -A "$dest")" = "codegraph" ]; then
+  ok "overwrite leaves new binary and no temp files"
+else
+  bad "overwrite (rc=$rc): $(ls -A "$dest"): $out"
+fi
+
+# (i) mismatch keeps an existing old binary byte-identical
+dest="$tmp/keep"; mkdir -p "$dest"
+printf '#!/bin/sh\necho old\n' > "$dest/codegraph"; chmod +x "$dest/codegraph"
+cp "$dest/codegraph" "$tmp/old.copy"
+out="$(CODEGRAPH_TEST_UNAME_S=Linux CODEGRAPH_TEST_UNAME_M=x86_64 \
+  CODEGRAPH_RELEASE_BASE_URL="file://$tmp/bad" CODEGRAPH_VERSION="$version" \
+  CODEGRAPH_INSTALL_DIR="$dest" sh "$installer" 2>&1)"; rc=$?
+if [ $rc -eq 1 ] && cmp -s "$dest/codegraph" "$tmp/old.copy" && [ "$(ls -A "$dest")" = "codegraph" ]; then
+  ok "mismatch keeps existing binary intact"
+else
+  bad "keep old (rc=$rc): $out"
 fi
 
 exit $fail

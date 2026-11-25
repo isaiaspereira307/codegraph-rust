@@ -31,6 +31,7 @@ case "${1:-}" in
 esac
 
 # --- platform detection (before any network access) ---
+# CODEGRAPH_TEST_UNAME_* are test hooks; they override uname for the test suite only.
 os="${CODEGRAPH_TEST_UNAME_S:-$(uname -s)}"
 arch="${CODEGRAPH_TEST_UNAME_M:-$(uname -m)}"
 case "$os" in
@@ -53,7 +54,13 @@ esac
 
 base="${CODEGRAPH_RELEASE_BASE_URL:-$DEFAULT_BASE}"
 base="${base%/}"
-install_dir="${CODEGRAPH_INSTALL_DIR:-$HOME/.local/bin}"
+if [ -n "${CODEGRAPH_INSTALL_DIR:-}" ]; then
+  install_dir="$CODEGRAPH_INSTALL_DIR"
+elif [ -n "${HOME:-}" ]; then
+  install_dir="$HOME/.local/bin"
+else
+  err "HOME is not set; set CODEGRAPH_INSTALL_DIR"; exit 1
+fi
 version="${CODEGRAPH_VERSION:-latest}"
 
 # --- downloader ---
@@ -89,12 +96,17 @@ if [ "$version" = "latest" ]; then
   case "$version" in v[0-9]*) ;; *) err "could not determine latest version from: $final"; exit 1 ;; esac
 fi
 version="${version#v}"
+case "$version" in
+  ''|*[!0-9A-Za-z._-]*) err "invalid version: '$version'"; exit 1 ;;
+esac
 
 asset="codegraph-${version}-${target}.tar.gz"
 url_dir="$base/download/v$version"
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT INT TERM
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "Installing codegraph $version for $target"
 echo "Downloading $url_dir/$asset"
@@ -111,13 +123,17 @@ if [ "$expected" != "$actual" ]; then
 fi
 
 mkdir -p "$tmp/extract"
-tar -xzf "$tmp/$asset" -C "$tmp/extract"
+tar -xzf "$tmp/$asset" -C "$tmp/extract" "codegraph-${version}-${target}/codegraph"
 bin="$tmp/extract/codegraph-${version}-${target}/codegraph"
 [ -f "$bin" ] || { err "codegraph binary not found in archive"; exit 1; }
 chmod +x "$bin"
 
 mkdir -p "$install_dir"
-mv -f "$bin" "$install_dir/codegraph"
+staged="$install_dir/.codegraph.$$"
+trap 'rm -rf "$tmp" "$staged"' EXIT
+cp "$bin" "$staged" || { err "could not write to $install_dir"; exit 1; }
+chmod +x "$staged"
+mv -f "$staged" "$install_dir/codegraph"
 echo "Installed: $install_dir/codegraph"
 
 case ":${PATH:-}:" in
