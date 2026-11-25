@@ -175,9 +175,10 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    mortas (`if (false)`), CommonJS (`require(...)`, `import(...)` como IMPORTS_FROM) e funções
    atribuídas a membro (`exports.f = function…`, `Foo.prototype.bar = …`, CRG
    `_extract_js_member_functions`), valores `function*` e campos privados `#x`.
-   `INHERITS` fica como texto só para TS/JS (único extrator que gera `Extends` hoje); o
-   `GraphQuery` ignora alvos de texto, então as ferramentas não seguem herança até ele
-   resolver `INHERITS` por nome.
+   `INHERITS` fica como texto (como no CRG); desde o plano
+   `docs/superpowers/plans/2026-11-25-inherits-graphquery.md` o `GraphQuery` liga esse texto ao
+   nó por nome na leitura, então `get_impact_radius`, `traverse_graph` e `query_graph`
+   `inheritors_of` seguem herança (ver Próximos passos, item 2).
 2. ✅ **Go** (plano `docs/superpowers/plans/2026-11-20-fase2-go.md`): todo `type_spec` vira
    `Class` (alias `type A = B` não vira nó), nome final da chamada, chamador = função nomeada
    (func literals não contam; fora de função sai do `File`), guarda morta `if false`, `recv.M()`
@@ -496,8 +497,22 @@ Em ordem; cada item ganha plano próprio em `docs/superpowers/plans/`:
    `docs/superpowers/plans/2026-11-24-fase2-rust-modulos.md`): `impacted` do cenário Rust da
    Fase 3 0.897 → 0.948; 271 arestas `File` → `File` iguais ao CRG neste repo. O que resta está
    na Fase 2, item 4.
-2. **`INHERITS` no `GraphQuery`**: resolver alvos de texto por nome, para as ferramentas
-   seguirem herança (TS/JS, Go, Java, Python).
+2. ✅ **`INHERITS` no `GraphQuery`**: resolver alvos de texto por nome, para as ferramentas
+   seguirem herança (TS/JS, Go, Java, Python). Feito em 2026-11-25 (plano
+   `docs/superpowers/plans/2026-11-25-inherits-graphquery.md`): `Snapshot::load` liga o texto de
+   `INHERITS`/`IMPLEMENTS` (último segmento após `.`/`::`, sem argumentos de tipo `<…>`) a um nó
+   de tipo de linguagem compatível — mesmo arquivo, depois arquivos importados, depois o
+   repositório; a primeira camada com candidato decide e vários candidatos = ambíguo, sem
+   aresta. Nada muda no SQLite. Novo padrão `query_graph` `inheritors_of`. Sonda
+   `scripts/parity/probes/inheritance` contra o CRG em `docs/parity/baseline.md` ("INHERITS no
+   GraphQuery"). O que resta:
+   - `AnalysisGraph` (flows, comunidades, risco, hubs) ainda ignora a herança em texto.
+   - Base ambígua (dois `Shared` sem import que desempate) não ganha aresta; o CRG lista todos
+     os candidatos em `inheritors_of` com `inferred_by: "bare_name"`. O Rust só conta em
+     `unresolved`.
+   - Go: só embedding (`INHERITS` texto); satisfação estrutural de interface não existe.
+   - Qualificador pontuado além do último segmento (`a.Shared` vs `b.Shared`) não desempata.
+   - `OVERRIDES` não é gerado nem seguido.
 3. **Distribuição**: release com binários (Linux/macOS/Windows), Homebrew, GitHub Action,
    README final.
 

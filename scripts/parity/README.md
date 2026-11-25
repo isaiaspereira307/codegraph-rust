@@ -33,6 +33,14 @@ python3 scripts/parity/parity.py run scripts/parity/probes/python-imports --work
 # IMPORTS_FROM and IMPLEMENTS 1.000; CONTAINS 0.737 (Rust-only Directory hierarchy).
 python3 scripts/parity/parity.py run scripts/parity/probes/rust-imports --work $TMPDIR/rsimports --md $TMPDIR/rsimports.md
 
+# Inheritance probe (Python, TS, Java, Go: a base with two subclasses, an ambiguous base defined
+# twice, external bases, Java `Shape<Integer>`, Python `shapes.Shape`). Compares query_graph
+# inheritors_of per type node and get_impact_radius per file (depth 1, 2) with CRG; result in
+# docs/parity/baseline.md, "INHERITS no GraphQuery". Index both copies first (as run_pair does),
+# then:
+uv run --frozen --project ../code-review-graph python scripts/parity/inherits/crg_inherits.py <crg_root> crg.json
+python3 scripts/parity/inherits/compare_inherits.py crg.json <rust_root> <crg_root> target/debug/codegraph
+
 # One arbitrary directory
 python3 scripts/parity/parity.py run <src_dir> --work $TMPDIR/parity-run --md out.md --json out.json
 

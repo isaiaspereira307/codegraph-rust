@@ -1122,3 +1122,60 @@ O que resta:
   solto/lexica (100 chamadas que o CRG deixa texto e o Rust liga; das 393 so no CRG, so 12 o CRG liga e o Rust deixa como texto, o resto tem alvo de no divergente). Ligadas a
   caminhos Rust: 59 `Tipo::m` que o CRG deixa texto e o Rust liga por busca exata (fora deste
   plano), mais os limites de `pub use`, glob e `mod` listados no PLANO.md.
+
+## INHERITS no GraphQuery
+
+Plano `docs/superpowers/plans/2026-11-25-inherits-graphquery.md` (2026-11-25, HEAD `062882b`
+para a medicao). So leitura: `Snapshot::load` liga o texto de `INHERITS`/`IMPLEMENTS` ao no de
+tipo por nome; o SQLite nao muda. Sonda `scripts/parity/probes/inheritance` (25 arquivos):
+por linguagem, uma base com duas subclasses, uma base `Shared` definida em dois arquivos sem
+import que desempate (ambigua), bases externas (`unittest.TestCase`, `React.Component`,
+`RuntimeException`, `sync.Mutex`, `vendor.Shared`), Java `implements Shape<Integer>` e Python
+`class Square(shapes.Shape)`. Scripts `scripts/parity/inherits/crg_inherits.py` e
+`compare_inherits.py`: `query_graph inheritors_of` por no de tipo e `get_impact_radius` por
+arquivo (profundidade 1 e 2), Jaccard somado (Σ∩/Σ∪) por linguagem.
+
+As arestas `INHERITS` gravadas sao identicas nos dois bancos (15 linhas, mesmo texto).
+
+| linguagem | conjunto | comparados | iguais | Σ∩ | Σ∪ | Jaccard |
+|---|---|---|---|---|---|---|
+| go | inheritors_of | 7 | 7 | 2 | 2 | 1.000 |
+| go | impacto d1 | 6 | 5 | 0 | 2 | 0.000 |
+| go | impacto d2 | 6 | 5 | 0 | 2 | 0.000 |
+| java | inheritors_of | 7 | 4 | 1 | 4 | 0.250 |
+| java | impacto d1 | 7 | 6 | 0 | 2 | 0.000 |
+| java | impacto d2 | 7 | 6 | 0 | 2 | 0.000 |
+| py | inheritors_of | 7 | 4 | 1 | 4 | 0.250 |
+| py | impacto d1 | 6 | 5 | 2 | 4 | 0.500 |
+| py | impacto d2 | 6 | 5 | 2 | 5 | 0.400 |
+| ts | inheritors_of | 7 | 5 | 2 | 4 | 0.500 |
+| ts | impacto d1 | 6 | 5 | 2 | 4 | 0.500 |
+| ts | impacto d2 | 6 | 5 | 2 | 4 | 0.500 |
+
+Antes do plano o snapshot descartava todo alvo de texto, entao o impacto do Rust era igual ao
+do CRG nesta sonda e `inheritors_of` nao existia. Toda divergencia tem uma de tres causas:
+
+1. **O impacto do CRG nao segue heranca em texto.** `get_impact_radius` do CRG junta arestas
+   por `qualified_name`; `INHERITS` com alvo `Shape` nunca casa com `py/shapes.py::Shape`.
+   Assim, mudar o arquivo da base nao alcanca as subclasses no CRG; no Rust alcanca (objetivo
+   do plano). Em todas as 8 divergencias de impacto o lado so-CRG e vazio e o lado so-Rust e
+   exatamente as subclasses (`Circle`, `Square` em cada linguagem) e, na profundidade 2 em
+   Python, `CircleCase.test_area` (chama `Circle()`).
+2. **Base ambigua.** `Leaf extends Shared` com `Shared` em dois arquivos (py, ts, java): o CRG
+   lista `Leaf` em `inheritors_of` dos dois `Shared` com `inferred_by: "bare_name"`; o Rust nao
+   cria aresta e reporta `unresolved = 1` nos dois (6 divergencias). Em Go `Leaf` embute
+   `shared.Shared` com import `vendor/shared` (fora do repo): os dois lados nao ligam (o CRG
+   porque o texto `shared.Shared` nao e o nome `Shared`; o Rust porque os dois `Shared` Go sao
+   ambiguos, `unresolved = 1` em cada), entao o conjunto e igual.
+3. **Texto que o CRG nao casa por nome exato.** O fallback do CRG compara o texto inteiro do
+   alvo com o nome da base: `shapes.Shape` (Python `Square`) e `Shape<Integer>` (Java
+   `Circle`) ficam sem ligacao no CRG; o Rust usa o ultimo segmento sem argumentos de tipo e
+   liga ambos (2 divergencias, Rust-only).
+
+Nenhum caso so-CRG fora da causa 2. Bases externas nao viram aresta em nenhum dos lados.
+`Widget extends React.Component` (TS) nao gera `INHERITS` em nenhum dos dois extratores.
+
+Corpus (`parity.py corpus`) depois do plano: nos e arestas identicos ao "Depois" acima; a unica
+linha diferente e o ARI de python (0.909 contra 0.403 em "Depois"), o mesmo valor ja medido
+no fechamento da resolucao de modulos Rust (secao anterior); o `AnalysisGraph` nao mudou neste
+plano.
