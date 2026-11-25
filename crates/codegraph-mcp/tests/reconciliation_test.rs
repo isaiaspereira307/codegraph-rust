@@ -301,6 +301,52 @@ async fn unresolved_call_is_kept_as_text() -> Result<()> {
     Ok(())
 }
 
+/// Java calls on a typed receiver bind to the defining file even without an import: same-package
+/// types and fully qualified types use the CRG's file lookup, not just `IMPORTS_FROM` evidence.
+#[tokio::test]
+async fn java_typed_receivers_bind_without_imports() -> Result<()> {
+    let Some((dir, indexer)) = index_files(
+        concat!(module_path!(), "::java_typed_receivers_bind_without_imports"),
+        &[
+            (
+                "com/x/Cart.java",
+                "package com.x;\npublic class Cart { public long total() { return 1; } }\n",
+            ),
+            (
+                "com/x/OrderService.java",
+                "package com.x;\npublic class OrderService { public long run(Cart cart) { return cart.total(); } }\n",
+            ),
+            (
+                "com/x/Price.java",
+                "package com.x;\npublic class Price { public long amount() { return 2; } }\n",
+            ),
+            (
+                "com/y/Checkout.java",
+                "package com.y;\npublic class Checkout { public long price(com.x.Price price) { return price.amount(); } }\n",
+            ),
+        ],
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let calls = edges_of(&indexer.graph_store(), dir.path(), "'CALLS'")?;
+    assert!(
+        calls.contains(
+            &"CALLS|com/x/OrderService.java::OrderService.run|com/x/Cart.java::Cart.total"
+                .to_string()
+        ),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(
+            &"CALLS|com/y/Checkout.java::Checkout.price|com/x/Price.java::Price.amount".to_string()
+        ),
+        "{calls:?}"
+    );
+    Ok(())
+}
+
 /// Rust `use` paths bind to File nodes through Cargo layouts: `crate::` inside the importer's
 /// crate, a path dependency's name to that crate's modules; `std` stays text.
 #[tokio::test]

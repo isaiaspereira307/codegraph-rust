@@ -825,6 +825,52 @@ impl ModuleIndex {
         };
         find(text).or_else(|| find(text.rsplit_once('.')?.0))
     }
+
+    /// CRG `_java_same_package_file`: `Type.java` beside the importer, or the same package in a
+    /// sibling source set that a test compiles against. A main source set sees no sibling.
+    pub(crate) fn java_same_package_file(&self, importer: &str, class_name: &str) -> Option<&str> {
+        if class_name.is_empty()
+            || !class_name
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        {
+            return None;
+        }
+        let file_name = format!("{class_name}.java");
+        let parts = PathParts::new(importer);
+        let own = self.file(&parts.parent().join(&file_name));
+        if own.is_some() {
+            return own;
+        }
+        let segments = &parts.segments;
+        let java = segments.iter().position(|s| *s == "java")?;
+        if java < 2 || segments[java - 2] != "src" {
+            return None;
+        }
+        let source_set = segments[java - 1];
+        if source_set == "main" {
+            return None;
+        }
+        let package = &segments[java + 1..segments.len().saturating_sub(1)];
+        for other in ["main", "test"] {
+            if other == source_set {
+                continue;
+            }
+            let mut candidate = PathParts {
+                absolute: parts.absolute,
+                segments: segments[..java - 2].to_vec(),
+            };
+            candidate
+                .segments
+                .extend(["src", other, "java"].iter().copied());
+            candidate.segments.extend_from_slice(package);
+            let found = self.file(&candidate.join(&file_name));
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1276,6 +1322,21 @@ mod tests {
             index.go_package("app/main.go", "example.com/dep"),
             Some(format!("{root}/third_party/dep"))
         );
+    }
+
+    #[test]
+    fn java_same_package_and_qualified_types_find_their_files() {
+        let index = index();
+        let main = "j/src/com/example/Main.java";
+        assert_eq!(
+            index.java_same_package_file(main, "Foo"),
+            Some("j/src/com/example/Foo.java")
+        );
+        assert_eq!(
+            index.resolve(main, "com.example.Foo"),
+            Some("j/src/com/example/Foo.java")
+        );
+        assert_eq!(index.java_same_package_file(main, "Missing"), None);
     }
 
     #[test]

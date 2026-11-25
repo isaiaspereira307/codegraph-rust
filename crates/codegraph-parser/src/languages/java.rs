@@ -433,6 +433,19 @@ impl<'a> JavaCollector<'a> {
             ("source_file".to_string(), self.file_path.to_string()),
         ]);
         let mut target = method.clone();
+        let expression_receiver =
+            node.kind() == "method_invocation" && self.java_expression_receiver(node);
+        if expression_receiver {
+            metadata.insert("receiver_form".into(), "expression".into());
+        }
+        let constructed_type = (node.kind() == "method_invocation")
+            .then(|| {
+                children(node)
+                    .next()
+                    .filter(|first| first.kind() == "object_creation_expression")
+                    .and_then(|first| self.java_type_name(&first))
+            })
+            .flatten();
         if let Some(receiver) = &receiver {
             metadata.insert("receiver".into(), receiver.clone());
             let declared = if this_field {
@@ -443,15 +456,26 @@ impl<'a> JavaCollector<'a> {
             let receiver_type = declared.cloned().or_else(|| {
                 let class_receiver = !this_field
                     && receiver.starts_with(|c: char| c.is_ascii_uppercase())
-                    && (self.imports.contains_key(receiver) || self.defined.contains(receiver));
+                    && (self.imports.contains_key(receiver)
+                        || self.defined.contains(receiver)
+                        || package_qualified_prefix(receiver).is_none());
                 class_receiver.then(|| receiver.clone())
             });
-            if let Some(receiver_type) = receiver_type
-                && let Some(typed) = self.typed_method_target(&receiver_type, &method)
-            {
-                metadata.insert("receiver_type".into(), receiver_type);
-                target = typed;
+            if let Some(receiver_type) = receiver_type {
+                // CRG keeps the declared type on every typed call, even when the defining
+                // file is outside this file; the catalog finishes the binding in that case.
+                metadata.insert("receiver_type".into(), receiver_type.clone());
+                metadata.insert("receiver_resolution".into(), "typed_receiver".into());
+                if let Some(typed) = self.typed_method_target(&receiver_type, &method) {
+                    target = typed;
+                }
             }
+        }
+        if receiver.is_none()
+            && let Some(receiver_type) = constructed_type
+        {
+            metadata.insert("receiver_type".into(), receiver_type);
+            metadata.insert("receiver_resolution".into(), "constructed_receiver".into());
         }
         let from = match self.functions.last() {
             Some(&id) => id,
@@ -460,7 +484,7 @@ impl<'a> JavaCollector<'a> {
                 NodeId::nil()
             }
         };
-        if receiver.is_none() {
+        if receiver.is_none() && !expression_receiver {
             self.bare_calls.push(self.edges.len());
         }
         self.edges.push(EdgeRelationship {
@@ -519,6 +543,23 @@ impl<'a> JavaCollector<'a> {
             }
         }
         (method, receiver)
+    }
+
+    /// CRG `_java_expression_receiver`: a call on a chain or literal has no name to type.
+    /// It must not be mistaken for a receiver-less call and bound to a file-local symbol.
+    fn java_expression_receiver(&self, node: &Node) -> bool {
+        let first = children(node).next();
+        first.is_some_and(|first| {
+            matches!(
+                first.kind(),
+                "method_invocation"
+                    | "array_access"
+                    | "string_literal"
+                    | "character_literal"
+                    | "null_literal"
+                    | "parenthesized_expression"
+            )
+        })
     }
 
     /// CRG `_resolve_typed_method_target` for a type declared in this file: `<file>::Type.m`.
@@ -1319,6 +1360,32 @@ class Order {
             set(&["total", "T.java::Cart.make"])
         );
         assert_eq!(calls_from(&result, "T.java::Shop.d"), set(&["total"]));
+    }
+
+    #[test]
+    fn typed_receiver_metadata_survives_cross_file_types() {
+        let source = "import com.acme.Cart;\n\
+                       class Shop {\n\
+                       void a(Cart cart) { cart.total(); }\n\
+                       void b(com.acme.Price price) { price.amount(); }\n\
+                       }\n";
+        let result = extract_java(source, "T.java");
+        let typed: BTreeSet<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .filter_map(|e| {
+                let type_name = e.metadata.get("receiver_type")?;
+                Some((e.to.clone(), type_name.clone()))
+            })
+            .collect();
+        assert_eq!(
+            typed,
+            BTreeSet::from([
+                ("total".to_string(), "Cart".to_string()),
+                ("amount".to_string(), "com.acme.Price".to_string()),
+            ])
+        );
     }
 
     #[test]

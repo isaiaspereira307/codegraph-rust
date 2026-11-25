@@ -1265,6 +1265,13 @@ impl ProjectIndexer {
                     resolution_provenance.push(("import", 1.0f64));
                     continue;
                 }
+                if let Some(target) = catalog.java_call_target(edge) {
+                    exact_count += 1;
+                    targets.push(Some(target));
+                    go_import_dirs.push(None);
+                    resolution_provenance.push(("import", 1.0f64));
+                    continue;
+                }
                 // Like code-review-graph, a parsed base class or injected type stays the text
                 // the source wrote, even when the class it names is indexed.
                 let injects = edge.edge_type

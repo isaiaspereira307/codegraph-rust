@@ -40,6 +40,8 @@ pub(crate) struct SymbolCatalog {
     rust_aliases: HashMap<String, HashMap<String, String>>,
     /// Per Go file, each selector qualifier and the package directory its import names.
     go_imports: HashMap<String, HashMap<String, String>>,
+    /// Per Java file, each simple import name and the qualified type it names.
+    java_imports: HashMap<String, HashMap<String, String>>,
     /// Indexed `.go` files directly inside each package directory.
     go_package_files: HashMap<String, Vec<String>>,
     /// Project root, to compare relative symbol paths with absolute package directories.
@@ -174,6 +176,7 @@ impl SymbolCatalog {
             imported_files: HashMap::new(),
             rust_aliases: HashMap::new(),
             go_imports: HashMap::new(),
+            java_imports: HashMap::new(),
             go_package_files: HashMap::new(),
             go_root: None,
         };
@@ -399,6 +402,17 @@ impl SymbolCatalog {
                     .or_default()
                     .insert(alias, dir);
             }
+            if importer.file.ends_with(".java")
+                && !edge.metadata.contains_key("static")
+                && !edge.metadata.contains_key("wildcard")
+                && let Some(simple) = edge.to.rsplit('.').next()
+                && !simple.is_empty()
+            {
+                self.java_imports
+                    .entry(importer.file.clone())
+                    .or_default()
+                    .insert(simple.to_string(), edge.to.clone());
+            }
             if let Some(file) = self.modules.resolve(&importer.file, &edge.to) {
                 self.imported_files
                     .entry(importer.file.clone())
@@ -447,6 +461,62 @@ impl SymbolCatalog {
             .collect();
         candidates.sort();
         candidates.dedup();
+        (candidates.len() == 1).then_some(candidates[0])
+    }
+
+    /// The indexed file that declares a Java receiver's type: FQN, imported simple name, or the
+    /// same package (code-review-graph's three `_resolve_typed_method_target` branches).
+    fn java_type_file<'a>(&'a self, importer: &str, type_name: &str) -> Option<&'a str> {
+        let base = type_name.rsplit('.').next().filter(|s| !s.is_empty())?;
+        if type_name.contains('.')
+            && let Some(file) = self.modules.resolve(importer, type_name)
+        {
+            return Some(file);
+        }
+        if let Some(qualified) = self
+            .java_imports
+            .get(importer)
+            .and_then(|imports| imports.get(base))
+            && let Some(file) = self.modules.resolve(importer, qualified)
+        {
+            return Some(file);
+        }
+        self.modules.java_same_package_file(importer, base)
+    }
+
+    /// A Java call on a typed receiver binds only to that type's method in its defining file.
+    /// Unknown or ambiguous receivers keep the bare method name, as at CRG bbdda4b.
+    pub(crate) fn java_call_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        if edge.edge_type != EdgeType::Calls {
+            return None;
+        }
+        let type_name = edge.metadata.get("receiver_type")?;
+        let caller = self.symbols.get(&edge.from)?;
+        if !caller.file.ends_with(".java") {
+            return None;
+        }
+        let file = self.java_type_file(&caller.file, type_name)?;
+        let base = type_name.rsplit('.').next()?;
+        let expected = format!("{file}::{base}.{}", edge.to);
+        if let Some(ids) = self.aliases.get(&expected) {
+            let mut ids = ids.iter().copied();
+            if let Some(id) = ids.next()
+                && ids.next().is_none()
+            {
+                return Some(id);
+            }
+        }
+        let candidates: Vec<_> = self
+            .aliases
+            .get(&edge.to)?
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.symbols.get(id).is_some_and(|symbol| {
+                    symbol.file == file && symbol.qualified.ends_with(&format!(".{}", edge.to))
+                })
+            })
+            .collect();
         (candidates.len() == 1).then_some(candidates[0])
     }
 
