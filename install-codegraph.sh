@@ -18,4 +18,6 @@ Next steps (from the project you want to index):
   codegraph doctor .      # check that everything is wired up
 
 Add ${INSTALL_PATH} to your PATH if it is not already there.
+
+Tip: to install a prebuilt binary without Rust, use install.sh instead.
 EOF2
