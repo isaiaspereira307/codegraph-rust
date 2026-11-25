@@ -50,6 +50,8 @@ pub struct TreeSitterParser {
     parser_pool: Arc<parking_lot::Mutex<HashMap<Language, Vec<Parser>>>>,
     extraction_policy: crate::languages::ExtractionPolicy,
     project_root: Option<Arc<PathBuf>>,
+    /// Directory nodes are not part of code-review-graph's graph shape; off for indexing.
+    include_directory_nodes: bool,
     blocking_workers: Arc<tokio::sync::Semaphore>,
 }
 
@@ -64,6 +66,7 @@ impl TreeSitterParser {
             parser_pool: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             extraction_policy: Default::default(),
             project_root: None,
+            include_directory_nodes: false,
             blocking_workers: Arc::new(tokio::sync::Semaphore::new((num_cpus * 2).max(1))),
         }
     }
@@ -89,6 +92,17 @@ impl TreeSitterParser {
 
     pub fn project_root(&self) -> Option<&Path> {
         self.project_root.as_deref().map(PathBuf::as_path)
+    }
+
+    /// Opts the parser into synthetic directory nodes and their `CONTAINS` chain. Indexing
+    /// leaves them off: code-review-graph stores only source symbols and files.
+    pub fn with_directory_nodes(mut self, include: bool) -> Self {
+        self.include_directory_nodes = include;
+        self
+    }
+
+    pub fn includes_directory_nodes(&self) -> bool {
+        self.include_directory_nodes
     }
 
     pub fn with_extraction_policy(mut self, policy: crate::languages::ExtractionPolicy) -> Self {
@@ -618,6 +632,7 @@ impl TreeSitterParser {
         let parser_pool = self.parser_pool.clone();
         let policy = self.extraction_policy;
         let project_root = self.project_root.clone();
+        let include_directory_nodes = self.include_directory_nodes;
 
         // Clone for timeout message
         let content_len = content.len();
@@ -738,11 +753,15 @@ impl TreeSitterParser {
                     let enhanced_result = crate::fast_ml::get_fast_ml_enhancer()
                         .enhance_with_policy(ast_result, &used_content, policy);
                     let enhanced_result = Self::annotate_edge_lines(enhanced_result, &used_content);
-                    Ok(Self::add_directory_nodes(
-                        enhanced_result,
-                        &file_path,
-                        project_root.as_deref().map(PathBuf::as_path),
-                    ))
+                    Ok(if include_directory_nodes {
+                        Self::add_directory_nodes(
+                            enhanced_result,
+                            &file_path,
+                            project_root.as_deref().map(PathBuf::as_path),
+                        )
+                    } else {
+                        enhanced_result
+                    })
                 }
                 None => Err(CodeGraphError::Parse(format!(
                     "Complete parsing failed for {}",
@@ -918,8 +937,33 @@ mod pipeline_tests {
     use super::*;
 
     #[tokio::test]
-    async fn directory_identity_is_shared_and_containment_stops_at_project_root() {
+    async fn unified_parsing_does_not_add_directory_nodes_by_default() {
         let parser = TreeSitterParser::new().with_project_root("/project");
+        let result = parser
+            .parse_source_with_edges(
+                Arc::from("fn foo() {}"),
+                "/project/src/a.rs",
+                Language::Rust,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !result
+                .nodes
+                .iter()
+                .any(|node| node.node_type == Some(NodeType::Directory))
+        );
+        assert!(!result.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Contains
+                && edge.metadata.get("analyzer").map(String::as_str) == Some("directory_structure")
+        }));
+    }
+
+    #[tokio::test]
+    async fn directory_identity_is_shared_and_containment_stops_at_project_root() {
+        let parser = TreeSitterParser::new()
+            .with_project_root("/project")
+            .with_directory_nodes(true);
         let mut identities = Vec::new();
         for file in ["/project/src/a.rs", "/project/src/b.rs"] {
             let result = parser
@@ -1028,7 +1072,9 @@ mod edge_line_tests {
 
     #[tokio::test]
     async fn relative_and_absolute_spellings_share_directory_nodes() {
-        let parser = TreeSitterParser::new().with_project_root("/project");
+        let parser = TreeSitterParser::new()
+            .with_project_root("/project")
+            .with_directory_nodes(true);
         let mut seen = Vec::new();
         for file in ["src/a.rs", "./src/a.rs", "/project/src/a.rs"] {
             let result = parser

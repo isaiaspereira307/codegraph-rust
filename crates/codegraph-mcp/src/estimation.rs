@@ -179,6 +179,7 @@ pub(crate) async fn parse_snapshots_with_cache(
                 &snapshot.content_hash,
                 policy.uses,
                 policy.references,
+                parser_ref.includes_directory_nodes(),
             ))?;
             if let Some(cache) = cache {
                 let cache = cache.clone();
