@@ -98,3 +98,10 @@ debug com 3 repetições na Task 11; estes valores são apenas o registro da lin
   segue em 1.000. Nós sintéticos de diretório saíram da indexação (o CRG não os emite). Snapshot
   completo `/tmp/opencode/parity-p1-t6`: 86 pisos OK (82 + 4 novos pisos do probe). Medição em
   [`p1-task6-ts-js.md`](p1-task6-ts-js.md), incluindo a divergência conhecida de receptor tipado.
+- Task 7: probe `go-package` com módulo, `replace`, `vendor` e `_test.go`. Sonda: CALLS
+  0.333 → 1.000 e IMPORTS_FROM 0.333 → 1.000; nós/CONTAINS/TESTED_BY e corpus Go seguem em
+  1.000. Import Go passa a mirar o diretório do pacote com `import_scope=package`, sem nó
+  sintético; chamadas ligam-se por evidência única de import. Snapshot completo
+  `/tmp/opencode/parity-p1-t7`: 91 pisos OK (86 + 5 do probe). Medição em
+  [`p1-task7-go-packages.md`](p1-task7-go-packages.md), com o ruling R8 sobre o ramo ambíguo
+  que não existe mais no CRG congelado.
