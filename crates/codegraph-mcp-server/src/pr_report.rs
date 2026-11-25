@@ -272,7 +272,15 @@ unsafe fn analyze(
 ) -> Result<i32> {
     // The executor would create an empty graph and report "no changes"; never let a
     // missing or empty graph produce a reassuring report.
-    let project = target.project.clone().unwrap_or_else(|| PathBuf::from("."));
+    // `run_to_value` changes the working directory to the project, so resolve every relative
+    // path against the invoking directory once, before the first call.
+    let project =
+        std::path::absolute(target.project.clone().unwrap_or_else(|| PathBuf::from(".")))?;
+    let config_abs: Option<PathBuf> = config_path.map(std::path::absolute).transpose()?;
+    let config_path = config_abs.as_deref();
+    let mut target = target.clone();
+    target.project = Some(project.clone());
+    let target = &target;
     let db = project.join(".code-review-graph").join("graph.db");
     if !db.is_file() {
         bail!("no graph at {}; run `codegraph build` first", db.display());

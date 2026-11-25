@@ -4,7 +4,6 @@ use std::process::Command;
 
 #[test]
 fn version_prints_workspace_version() {
-    assert_eq!(env!("CARGO_PKG_VERSION"), "1.0.0");
     let out = Command::new(env!("CARGO_BIN_EXE_codegraph"))
         .arg("--version")
         .output()

@@ -123,6 +123,62 @@ fn cli_without_graph_exits_1_and_writes_nothing() {
     assert!(!String::from_utf8_lossy(&output.stdout).contains(REPORT_MARKER));
 }
 
+#[test]
+fn cli_accepts_a_relative_project_path() {
+    let parent = tempfile::tempdir().unwrap();
+    let repo = parent.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let run_git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    run_git(&["init", "-q"]);
+    std::fs::write(repo.join("a.py"), "def f():\n    return 1\n").unwrap();
+    run_git(&["add", "-A"]);
+    run_git(&[
+        "-c",
+        "user.email=a@b.c",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "init",
+    ]);
+    let cg = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_codegraph"))
+            .args(args)
+            .current_dir(parent.path())
+            .env("HOME", parent.path().join("fake-home"))
+            .env("CODEGRAPH_DEBUG", "0")
+            .output()
+            .unwrap()
+    };
+    let built = cg(&["build", "./repo"]);
+    assert!(built.status.success(), "{built:?}");
+    let report = parent.path().join("report.md");
+    let output = cg(&[
+        "pr-report",
+        "--project",
+        "./repo",
+        "--base",
+        "HEAD",
+        "--output",
+        report.to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        std::fs::read_to_string(&report)
+            .unwrap()
+            .contains(REPORT_MARKER)
+    );
+}
+
 fn node(name: &str, path: &str, risk: f64) -> Value {
     json!({"id": "x", "kind": "Function", "name": name,
         "location": {"file_path": path, "start_line": 1, "end_line": 2}, "risk_score": risk})
