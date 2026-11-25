@@ -598,9 +598,7 @@ impl TreeSitterParser {
             .and_then(|root| Path::new(file_path).strip_prefix(root).ok())
             .filter(|_| Path::new(file_path).is_absolute())
             .map(|rel| rel.to_string_lossy().into_owned())
-            .unwrap_or_else(|| {
-                crate::languages::crg_shape::default_rel_path(file_path).to_string()
-            });
+            .unwrap_or_else(|| crate::languages::crg_shape::default_rel_path(file_path));
         self.parse_source_at(content, file_path, &rel_path, language)
             .await
     }

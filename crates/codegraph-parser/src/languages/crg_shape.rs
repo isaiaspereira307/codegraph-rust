@@ -6,6 +6,7 @@ use codegraph_core::{
     CodeNode, EdgeRelationship, EdgeType, ExtractionResult, Language, Location, NodeId, NodeType,
 };
 use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path};
 
 /// Set on every node whose `qualified_name` this pass rewrote.
 pub const SHAPED_ATTR: &str = "crg_shaped";
@@ -75,10 +76,36 @@ pub fn id_node_type(node: &CodeNode) -> String {
         .unwrap_or_else(|| "Unknown".into())
 }
 
-/// The root-relative path of a parse-time path when the caller knows no better: the
-/// indexer walks `.`, so its paths are relative with a `./` prefix.
-pub fn default_rel_path(file_path: &str) -> &str {
-    file_path.strip_prefix("./").unwrap_or(file_path)
+/// Lexically normalizes a file path to the root-relative key used in `qualified_name`s.
+/// `.`, `..`, repeated separators and an absolute spelling under the current directory all
+/// collapse to the same string; an absolute path outside it keeps its components.
+pub fn default_rel_path(file_path: &str) -> String {
+    let raw = Path::new(file_path);
+    let cwd = std::env::current_dir().ok();
+    let relative = if raw.is_absolute() {
+        match cwd.as_deref().and_then(|root| raw.strip_prefix(root).ok()) {
+            Some(under_cwd) => under_cwd.to_path_buf(),
+            None => return file_path.trim_end_matches('/').to_string(),
+        }
+    } else {
+        raw.to_path_buf()
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+        }
+    }
+    let joined = parts.join("/");
+    if joined.is_empty() {
+        file_path.to_string()
+    } else {
+        joined
+    }
 }
 
 fn is_container(kind: &NodeType) -> bool {
@@ -151,6 +178,9 @@ pub fn shape_for_crg(
     language: Language,
     line_count: u32,
 ) {
+    // The graph key is root-relative and normalized; the original `file_path` stays only in
+    // locations, where it must still point at the file on disk.
+    let rel_path = default_rel_path(rel_path);
     let imports: HashSet<NodeId> = result
         .nodes
         .iter()
@@ -251,8 +281,8 @@ pub fn shape_for_crg(
     file_node
         .metadata
         .attributes
-        .insert("qualified_name".into(), file_path.to_string());
-    if test_detection::is_test_file(rel_path) {
+        .insert("qualified_name".into(), rel_path.clone());
+    if test_detection::is_test_file(&rel_path) {
         file_node
             .metadata
             .attributes
@@ -307,11 +337,11 @@ pub fn shape_for_crg(
         .collect();
 
     for &i in &members {
-        let mut qualified = format!("{file_path}::{}", paths[&i]);
+        let mut qualified = format!("{rel_path}::{}", paths[&i]);
         let (parent, mut from) = match parent_of.get(&i) {
             Some(Parent::Node(p)) if python => {
                 let scope = scopes[p].clone();
-                qualified = format!("{file_path}::{scope}.{}", result.nodes[i].name);
+                qualified = format!("{rel_path}::{scope}.{}", result.nodes[i].name);
                 let from = if result.nodes[i].node_type == Some(NodeType::Class) {
                     file_node.id
                 } else {
@@ -340,7 +370,7 @@ pub fn shape_for_crg(
             to: qualified,
             edge_type: EdgeType::Contains,
             metadata: HashMap::from([
-                ("source_file".into(), file_path.to_string()),
+                ("source_file".into(), rel_path.clone()),
                 ("target_node_id".into(), node.id.to_string()),
                 ("line".into(), node.location.line.to_string()),
                 ("analyzer".into(), "crg_shape".into()),
@@ -360,7 +390,7 @@ pub fn shape_for_crg(
             .unwrap_or_default();
         if node.node_type != Some(NodeType::Function)
             || !(is_test_runner(node)
-                || test_detection::is_test_function(node.name.as_str(), rel_path, &decorators))
+                || test_detection::is_test_function(node.name.as_str(), &rel_path, &decorators))
         {
             continue;
         }
@@ -373,7 +403,7 @@ pub fn shape_for_crg(
         node.node_type = Some(NodeType::Other("Test".into()));
     }
 
-    if test_detection::is_test_file(rel_path) {
+    if test_detection::is_test_file(&rel_path) {
         for &i in &members {
             result.nodes[i]
                 .metadata
@@ -673,7 +703,7 @@ mod tests {
         assert_eq!(test_x.metadata.attributes["is_test"], "true");
         assert_eq!(
             test_x.metadata.attributes["qualified_name"],
-            "./tests/test_m.py::test_x"
+            "tests/test_m.py::test_x"
         );
         assert_eq!(id_node_type(test_x), "Function");
         assert_eq!(file_node(&r).metadata.attributes["is_test"], "true");
@@ -812,6 +842,41 @@ mod tests {
         assert!(
             edges.contains(&("m.go".into(), "m.go::Stack.Push".into())),
             "{edges:?}"
+        );
+    }
+
+    #[test]
+    fn qualified_names_ignore_path_spelling() {
+        let source = "def go():\n    pass\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_python::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let absolute = std::env::current_dir().unwrap().join("fx/m.py");
+        let spellings = [
+            "fx/m.py".to_string(),
+            "./fx//m.py".to_string(),
+            "fx/../fx/m.py".to_string(),
+            absolute.to_string_lossy().into_owned(),
+        ];
+        let sets: Vec<BTreeSet<String>> = spellings
+            .iter()
+            .map(|path| {
+                let result = extract_for_language(&Language::Python, &tree, source, path).unwrap();
+                qualified_names(&result)
+            })
+            .collect();
+        assert!(
+            sets.iter().all(|set| set == &sets[0]),
+            "path spellings produced different qualified names: {sets:?}"
+        );
+        assert!(
+            sets[0]
+                .iter()
+                .all(|qn| !qn.contains("..") && !qn.contains("//")),
+            "non-canonical qualified name: {:?}",
+            sets[0]
         );
     }
 

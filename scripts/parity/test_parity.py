@@ -345,6 +345,14 @@ class P1RegressionTest(unittest.TestCase):
         self.assertEqual(r["flows"]["python"]["members jaccard (mean/min)"], "0.833 / 0.500")
         self.assertEqual(r["ari"], 0.403)
 
+    def test_collect_metrics_accepts_a_probe_only_directory(self):
+        (self.d / "corpus.md").unlink()
+        shutil.rmtree(self.d / "changes")
+        shutil.rmtree(self.d / "inheritance")
+        m = collect_metrics(self.d)
+        self.assertEqual(m["probes.rust-imports.IMPORTS_FROM"], 1.0)
+        self.assertNotIn("corpus.python.CALLS", m)
+
     def test_collect_metrics_from_snapshot_dir(self):
         m = collect_metrics(self.d)
         self.assertEqual(m["corpus.python.nodes"], 1.0)

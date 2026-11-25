@@ -44,7 +44,7 @@ use std::collections::HashMap;
 /// crg-shape-10: `cg_nodes.base_qualified` lets `finalize` drop stale `@L<line>` suffixes.
 /// crg-shape-11: Rust `use` paths bind to File nodes through Cargo.toml crate layouts.
 /// crg-shape-12: only a file-level Rust `use` records the alias scoped calls expand through.
-pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-12";
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-13";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {

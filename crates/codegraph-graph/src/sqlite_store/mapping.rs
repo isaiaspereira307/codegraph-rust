@@ -94,10 +94,13 @@ pub fn symbol(root: &Path, node: &CodeNode) -> Option<String> {
     }
     let raw = &node.location.file_path;
     let path = absolute_path(root, raw);
+    // The CRG-shape pass stores a root-relative, normalized key; older nodes (and LSP
+    // enrichment) may still carry the raw or absolute spelling. All three mean the file.
+    let key = codegraph_core::canonical_file_key(root, raw);
     let attr = node.metadata.attributes.get("qualified_name");
     let symbol = match attr {
-        Some(qn) if qn == raw || *qn == path => return None,
-        Some(qn) => [raw.as_str(), path.as_str()]
+        Some(qn) if qn == raw || *qn == path || *qn == key => return None,
+        Some(qn) => [raw.as_str(), path.as_str(), key.as_str()]
             .iter()
             .find_map(|prefix| qn.strip_prefix(&format!("{prefix}::")))
             .unwrap_or(qn)

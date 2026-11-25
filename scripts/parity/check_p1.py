@@ -188,10 +188,13 @@ def collect_metrics(snapshot):
     snapshot = Path(snapshot)
     metrics = {}
 
-    corpus = (snapshot / "corpus.md").read_text()
-    chunks = re.split(r"^## Language corpus: ([^\n]+)\s*$", corpus, flags=re.MULTILINE)
-    for lang, text in zip(chunks[1::2], chunks[2::2]):
-        _add_report(metrics, f"corpus.{lang.strip()}", parse_report(text))
+    corpus_file = snapshot / "corpus.md"
+    if corpus_file.exists():
+        chunks = re.split(
+            r"^## Language corpus: ([^\n]+)\s*$", corpus_file.read_text(), flags=re.MULTILINE
+        )
+        for lang, text in zip(chunks[1::2], chunks[2::2]):
+            _add_report(metrics, f"corpus.{lang.strip()}", parse_report(text))
 
     for md in sorted((snapshot / "probes").glob("*.md")):
         _add_report(metrics, f"probes.{md.stem}", parse_report(md.read_text()))
@@ -205,8 +208,9 @@ def collect_metrics(snapshot):
             if len(cells) == 7 and cells[0] not in ("language", "---"):
                 metrics[f"inheritance.{cells[0]}.{_label(cells[1])}"] = _num(cells[6])
 
-    for scenario in sorted((snapshot / "changes").iterdir()):
-        text = (scenario / "compare.md").read_text()
+    for compare in sorted((snapshot / "changes").glob("*/compare.md")):
+        scenario = compare.parent
+        text = compare.read_text()
         for line in text.splitlines():
             if line.startswith("RISK_EQUAL"):
                 equal, _, common = line.split()[1].partition("/")

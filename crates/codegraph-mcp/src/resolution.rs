@@ -47,6 +47,13 @@ pub(crate) fn aliases(node: &CodeNode) -> BTreeSet<String> {
     let mut names = BTreeSet::from([name.clone(), format!("{}::{name}", node.location.file_path)]);
     if let Some(qualified) = node.metadata.attributes.get("qualified_name") {
         names.insert(qualified.clone());
+        // Python/Rust/Go extractors claim endpoints with the file path as it was walked
+        // (`./a.py::K.m`). Keep that spelling as an alias after the CRG shape normalized it.
+        let key =
+            codegraph_parser::languages::crg_shape::default_rel_path(&node.location.file_path);
+        if let Some(symbol) = qualified.strip_prefix(&format!("{key}::")) {
+            names.insert(format!("{}::{symbol}", node.location.file_path));
+        }
     }
     // The extractor's own qualified name, from before the CRG reshape.
     if let Some(original) = node
@@ -68,6 +75,24 @@ pub(crate) fn aliases(node: &CodeNode) -> BTreeSet<String> {
         }
     }
     names
+}
+
+/// The catalog compares claims against an absolute `<file>::<symbol>` string. The CRG shape
+/// pass stores the file prefix as a root-relative key, so restore the absolute spelling when
+/// the attribute's prefix is a suffix of the node's file path. Kind-prefixed aliases (`Function::x`)
+/// and already-absolute names are left unchanged.
+fn catalog_qualified(file: &str, raw: &str) -> String {
+    if raw.starts_with(&format!("{file}::")) {
+        return raw.to_string();
+    }
+    let Some(head) = raw.split("::").next() else {
+        return raw.to_string();
+    };
+    let normalized = codegraph_parser::languages::crg_shape::default_rel_path(head);
+    if normalized.is_empty() || !file.ends_with(&normalized) {
+        return raw.to_string();
+    }
+    format!("{file}{}", raw.strip_prefix(head).unwrap_or(raw))
 }
 
 fn trigrams(name: &str) -> BTreeSet<String> {
@@ -119,12 +144,14 @@ impl SymbolCatalog {
                 Symbol {
                     id: node.id,
                     file: node.location.file_path.clone(),
-                    qualified: node
-                        .metadata
-                        .attributes
-                        .get("qualified_name")
-                        .cloned()
-                        .unwrap_or_else(|| node.name.to_string()),
+                    qualified: catalog_qualified(
+                        &node.location.file_path,
+                        node.metadata
+                            .attributes
+                            .get("qualified_name")
+                            .map(String::as_str)
+                            .unwrap_or(node.name.as_str()),
+                    ),
                     has_parent: node.metadata.attributes.contains_key("parent_name"),
                 },
             );
@@ -577,6 +604,27 @@ mod tests {
             metadata: Default::default(),
             span: None,
         }
+    }
+
+    #[test]
+    fn catalog_qualified_restores_the_absolute_file_prefix() {
+        let file = "/repo/app/core.py";
+        assert_eq!(
+            super::catalog_qualified(file, "app/core.py::helper"),
+            "/repo/app/core.py::helper"
+        );
+        assert_eq!(
+            super::catalog_qualified(file, "/repo/app/core.py::helper"),
+            "/repo/app/core.py::helper"
+        );
+        assert_eq!(
+            super::catalog_qualified(file, "./app/core.py::helper"),
+            "/repo/app/core.py::helper"
+        );
+        assert_eq!(
+            super::catalog_qualified(file, "Function::helper"),
+            "Function::helper"
+        );
     }
 
     #[test]

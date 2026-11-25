@@ -92,7 +92,7 @@ pub fn extract_for_language_with_policy(
     policy: ExtractionPolicy,
 ) -> Option<ExtractionResult> {
     let rel_path = crg_shape::default_rel_path(file_path);
-    extract_for_language_at(language, tree, content, file_path, rel_path, policy)
+    extract_for_language_at(language, tree, content, file_path, &rel_path, policy)
 }
 
 /// Extraction for `file_path`, whose path relative to the project root is `rel_path`.
