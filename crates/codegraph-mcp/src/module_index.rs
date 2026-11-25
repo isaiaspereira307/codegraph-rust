@@ -3,8 +3,10 @@
 
 use crate::rust_crates::{CrateLayout, RustCrates};
 use codegraph_parser::languages::python::{PythonModuleEvidence, python_module_evidence};
+use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Extensions code-review-graph appends to a relative TS/JS import, in order.
@@ -118,9 +120,20 @@ fn rust_current_module_parts<'a>(file: &'a str, source_root: &str) -> Vec<&'a st
     parts
 }
 
+/// A local npm package discovered from a `package.json` (workspace member or package root).
+struct JsPackage {
+    dir: String,
+    manifest: Value,
+}
+
 pub(crate) struct ModuleIndex {
     /// Normalized path → the indexed file path as given.
     files: HashMap<String, String>,
+    /// Local package name → its root directory and manifest, as code-review-graph's workspace
+    /// and npm alias resolvers use them.
+    js_packages: HashMap<String, JsPackage>,
+    /// `npm:` dependency aliases → the package they name.
+    npm_aliases: HashMap<String, String>,
     /// Cargo layouts that anchor Rust paths; empty means every Rust import stays text.
     rust_crates: RustCrates,
     /// Lazily read top-level Python shim/re-export evidence, keyed by the indexed file path.
@@ -129,13 +142,190 @@ pub(crate) struct ModuleIndex {
     shim_stack: RefCell<Vec<String>>,
 }
 
+/// Directories containing a readable `package.json`, found by walking up from indexed files.
+fn npm_manifests(files: &HashMap<String, String>) -> BTreeMap<String, Value> {
+    let mut manifests = BTreeMap::new();
+    for file in files.values() {
+        let Some(mut dir) = Path::new(file).parent() else {
+            continue;
+        };
+        loop {
+            let key = dir.to_string_lossy().into_owned();
+            if !manifests.contains_key(&key) {
+                let manifest = dir.join("package.json");
+                let value = std::fs::read_to_string(manifest)
+                    .ok()
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    .unwrap_or(Value::Null);
+                manifests.insert(key, value);
+            }
+            let Some(parent) = dir.parent() else {
+                break;
+            };
+            dir = parent;
+        }
+    }
+    manifests
+}
+
+fn workspace_patterns(manifest: &Value) -> Vec<String> {
+    let workspaces = manifest.get("workspaces");
+    let list = match workspaces {
+        Some(Value::Array(patterns)) => Some(patterns),
+        Some(Value::Object(object)) => object.get("packages").and_then(Value::as_array),
+        _ => None,
+    };
+    list.map(|patterns| {
+        patterns
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Expands a workspace pattern; one trailing `*` matches the member directories beneath it.
+fn workspace_directories(base: &str, pattern: &str) -> Vec<String> {
+    let mut current = base.to_string();
+    let mut parts = pattern.split('/').peekable();
+    while let Some(part) = parts.next() {
+        if part == "*" && parts.peek().is_none() {
+            let mut found: Vec<_> = std::fs::read_dir(&current)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.path().to_string_lossy().into_owned())
+                .collect();
+            found.sort();
+            return found;
+        }
+        if part == ".." {
+            current = Path::new(&current)
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned())
+                .unwrap_or(current);
+        } else if !part.is_empty() && part != "." {
+            current = join_path(&current, part);
+        }
+    }
+    vec![current]
+}
+
+fn join_path(dir: &str, tail: &str) -> String {
+    let tail = tail.trim_start_matches("./");
+    if dir.is_empty() {
+        tail.to_string()
+    } else {
+        format!("{}/{tail}", dir.trim_end_matches('/'))
+    }
+}
+
+/// The package entry code-review-graph uses: `exports` first, then source/module/main.
+fn package_entry(manifest: &Value, subpath: Option<&str>) -> Option<String> {
+    if let Some(exports) = manifest.get("exports") {
+        let key = match subpath {
+            Some(subpath) => format!("./{subpath}"),
+            None => ".".to_string(),
+        };
+        let selected = exports
+            .as_object()
+            .and_then(|object| object.get(&key))
+            .unwrap_or(exports);
+        if let Some(entry) = export_target(selected) {
+            return Some(entry);
+        }
+    }
+    match subpath {
+        Some(subpath) => Some(subpath.to_string()),
+        None => ["source", "module", "main"]
+            .iter()
+            .find_map(|field| manifest.get(*field).and_then(Value::as_str))
+            .map(str::to_string),
+    }
+}
+
+fn export_target(value: &Value) -> Option<String> {
+    if let Some(target) = value.as_str() {
+        return Some(target.to_string());
+    }
+    let object = value.as_object()?;
+    ["source", "import", "require", "default", "node"]
+        .iter()
+        .find_map(|condition| object.get(*condition).and_then(export_target))
+}
+
 impl ModuleIndex {
     pub(crate) fn new<'a>(files: impl IntoIterator<Item = &'a str>) -> Self {
+        let files: HashMap<String, String> = files
+            .into_iter()
+            .map(|file| (normalize(file), file.to_string()))
+            .collect();
+        let manifests = npm_manifests(&files);
+        let mut js_packages = HashMap::new();
+        let mut npm_aliases = HashMap::new();
+        for (dir, manifest) in &manifests {
+            if let Some(name) = manifest.get("name").and_then(Value::as_str) {
+                let package = JsPackage {
+                    dir: dir.clone(),
+                    manifest: manifest.clone(),
+                };
+                let slot = js_packages.entry(name.to_string()).or_insert(package);
+                if dir.len() > slot.dir.len() {
+                    *slot = JsPackage {
+                        dir: dir.clone(),
+                        manifest: manifest.clone(),
+                    };
+                }
+            }
+            for section in [
+                "dependencies",
+                "devDependencies",
+                "peerDependencies",
+                "optionalDependencies",
+            ] {
+                let Some(deps) = manifest.get(section).and_then(Value::as_object) else {
+                    continue;
+                };
+                for (alias, spec) in deps {
+                    let Some(spec) = spec.as_str().and_then(|spec| spec.strip_prefix("npm:"))
+                    else {
+                        continue;
+                    };
+                    // `npm:real@^1` and `npm:@scope/real@^1` both name a local package.
+                    let name = if let Some(rest) = spec.strip_prefix('@') {
+                        let end = rest.find('@').unwrap_or(rest.len());
+                        format!("@{}", &rest[..end])
+                    } else {
+                        spec.split('@').next().unwrap_or(spec).to_string()
+                    };
+                    npm_aliases.entry(alias.clone()).or_insert(name);
+                }
+            }
+            for pattern in workspace_patterns(manifest) {
+                for member in workspace_directories(dir, &pattern) {
+                    let Ok(text) = std::fs::read_to_string(join_path(&member, "package.json"))
+                    else {
+                        continue;
+                    };
+                    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                        continue;
+                    };
+                    if let Some(name) = value.get("name").and_then(Value::as_str) {
+                        let slot = js_packages.entry(name.to_string());
+                        slot.or_insert(JsPackage {
+                            dir: member,
+                            manifest: value,
+                        });
+                    }
+                }
+            }
+        }
         Self {
-            files: files
-                .into_iter()
-                .map(|file| (normalize(file), file.to_string()))
-                .collect(),
+            files,
+            js_packages,
+            npm_aliases,
             rust_crates: RustCrates::default(),
             python_evidence: RefCell::new(HashMap::new()),
             shim_stack: RefCell::new(Vec::new()),
@@ -263,10 +453,47 @@ impl ModuleIndex {
         }
     }
 
-    /// Only relative specifiers name a file; bare package names stay text.
+    /// Bare specifiers name a file only when a local workspace/npm package declares the name.
+    fn script_package(&self, text: &str) -> Option<&str> {
+        // A scoped package's `@scope/name` slash is not a subpath separator.
+        let separator = if let Some(rest) = text.strip_prefix('@') {
+            rest.find('/').and_then(|scope_end| {
+                text[scope_end + 2..]
+                    .find('/')
+                    .map(|end| scope_end + 2 + end)
+            })
+        } else {
+            text.find('/')
+        };
+        let (name, subpath) = match separator {
+            Some(index) => (&text[..index], Some(&text[index + 1..])),
+            None => (text, None),
+        };
+        let name = self
+            .npm_aliases
+            .get(name)
+            .map(String::as_str)
+            .unwrap_or(name);
+        let package = self.js_packages.get(name)?;
+        let entry = package_entry(&package.manifest, subpath)?;
+        let base = join_path(&package.dir, &entry);
+        if let Some(file) = self.file(&base) {
+            return Some(file);
+        }
+        for extension in JS_EXTENSIONS {
+            if let Some(file) = self.file(&format!("{base}{extension}")) {
+                return Some(file);
+            }
+        }
+        JS_EXTENSIONS
+            .iter()
+            .find_map(|extension| self.file(&format!("{base}/index{extension}")))
+    }
+
+    /// Relative specifiers resolve as files; bare ones only through local packages.
     fn script(&self, importer: &str, text: &str) -> Option<&str> {
         if !(text.starts_with("./") || text.starts_with("../")) {
-            return None;
+            return self.script_package(text);
         }
         let base = PathParts::new(importer).parent().join(text);
         if let Some(file) = self.file(&base) {
@@ -579,6 +806,57 @@ mod tests {
         assert_eq!(
             index.resolve("loose/a.py", "typing"),
             Some("loose/typing.py")
+        );
+    }
+
+    #[test]
+    fn workspace_package_specifiers_resolve_to_the_package_entry() {
+        let (_dir, paths) = py_repo(&[
+            (
+                "package.json",
+                r#"{"name":"root","workspaces":["packages/*"]}"#,
+            ),
+            (
+                "packages/shared/package.json",
+                r#"{"name":"@ws/shared","main":"index.js"}"#,
+            ),
+            (
+                "packages/shared/index.js",
+                "export function shared() { return 1; }\n",
+            ),
+            ("src/consumer.js", "const shared = require('@ws/shared');\n"),
+        ]);
+        let index = ModuleIndex::new(paths.iter().map(String::as_str));
+        assert_eq!(
+            index.resolve(&paths[3], "@ws/shared"),
+            Some(paths[2].as_str())
+        );
+        assert_eq!(index.resolve(&paths[3], "unknown-package"), None);
+    }
+
+    #[test]
+    fn npm_aliases_and_export_subpaths_resolve_to_local_packages() {
+        let (_dir, paths) = py_repo(&[
+            (
+                "package.json",
+                r#"{"name":"root","dependencies":{"alias":"npm:@ws/shared@^1"}}"#,
+            ),
+            (
+                "packages/shared/package.json",
+                r#"{"name":"@ws/shared","exports":{".":"./index.js","./extra":"./extra.js"}}"#,
+            ),
+            ("packages/shared/index.js", "export const a = 1;\n"),
+            ("packages/shared/extra.js", "export const b = 2;\n"),
+            (
+                "src/consumer.js",
+                "require('alias'); require('@ws/shared/extra');\n",
+            ),
+        ]);
+        let index = ModuleIndex::new(paths.iter().map(String::as_str));
+        assert_eq!(index.resolve(&paths[4], "alias"), Some(paths[2].as_str()));
+        assert_eq!(
+            index.resolve(&paths[4], "@ws/shared/extra"),
+            Some(paths[3].as_str())
         );
     }
 
