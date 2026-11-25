@@ -212,6 +212,11 @@ impl<'a> TypeScriptCollector<'a> {
         } else if kind == "call_expression" {
             if let Some((specifier, import_type)) = self.module_import(&node) {
                 self.module_import_edge(&node, specifier, import_type);
+                // CRG emits `IMPORTS_FROM` in addition to the normal call to `require`;
+                // `import()` is a keyword, so it has no `CALLS` edge of its own.
+                if import_type == "require" {
+                    self.call_edge("require".to_string(), &node);
+                }
                 self.walk_children(node);
                 return;
             }
@@ -822,11 +827,8 @@ mod tests {
             .collect();
         imports.sort();
         assert_eq!(imports, ["./other", "./util"]);
-        assert!(
-            !r.edges
-                .iter()
-                .any(|e| e.edge_type == EdgeType::Calls && e.to == "require")
-        );
+        // code-review-graph records the module load and the ordinary call to `require`.
+        assert_eq!(calls_from(&r, "m.js"), vec!["require"]);
     }
 
     #[test]
