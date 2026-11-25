@@ -26,8 +26,10 @@ pub(crate) fn is_heritage(kind: &str) -> bool {
     kind == "INHERITS" || kind == "IMPLEMENTS"
 }
 
-/// The bare name a heritage text names: its last segment split on `.` and `::`.
+/// The bare name a heritage text names: its last segment split on `.` and `::`, after
+/// dropping type arguments (Java writes `Shape<Integer>` as the heritage text).
 pub(crate) fn last_segment(text: &str) -> &str {
+    let text = text.split('<').next().unwrap_or(text);
     let tail = text.rsplit("::").next().unwrap_or(text);
     tail.rsplit('.').next().unwrap_or(tail)
 }
@@ -139,6 +141,15 @@ mod tests {
         assert_eq!(last_segment("crate::model::Base"), "Base");
         assert_eq!(last_segment("ns::pkg.Base"), "Base");
         assert_eq!(last_segment(""), "");
+    }
+
+    #[test]
+    fn last_segment_drops_generic_arguments() {
+        // Java keeps type arguments in the heritage text (`implements Shape<Integer>`).
+        assert_eq!(last_segment("Shape<Integer>"), "Shape");
+        assert_eq!(last_segment("java.util.Map<K, V>"), "Map");
+        assert_eq!(last_segment("a.Base<x.Y<z.W>>"), "Base");
+        assert_eq!(last_segment("<T>"), "");
     }
 
     #[test]
