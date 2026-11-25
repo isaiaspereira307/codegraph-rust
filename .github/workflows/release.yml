@@ -209,8 +209,12 @@ jobs:
         id: token
         env:
           TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
         run: |
-          if [ -n "$TOKEN" ]; then
+          if [[ "$TAG" == *-* ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG is a prerelease tag; skipping Homebrew formula update"
+          elif [ -n "$TOKEN" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
@@ -221,9 +225,10 @@ jobs:
         if: steps.token.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release download "$TAG" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
+          gh release download "$TAG" --repo "$GH_REPO" --pattern SHA256SUMS --dir "$RUNNER_TEMP"
           bash scripts/release/render-formula.sh "${TAG#v}" "$RUNNER_TEMP/SHA256SUMS" > "$RUNNER_TEMP/codegraph.rb"
           cat "$RUNNER_TEMP/codegraph.rb"
 

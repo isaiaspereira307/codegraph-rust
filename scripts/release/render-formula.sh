@@ -22,7 +22,7 @@ targets="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin 
 sed_args=(-e "s/@VERSION@/$version/g")
 for t in $targets; do
   asset="codegraph-$version-$t.tar.gz"
-  hash="$(awk -v a="$asset" '$2 == a { print $1; exit }' "$sums")"
+  hash="$(awk -v a="$asset" '{ f=$2; sub(/^\*/, "", f) } f == a { print $1; exit }' "$sums")"
   if ! printf '%s' "$hash" | grep -Eq '^[0-9a-f]{64}$'; then
     echo "missing or invalid sha256 for $asset in $sums" >&2
     exit 1

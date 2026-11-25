@@ -29,6 +29,41 @@ while read -r hash name; do
   if echo "$out" | grep -qF "sha256 \"$hash\""; then ok "hash for $t"; else bad "hash for $t"; fi
 done < "$tmp/SHA256SUMS"
 
+# pairs: "<os> <arch> <asset> <sha256>" per platform block, taken from on_* nesting.
+pairs() {
+  awk '/on_macos/{os="macos"} /on_linux/{os="linux"} /on_arm/{a="arm"} /on_intel/{a="intel"}
+       /^ *url /{u=$2; gsub(/"/,"",u); sub(/.*\//,"",u)}
+       /^ *sha256 /{h=$2; gsub(/"/,"",h); print os, a, u, h}' | sort
+}
+hash_of() { awk -v a="codegraph-1.2.3-$1.tar.gz" '$2 == a {print $1}' "$2"; }
+expected_for() {  # $1 = sums file
+  {
+    echo "macos arm codegraph-1.2.3-aarch64-apple-darwin.tar.gz $(hash_of aarch64-apple-darwin "$1")"
+    echo "macos intel codegraph-1.2.3-x86_64-apple-darwin.tar.gz $(hash_of x86_64-apple-darwin "$1")"
+    echo "linux arm codegraph-1.2.3-aarch64-unknown-linux-gnu.tar.gz $(hash_of aarch64-unknown-linux-gnu "$1")"
+    echo "linux intel codegraph-1.2.3-x86_64-unknown-linux-gnu.tar.gz $(hash_of x86_64-unknown-linux-gnu "$1")"
+  } | sort
+}
+if [ "$(echo "$out" | pairs)" = "$(expected_for "$tmp/SHA256SUMS")" ]; then
+  ok "url/sha256 pairing under correct on_os/on_arch block"
+else
+  bad "url/sha256 pairing wrong:"; echo "$out" | pairs; echo "--- expected"; expected_for "$tmp/SHA256SUMS"
+fi
+
+# negative proof: swapping two hashes in SHA256SUMS must change the pairing, exactly as expected
+awk '/aarch64-apple-darwin/{sub(/^[0-9a-f]+/,"'"$(hash_of x86_64-apple-darwin "$tmp/SHA256SUMS")"'")} /x86_64-apple-darwin/{sub(/^[0-9a-f]+/,"'"$(hash_of aarch64-apple-darwin "$tmp/SHA256SUMS")"'")} {print}' "$tmp/SHA256SUMS" > "$tmp/swapped"
+sout="$(bash "$render" 1.2.3 "$tmp/swapped")"
+if [ "$(echo "$sout" | pairs)" = "$(expected_for "$tmp/swapped")" ] && [ "$(echo "$sout" | pairs)" != "$(echo "$out" | pairs)" ]; then
+  ok "swapped hashes are detected by pairing check"
+else
+  bad "swapped hashes not reflected in pairing"
+fi
+
+# binary-mode sums form: "hash *file"
+sed 's/  codegraph/ *codegraph/' "$tmp/SHA256SUMS" > "$tmp/star"
+bout="$(bash "$render" 1.2.3 "$tmp/star" 2>&1)" && [ "$(echo "$bout" | pairs)" = "$(expected_for "$tmp/SHA256SUMS")" ] \
+  && ok "binary-mode '*file' sums accepted" || bad "binary-mode sums rejected"
+
 echo "$out" | grep -q '@[A-Za-z0-9_]*@' && bad "placeholder left over" || ok "no placeholders left"
 echo "$out" | grep -qF 'version "1.2.3"' && ok "version line" || bad "version line"
 echo "$out" | grep -qF 'bin.install "codegraph"' && ok "bin.install" || bad "bin.install"
