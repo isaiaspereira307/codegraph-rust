@@ -123,3 +123,7 @@ debug com 3 repetições na Task 11; estes valores são apenas o registro da lin
   completos). Neste repo, 3 builds debug seguidos: 0 de 355 ids iguais antes, 356 de 356 depois;
   `flows_store_s` mediana 0,0131 s → 0,0037 s, `flows_s` (traço) inalterado. Snapshot completo:
   151 pisos OK. Detalhes em [`p1-task12-flows.md`](p1-task12-flows.md).
+- Task 13: arestas de import gravam `extra.import_context` (Python, JS/TS, Ruby) e
+  `import_cycles` ignora arquivos de nós `extra.virtual`. Neste repo, Rust e CRG têm os mesmos
+  320 pares `File → File`, 318 após o filtro e 15 em 4 ciclos. Detalhes em
+  [`p1-task13.md`](p1-task13.md).

@@ -848,20 +848,62 @@ impl SymbolCatalog {
                 && e.metadata
                     .contains_key(codegraph_parser::languages::crg_shape::PY_SUBMODULE_ATTR)
         };
-        // Statements with candidates -> whether any candidate names a file.
-        let mut any_file: HashMap<Statement, bool> = HashMap::new();
+        // Statements with candidates -> (whether any, whether every candidate names a file).
+        let mut names_files: HashMap<Statement, (bool, bool)> = HashMap::new();
         for edge in edges.iter().filter(|e| candidate(e)) {
-            *any_file.entry(statement(edge)).or_default() |= self.import_target(edge).is_some();
+            let is_file = self.import_target(edge).is_some();
+            let entry = names_files.entry(statement(edge)).or_insert((false, true));
+            entry.0 |= is_file;
+            entry.1 &= is_file;
         }
-        if any_file.is_empty() {
+        if names_files.is_empty() {
             return;
         }
         edges.retain(|edge| {
             let checked = candidate(edge)
                 || (edge.edge_type == EdgeType::Imports
-                    && any_file.get(&statement(edge)) == Some(&true));
+                    && names_files.get(&statement(edge)).is_some_and(|n| n.0));
             !checked || self.import_target(edge).is_some()
         });
+        for edge in edges.iter_mut() {
+            if edge.edge_type == EdgeType::Imports
+                && !candidate(edge)
+                && names_files.get(&statement(edge)).is_some_and(|n| n.1)
+                && self.names_parent_package(edge)
+            {
+                use codegraph_parser::languages::crg_shape::{
+                    IMPORT_CONTEXT_ATTR, IMPORT_PARENT_PACKAGE, IMPORT_TYPE_ONLY,
+                };
+                if edge.metadata.get(IMPORT_CONTEXT_ATTR).map(String::as_str)
+                    != Some(IMPORT_TYPE_ONLY)
+                {
+                    edge.metadata
+                        .insert(IMPORT_CONTEXT_ATTR.into(), IMPORT_PARENT_PACKAGE.into());
+                }
+            }
+        }
+    }
+
+    /// CRG `_python_names_parent_package` (once every imported name is known to be a
+    /// submodule): the package `M` of `from M import ...` is a regular package
+    /// (`__init__.py`) whose directory holds the importer, which Python loads first anyway.
+    fn names_parent_package(&self, edge: &EdgeRelationship) -> bool {
+        let Some(importer) = self.symbols.get(&edge.from).map(|s| s.file.as_str()) else {
+            return false;
+        };
+        let Some(package) = self.modules.resolve(importer, &edge.to) else {
+            return false;
+        };
+        let clean = |p: &str| p.replace('\\', "/").trim_start_matches("./").to_string();
+        let (package, importer) = (clean(package), clean(importer));
+        let dir = if package == "__init__.py" {
+            ""
+        } else if let Some(dir) = package.strip_suffix("/__init__.py") {
+            dir
+        } else {
+            return false;
+        };
+        dir.is_empty() || importer.starts_with(&format!("{dir}/"))
     }
 
     /// Binds a Python call or reference carrying `PY_IMPORT_ATTR` (`"M|X"`): when `M.X` (or
@@ -1510,6 +1552,84 @@ mod tests {
         assert_eq!(
             kept,
             ["pkg", "pkg.b", "ns.c", "json", "other", "pkg.missing"]
+        );
+    }
+
+    /// CRG `_python_names_parent_package`: `from . import sibling` makes the package edge
+    /// `parent_package` when every imported name is a submodule and the package directory
+    /// holds the importer; a symbol among the names, or a package elsewhere, keeps it real.
+    #[test]
+    fn python_package_edge_of_sibling_imports_is_parent_package() {
+        let a = file("pkg/sub/a.py");
+        let outside = file("main.py");
+        let catalog = SymbolCatalog::new(&[
+            a.clone(),
+            outside.clone(),
+            file("pkg/__init__.py"),
+            file("pkg/b.py"),
+            file("pkg/sub/__init__.py"),
+            file("pkg/sub/c.py"),
+        ]);
+        let import = |from: NodeId, to: &str, statement: u32, submodule: bool| {
+            let mut import = edge(from, to);
+            import.edge_type = EdgeType::Imports;
+            import.span = Some(codegraph_core::Span {
+                start_byte: statement,
+                end_byte: statement + 1,
+            });
+            if submodule {
+                import.metadata.insert(
+                    codegraph_parser::languages::crg_shape::PY_SUBMODULE_ATTR.into(),
+                    "true".into(),
+                );
+            }
+            import
+        };
+        let mut type_only = import(a.id, "pkg", 4, false);
+        type_only.metadata.insert(
+            codegraph_parser::languages::crg_shape::IMPORT_CONTEXT_ATTR.into(),
+            "type_only".into(),
+        );
+        let mut edges = vec![
+            // `from . import c` in pkg/sub/a.py.
+            import(a.id, ".", 1, false),
+            import(a.id, ".c", 1, true),
+            // `from pkg import b, helper`: `helper` is a symbol, so `pkg` is needed.
+            import(a.id, "pkg", 2, false),
+            import(a.id, "pkg.b", 2, true),
+            import(a.id, "pkg.helper", 2, true),
+            // `from pkg import b` in main.py: pkg/ does not hold main.py.
+            import(outside.id, "pkg", 3, false),
+            import(outside.id, "pkg.b", 3, true),
+            // Type-only stays type-only.
+            type_only,
+            import(a.id, "pkg.b", 4, true),
+        ];
+        catalog.retain_python_imports(&mut edges);
+        let contexts: Vec<(&str, u32, Option<&str>)> = edges
+            .iter()
+            .map(|e| {
+                (
+                    e.to.as_str(),
+                    e.span.as_ref().unwrap().start_byte,
+                    e.metadata
+                        .get(codegraph_parser::languages::crg_shape::IMPORT_CONTEXT_ATTR)
+                        .map(String::as_str),
+                )
+            })
+            .collect();
+        assert_eq!(
+            contexts,
+            [
+                (".", 1, Some("parent_package")),
+                (".c", 1, None),
+                ("pkg", 2, None),
+                ("pkg.b", 2, None),
+                ("pkg", 3, None),
+                ("pkg.b", 3, None),
+                ("pkg", 4, Some("type_only")),
+                ("pkg.b", 4, None),
+            ]
         );
     }
 

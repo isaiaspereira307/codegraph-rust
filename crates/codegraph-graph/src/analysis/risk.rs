@@ -194,6 +194,7 @@ mod tests {
             is_test: kind == "Test",
             decorators: vec![],
             community_id,
+            is_virtual: false,
         }
     }
 

@@ -137,6 +137,7 @@ fn sampled_betweenness_is_deterministic() {
             is_test: false,
             decorators: vec![],
             community_id: None,
+            is_virtual: false,
         })
         .collect();
     let mut edges = Vec::new();
@@ -187,6 +188,7 @@ fn node(n: N) -> AnalysisNode {
         is_test,
         decorators: vec![],
         community_id,
+        is_virtual: false,
     }
 }
 
@@ -405,6 +407,41 @@ fn import_cycle_shortest_loop() {
     assert!(!second.load_time);
     assert_eq!(second.size, 2);
     assert_eq!(second.cycle[0].line, 2);
+}
+
+/// CRG `get_all_files` leaves out the files of `extra.virtual` nodes (Spring event markers),
+/// so an import loop through one is no cycle; `extra.import_context` is read from the store.
+#[test]
+fn import_cycles_skip_virtual_files_and_read_stored_context() {
+    let nodes: Vec<NodeRow> = vec![
+        ("File", "/r/a.py", "/r/a.py", "/r/a.py", false),
+        ("File", "/r/b.py", "/r/b.py", "/r/b.py", false),
+        ("File", "/r/t.py", "/r/t.py", "/r/t.py", false),
+        ("Event", "<events>::E", "E", "<events>", false),
+    ];
+    let edges = [
+        ("IMPORTS_FROM", "/r/a.py", "<events>"),
+        ("IMPORTS_FROM", "<events>", "/r/a.py"),
+        ("IMPORTS_FROM", "/r/b.py", "/r/t.py"),
+        ("IMPORTS_FROM", "/r/t.py", "/r/b.py"),
+    ];
+    let (dir, _store) = fixture_db(&nodes, &edges);
+    let conn = open_conn(dir.path());
+    conn.execute(
+        "UPDATE nodes SET extra = '{\"virtual\": true}' WHERE kind = 'Event'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE edges SET extra = '{\"import_context\": \"type_only\"}' \
+         WHERE source_qualified = '/r/t.py'",
+        [],
+    )
+    .unwrap();
+    let g = AnalysisGraph::load(&conn).unwrap();
+    assert!(g.nodes.iter().any(|n| n.is_virtual));
+    let gaps = knowledge_gaps(&g, &[], Some("/r"));
+    assert!(gaps.import_cycles.is_empty(), "{:?}", gaps.import_cycles);
 }
 
 #[test]

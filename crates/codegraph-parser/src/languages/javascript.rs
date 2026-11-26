@@ -317,14 +317,21 @@ impl<'a> TypeScriptCollector<'a> {
             .trim_matches('\'')
             .to_string();
         let code = self.code_node(name.clone(), NodeType::Import, node);
+        let mut metadata = HashMap::from([
+            ("import_type".to_string(), "es_import".to_string()),
+            ("source_file".to_string(), self.file_path.to_string()),
+        ]);
+        if import_is_type_only(node) {
+            metadata.insert(
+                crg_shape::IMPORT_CONTEXT_ATTR.to_string(),
+                crg_shape::IMPORT_TYPE_ONLY.to_string(),
+            );
+        }
         self.edges.push(EdgeRelationship {
             from: code.id,
             to: name,
             edge_type: EdgeType::Imports,
-            metadata: HashMap::from([
-                ("import_type".to_string(), "es_import".to_string()),
-                ("source_file".to_string(), self.file_path.to_string()),
-            ]),
+            metadata,
             span: Some(self.span_for(node)),
         });
         self.nodes.push(code);
@@ -430,15 +437,22 @@ impl<'a> TypeScriptCollector<'a> {
     }
 
     fn module_import_edge(&mut self, node: &Node, specifier: String, import_type: &str) {
+        let mut metadata = HashMap::from([
+            ("import_type".to_string(), import_type.to_string()),
+            ("source_file".to_string(), self.file_path.to_string()),
+            (crg_shape::FILE_SCOPE_ATTR.to_string(), "true".to_string()),
+        ]);
+        if module_call_is_deferred(node) {
+            metadata.insert(
+                crg_shape::IMPORT_CONTEXT_ATTR.to_string(),
+                crg_shape::IMPORT_DEFERRED.to_string(),
+            );
+        }
         self.edges.push(EdgeRelationship {
             from: NodeId::nil(),
             to: specifier,
             edge_type: EdgeType::Imports,
-            metadata: HashMap::from([
-                ("import_type".to_string(), import_type.to_string()),
-                ("source_file".to_string(), self.file_path.to_string()),
-                (crg_shape::FILE_SCOPE_ATTR.to_string(), "true".to_string()),
-            ]),
+            metadata,
             span: Some(self.span_for(node)),
         });
     }
@@ -611,6 +625,66 @@ impl<'a> TypeScriptCollector<'a> {
             .unwrap_or("")
             .to_string()
     }
+}
+
+/// CRG `_js_import_is_type_only`: `import type X` or `import { type A, type B }`; one value
+/// specifier makes the import real. code-review-graph also keeps the second form real under a
+/// tsconfig `verbatimModuleSyntax`/`importsNotUsedAsValues`; the parser reads no tsconfig.
+fn import_is_type_only(node: &Node) -> bool {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.children(&mut cursor).collect();
+    if children.iter().any(|c| c.kind() == "type") {
+        return true;
+    }
+    let Some(clause) = children.iter().find(|c| c.kind() == "import_clause") else {
+        return false;
+    };
+    let mut cursor = clause.walk();
+    let named: Vec<Node> = clause.named_children(&mut cursor).collect();
+    let [named] = named.as_slice() else {
+        return false;
+    };
+    if named.kind() != "named_imports" {
+        return false;
+    }
+    let mut cursor = named.walk();
+    let specifiers: Vec<Node> = named
+        .named_children(&mut cursor)
+        .filter(|s| s.kind() == "import_specifier")
+        .collect();
+    !specifiers.is_empty()
+        && specifiers.iter().all(|spec| {
+            let mut cursor = spec.walk();
+            spec.children(&mut cursor).any(|part| part.kind() == "type")
+        })
+}
+
+/// CRG `_js_module_call_is_deferred`: `import()` always runs late, `require` only inside a
+/// function.
+fn module_call_is_deferred(call: &Node) -> bool {
+    if call
+        .child_by_field_name("function")
+        .is_some_and(|f| f.kind() == "import")
+    {
+        return true;
+    }
+    let mut current = call.parent();
+    while let Some(node) = current {
+        if matches!(
+            node.kind(),
+            "function_declaration"
+                | "function_expression"
+                | "function"
+                | "arrow_function"
+                | "method_definition"
+                | "generator_function"
+                | "generator_function_declaration"
+        ) {
+            return true;
+        }
+        current = node.parent();
+    }
+    false
 }
 
 #[cfg(test)]
@@ -829,6 +903,41 @@ mod tests {
         assert_eq!(imports, ["./other", "./util"]);
         // code-review-graph records the module load and the ordinary call to `require`.
         assert_eq!(calls_from(&r, "m.js"), vec!["require"]);
+    }
+
+    /// CRG `_js_import_is_type_only` and `_js_module_call_is_deferred`.
+    #[test]
+    fn imports_carry_crg_import_context() {
+        let r = extract_ts(
+            "import type { A } from './a';\nimport { type B, type C } from './b';\n\
+             import { type D, e } from './c';\nimport f from './d';\n\
+             const g = import('./e');\nconst h = require('./f');\n\
+             function k() { return require('./g'); }\nconst l = () => require('./h');\n",
+            "m.ts",
+        );
+        let contexts: BTreeSet<(String, Option<String>)> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Imports)
+            .map(|e| {
+                let context = e.metadata.get(crg_shape::IMPORT_CONTEXT_ATTR).cloned();
+                (e.to.clone(), context)
+            })
+            .collect();
+        let expected: BTreeSet<(String, Option<String>)> = [
+            ("./a", Some("type_only")),
+            ("./b", Some("type_only")),
+            ("./c", None),
+            ("./d", None),
+            ("./e", Some("deferred")),
+            ("./f", None),
+            ("./g", Some("deferred")),
+            ("./h", Some("deferred")),
+        ]
+        .into_iter()
+        .map(|(t, c)| (t.to_string(), c.map(str::to_string)))
+        .collect();
+        assert_eq!(contexts, expected);
     }
 
     #[test]

@@ -50,6 +50,16 @@ pub const PY_IMPORT_ATTR: &str = "crg_py_import";
 /// code-review-graph's `_python_from_import_targets`.
 pub const PY_SUBMODULE_ATTR: &str = "crg_py_submodule";
 
+/// code-review-graph `IMPORT_CONTEXT_KEY`: on an `Imports` edge whose import does not run as
+/// the importing file loads, stored as `edges.extra.import_context`. No key means it does.
+pub const IMPORT_CONTEXT_ATTR: &str = "import_context";
+/// Never runs: `if TYPE_CHECKING:` in Python, `import type` in TypeScript.
+pub const IMPORT_TYPE_ONLY: &str = "type_only";
+/// Runs late: inside a function, a JavaScript dynamic `import()`, a Ruby `autoload`.
+pub const IMPORT_DEFERRED: &str = "deferred";
+/// Python `from . import sibling`: the package edge is only the route to the sibling.
+pub const IMPORT_PARENT_PACKAGE: &str = "parent_package";
+
 /// The node kind (`{:?}` of its `NodeType`) a node had before this pass turned it into a test.
 pub const PRE_SHAPE_KIND_ATTR: &str = "pre_shape_kind";
 

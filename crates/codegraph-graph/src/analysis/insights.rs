@@ -401,13 +401,15 @@ fn adjacency<'a>(
 
 /// Groups of files that import each other (`find_import_cycles` in the CRG), worst first:
 /// load-time loops, then bigger groups, then by name. Type-only and parent-package imports never
-/// count; deferred imports count for the group but not for `load_time`.
+/// count; deferred imports count for the group but not for `load_time`. Files that hold only
+/// `extra.virtual` nodes are no files.
 pub fn import_cycles(g: &AnalysisGraph, repo_root: Option<&str>) -> Vec<ImportCycle> {
-    let mut files: HashSet<&str> = g.nodes.iter().map(|n| n.file_path.as_str()).collect();
+    // CRG `get_all_files`: node files except those of `extra.virtual` nodes, plus edge files.
+    let real = || g.nodes.iter().filter(|n| !n.is_virtual);
+    let mut files: HashSet<&str> = real().map(|n| n.file_path.as_str()).collect();
     files.extend(g.edges.iter().map(|e| e.file_path.as_str()));
     files.extend(
-        g.nodes
-            .iter()
+        real()
             .filter(|n| n.kind == "File")
             .map(|n| n.qualified.as_str()),
     );

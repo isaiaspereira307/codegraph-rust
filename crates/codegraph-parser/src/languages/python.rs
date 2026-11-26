@@ -206,6 +206,8 @@ struct Frame {
     /// `TYPE_CHECKING` names and `typing` modules still unshadowed in this scope.
     type_checking: HashSet<String>,
     typing_modules: HashSet<String>,
+    /// A bare `TYPE_CHECKING` is not rebound here or in an enclosing scope.
+    bare_type_checking: bool,
     /// Local names bound to a class by an annotation (`service: AuthService`) or a
     /// constructor assignment (`svc = AuthService()`).
     types: HashMap<String, String>,
@@ -230,6 +232,8 @@ struct PythonCollector<'a> {
     class_chains: Vec<String>,
     /// Depth of statically dead branches around the walk position.
     dead: usize,
+    /// The same for imports, whose dead branches also include a bare `TYPE_CHECKING`.
+    import_dead: usize,
     /// Whether value `References` edges are emitted (`ExtractionPolicy.references`).
     references: bool,
 }
@@ -246,6 +250,7 @@ impl<'a> PythonCollector<'a> {
             classes: Vec::new(),
             class_chains: Vec::new(),
             dead: 0,
+            import_dead: 0,
             references: true,
         }
     }
@@ -276,38 +281,47 @@ impl<'a> PythonCollector<'a> {
         }
     }
 
-    fn walk_dead(&mut self, node: Node, dead: bool) {
-        self.dead += usize::from(dead);
+    /// `dead`: for calls (`_python_unreachable_call_positions`); `import_dead`: for imports
+    /// (`_python_unreachable_import_positions`), which also read a bare `TYPE_CHECKING`.
+    fn walk_dead(&mut self, node: Node, dead: (bool, bool)) {
+        self.dead += usize::from(dead.0);
+        self.import_dead += usize::from(dead.1);
         self.walk(node);
-        self.dead -= usize::from(dead);
+        self.dead -= usize::from(dead.0);
+        self.import_dead -= usize::from(dead.1);
     }
 
     /// CRG `_PythonUnreachableCallVisitor.visit_If`: the body of a statically false
     /// condition is dead, and so is everything after a statically true one (`elif`/`else`).
+    /// Tracked twice, once with the call visitor's names and once with the import visitor's.
     fn if_statement(&mut self, node: Node) {
-        let truth = node
-            .child_by_field_name("condition")
-            .and_then(|c| self.static_truth(&c));
+        let truth = self.truths(node.child_by_field_name("condition"));
         let consequence = node.child_by_field_name("consequence").map(|c| c.id());
-        let mut rest_dead = truth == Some(true);
+        let mut rest_dead = (truth.0 == Some(true), truth.1 == Some(true));
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             if Some(child.id()) == consequence {
-                self.walk_dead(child, truth == Some(false));
+                self.walk_dead(child, (truth.0 == Some(false), truth.1 == Some(false)));
                 continue;
             }
             match child.kind() {
-                "elif_clause" if !rest_dead => {
-                    let truth = child
-                        .child_by_field_name("condition")
-                        .and_then(|c| self.static_truth(&c));
+                "elif_clause" if !(rest_dead.0 && rest_dead.1) => {
+                    // A branch already dead stays dead whatever its own condition says.
+                    let truth = self.truths(child.child_by_field_name("condition"));
                     let consequence = child.child_by_field_name("consequence").map(|c| c.id());
                     let mut inner = child.walk();
                     for part in child.children(&mut inner) {
-                        let dead = Some(part.id()) == consequence && truth == Some(false);
+                        let own = Some(part.id()) == consequence;
+                        let dead = (
+                            rest_dead.0 || (own && truth.0 == Some(false)),
+                            rest_dead.1 || (own && truth.1 == Some(false)),
+                        );
                         self.walk_dead(part, dead);
                     }
-                    rest_dead = truth == Some(true);
+                    rest_dead = (
+                        rest_dead.0 || truth.0 == Some(true),
+                        rest_dead.1 || truth.1 == Some(true),
+                    );
                 }
                 "elif_clause" | "else_clause" => self.walk_dead(child, rest_dead),
                 _ => self.walk(child),
@@ -315,17 +329,28 @@ impl<'a> PythonCollector<'a> {
         }
     }
 
+    /// `static_truth` of a condition for calls and for imports.
+    fn truths(&self, condition: Option<Node>) -> (Option<bool>, Option<bool>) {
+        condition.map_or((None, None), |c| {
+            (self.static_truth(&c, false), self.static_truth(&c, true))
+        })
+    }
+
     /// CRG `_python_static_truth`: `True`/`False`, integers, `not`, `and`/`or`, parentheses
-    /// and unshadowed `TYPE_CHECKING` (always false); anything else is unknown.
-    fn static_truth(&self, node: &Node) -> Option<bool> {
+    /// and unshadowed `TYPE_CHECKING` (always false); anything else is unknown. `imports`: the
+    /// import visitor also counts a bare `TYPE_CHECKING` the scope does not rebind, whatever
+    /// it is bound to.
+    fn static_truth(&self, node: &Node, imports: bool) -> Option<bool> {
         match node.kind() {
             "true" => Some(true),
             "false" => Some(false),
             "integer" => integer_truth(&self.text(node)),
-            "identifier" => self
-                .type_checking()
-                .contains(&self.text(node))
-                .then_some(false),
+            "identifier" => {
+                let name = self.text(node);
+                (self.type_checking().contains(&name)
+                    || (imports && name == "TYPE_CHECKING" && self.bare_type_checking()))
+                .then_some(false)
+            }
             "attribute" => {
                 let object = node.child_by_field_name("object")?;
                 let attribute = node.child_by_field_name("attribute")?;
@@ -336,15 +361,15 @@ impl<'a> PythonCollector<'a> {
             }
             "not_operator" => node
                 .child_by_field_name("argument")
-                .and_then(|a| self.static_truth(&a))
+                .and_then(|a| self.static_truth(&a, imports))
                 .map(|v| !v),
             "boolean_operator" => {
                 let left = node
                     .child_by_field_name("left")
-                    .and_then(|n| self.static_truth(&n));
+                    .and_then(|n| self.static_truth(&n, imports));
                 let right = node
                     .child_by_field_name("right")
-                    .and_then(|n| self.static_truth(&n));
+                    .and_then(|n| self.static_truth(&n, imports));
                 let operator = node.child_by_field_name("operator")?;
                 match operator.kind() {
                     "and" if left == Some(false) || right == Some(false) => Some(false),
@@ -356,9 +381,14 @@ impl<'a> PythonCollector<'a> {
             }
             "parenthesized_expression" => named_children(node)
                 .find(|c| c.kind() != "comment")
-                .and_then(|inner| self.static_truth(&inner)),
+                .and_then(|inner| self.static_truth(&inner, imports)),
             _ => None,
         }
+    }
+
+    /// Whether a bare `TYPE_CHECKING` is still unrebound in this scope (import visitor).
+    fn bare_type_checking(&self) -> bool {
+        self.frames.last().is_none_or(|f| f.bare_type_checking)
     }
 
     fn type_checking(&self) -> &HashSet<String> {
@@ -382,6 +412,11 @@ impl<'a> PythonCollector<'a> {
                 .collect()
         };
         (keep(self.type_checking()), keep(self.typing_modules()))
+    }
+
+    /// `bare_type_checking` of a new scope that binds `bound`.
+    fn scoped_bare_type_checking(&self, bound: &HashSet<String>) -> bool {
+        self.bare_type_checking() && !bound.contains("TYPE_CHECKING")
     }
 
     fn function(&mut self, node: Node) {
@@ -437,11 +472,13 @@ impl<'a> PythonCollector<'a> {
             typed_parameter_types(&parameters, self.content, &mut types);
         }
         let (type_checking, typing_modules) = self.scoped_type_checking(&bound);
+        let bare_type_checking = self.scoped_bare_type_checking(&bound);
         self.frames.push(Frame {
             caller: Some(id),
             local_defs,
             type_checking,
             typing_modules,
+            bare_type_checking,
             types,
             from_imports,
             module_aliases,
@@ -491,11 +528,13 @@ impl<'a> PythonCollector<'a> {
             }
         }
         let (type_checking, typing_modules) = self.scoped_type_checking(&bound);
+        let bare_type_checking = self.scoped_bare_type_checking(&bound);
         self.frames.push(Frame {
             caller: None,
             local_defs: HashMap::new(),
             type_checking,
             typing_modules,
+            bare_type_checking,
             types: HashMap::new(),
             from_imports: HashMap::new(),
             module_aliases: HashMap::new(),
@@ -584,11 +623,15 @@ impl<'a> PythonCollector<'a> {
         )
         .with_content(self.text(node));
         code.span = Some(self.span_for(node));
+        let context = self.import_context();
         for (target, submodule) in targets {
             let mut metadata = HashMap::from([
                 ("import_type".to_string(), "python_import".to_string()),
                 ("source_file".to_string(), self.file_path.to_string()),
             ]);
+            if let Some(context) = context {
+                metadata.insert(crg_shape::IMPORT_CONTEXT_ATTR.to_string(), context.into());
+            }
             if submodule {
                 metadata.insert(crg_shape::PY_SUBMODULE_ATTR.to_string(), "true".to_string());
             }
@@ -601,6 +644,19 @@ impl<'a> PythonCollector<'a> {
             });
         }
         self.nodes.push(code);
+    }
+
+    /// CRG `_python_import_context`: a dead import (`if TYPE_CHECKING:`) never runs, even in a
+    /// function; one in a function body runs late. `parent_package` is decided by the indexer,
+    /// which knows the files (`SymbolCatalog::retain_python_imports`).
+    fn import_context(&self) -> Option<&'static str> {
+        if self.import_dead > 0 {
+            Some(crg_shape::IMPORT_TYPE_ONLY)
+        } else if self.frames.iter().any(|f| f.caller.is_some()) {
+            Some(crg_shape::IMPORT_DEFERRED)
+        } else {
+            None
+        }
     }
 
     fn call(&mut self, node: &Node) {
@@ -2016,6 +2072,41 @@ mod tests {
             "pytest.mark.parametrize('x', [1]),dec"
         );
         assert!(edges(&r, EdgeType::References).is_empty());
+    }
+
+    /// CRG `_python_import_context`: a statically dead import (`if TYPE_CHECKING:`, even a
+    /// bare unimported `TYPE_CHECKING`) is `type_only`, which wins over a function body, whose
+    /// imports are `deferred`. Load-time imports carry no context.
+    #[test]
+    fn imports_carry_crg_import_context() {
+        let r = extract_py(
+            "import os\nif TYPE_CHECKING:\n    import tc\n\ndef f():\n    import lazy\n    \
+             if False:\n        from dead import x\n\nclass C:\n    import body\n",
+            "m.py",
+        );
+        let contexts: BTreeSet<(String, Option<String>)> = r
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Imports)
+            .map(|e| {
+                (
+                    e.to.clone(),
+                    e.metadata.get(crg_shape::IMPORT_CONTEXT_ATTR).cloned(),
+                )
+            })
+            .collect();
+        let expected: BTreeSet<(String, Option<String>)> = [
+            ("os", None),
+            ("tc", Some("type_only")),
+            ("lazy", Some("deferred")),
+            ("dead", Some("type_only")),
+            ("dead.x", Some("type_only")),
+            ("body", None),
+        ]
+        .into_iter()
+        .map(|(t, c)| (t.to_string(), c.map(str::to_string)))
+        .collect();
+        assert_eq!(contexts, expected);
     }
 
     #[test]

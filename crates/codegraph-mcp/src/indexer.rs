@@ -48,7 +48,8 @@ use std::collections::HashMap;
 /// crg-shape-14: Python receivers typed by a `from`-imported class and imports inside a
 /// function body bind through the import; methods resolve by name in absolute-path indexes.
 /// crg-shape-15: function-body Python imports bind file-wide; parameters shadow imports.
-pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-15";
+/// crg-shape-16: import edges carry CRG `extra.import_context` (Python, JS/TS, Ruby).
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-16";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {

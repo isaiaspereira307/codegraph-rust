@@ -52,6 +52,9 @@ pub struct AnalysisNode {
     pub is_test: bool,
     pub decorators: Vec<String>,
     pub community_id: Option<i64>,
+    /// `extra.virtual` is true (or 1): a resolver's marker (CRG Spring `Event` nodes), whose
+    /// file is no file of the repository (`get_all_files`).
+    pub is_virtual: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +103,7 @@ impl AnalysisGraph {
                 is_test: r.get::<_, Option<i64>>(8)?.unwrap_or(0) != 0,
                 decorators: decorators_from_extra(extra.as_deref()),
                 community_id: r.get(10)?,
+                is_virtual: virtual_from_extra(extra.as_deref()),
             })
         })?;
         for row in rows {
@@ -189,6 +193,18 @@ fn extra_is_unresolved(extra: &serde_json::Value) -> bool {
             || o.contains_key("unresolved_targets")
             || o.contains_key("claimed_endpoint")
     })
+}
+
+/// CRG `COALESCE(json_extract(extra, '$.virtual'), 0) = 1`: JSON `true` or the number 1.
+fn virtual_from_extra(extra: Option<&str>) -> bool {
+    extra
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| match v.get("virtual")? {
+            serde_json::Value::Bool(b) => Some(*b),
+            serde_json::Value::Number(n) => Some(n.as_f64() == Some(1.0)),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 fn decorators_from_extra(extra: Option<&str>) -> Vec<String> {

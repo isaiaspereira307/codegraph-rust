@@ -338,6 +338,12 @@ impl<'a> RubyCollector<'a> {
                             if is_relative {
                                 meta.insert("relative".to_string(), "true".to_string());
                             }
+                            if in_method(&node) {
+                                meta.insert(
+                                    super::crg_shape::IMPORT_CONTEXT_ATTR.to_string(),
+                                    super::crg_shape::IMPORT_DEFERRED.to_string(),
+                                );
+                            }
                             meta
                         },
                         span: Some(self.span_for(&node)),
@@ -423,6 +429,18 @@ impl<'a> RubyCollector<'a> {
     }
 }
 
+/// CRG `_import_context` for Ruby: a `require` inside a method only runs when it is called.
+fn in_method(node: &Node) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if matches!(parent.kind(), "method" | "singleton_method") {
+            return true;
+        }
+        current = parent.parent();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +478,36 @@ mod tests {
         assert!(names.iter().any(|q| q == "app.rb::Demo.App.run"));
         // CRG indexes a class name as the scope's Class node, never as a separate constant.
         assert!(!names.iter().any(|q| q.contains("@L")));
+    }
+
+    /// CRG `_import_context` for Ruby: a `require` inside a method runs late.
+    #[test]
+    fn ruby_require_in_a_method_is_deferred() {
+        let result = extract(
+            "require 'top'\nclass A\n  def run\n    require 'lazy'\n  end\n  \
+             def self.boot\n    require 'boot'\n  end\nend\n",
+        );
+        let contexts: Vec<(String, Option<String>)> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Imports)
+            .map(|e| {
+                let context = e
+                    .metadata
+                    .get(super::super::crg_shape::IMPORT_CONTEXT_ATTR)
+                    .cloned();
+                (e.to.clone(), context)
+            })
+            .collect();
+        let deferred = Some("deferred".to_string());
+        assert_eq!(
+            contexts,
+            [
+                ("top".to_string(), None),
+                ("lazy".to_string(), deferred.clone()),
+                ("boot".to_string(), deferred),
+            ]
+        );
     }
 
     #[test]
