@@ -53,8 +53,10 @@ python3 -m unittest discover -s scripts/parity -v
 
 ## P1 baseline and regression check
 
-`p1_snapshot.sh` runs the corpus, four probes (python, python-imports, rust-imports,
-inheritance) and the three change scenarios in one go. It pins the CRG checkout at
+`p1_snapshot.sh` runs the corpus, the probes (python, python-imports, rust-imports,
+inheritance, typescript-js, go-package, java-cross-file, java-framework and one
+`<language>-imports` probe each for Swift, C/C++, C#, Ruby, PHP, Kotlin and Dart) and the three
+change scenarios in one go. It pins the CRG checkout at
 `bbdda4b` (a throwaway clone in `<out-dir>/work/crg-repo`), builds the Rust CLI and writes only
 to `<out-dir>`; the frozen limits live in `docs/parity/p1-baseline.md`.
 

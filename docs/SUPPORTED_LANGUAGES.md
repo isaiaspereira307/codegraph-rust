@@ -32,6 +32,8 @@ These languages are registered in `crates/codegraph-parser/src/language.rs`:
 | C# | `cs` |
 | Ruby | `rb`, `rake`, `gemspec` |
 | PHP | `php`, `phtml`, `php3`, `php4`, `php5` |
+| Kotlin | `kt`, `kts` (grammar: `tree-sitter-kotlin-ng`) |
+| Dart | `dart` (grammar: `tree-sitter-dart`, nielsenko) |
 
 ## Analyzer support by language
 
@@ -71,10 +73,16 @@ Some analyzers are Rust-only today:
 - Rustdoc/API surface enrichment
 - Local dataflow enrichment
 
-## Kotlin and Dart status
+## Import resolution (code-review-graph parity)
 
-CodeGraph’s core language enum includes Kotlin and Dart, and file-extension detection exists in parts of the pipeline, but Tree-sitter parsing for these languages is currently disabled due to Tree-sitter version conflicts:
+Every AST-supported language resolves `IMPORTS_FROM` the way code-review-graph does, in
+`crates/codegraph-mcp/src/module_index.rs`: relative/package imports for TS/JS and Python,
+Cargo crates for Rust, packages for Go, Java/Kotlin package paths, C/C++ includes,
+C# namespaces, Swift modules, Ruby `require_relative`, PHP `use`/literal includes (nearest
+`composer.json` PSR-4 map, then the namespace path) and Dart `./` and `package:` URIs
+(through `pubspec.yaml`). Typed or constructed receivers bind to the class method for Java,
+Kotlin, C# and PHP. Per-language probes live in `scripts/parity/probes/<language>-imports`;
+the measurements are in `docs/parity/p1-task10-grammars.md`.
 
-- `tree-sitter-kotlin` and `tree-sitter-dart` are not enabled in `crates/codegraph-parser/Cargo.toml`
-
-Contributions to restore Kotlin/Dart parsing support are welcome (see `CONTRIBUTING.md`).
+Dart reproduces code-review-graph's own grammar behaviour: function nodes span the
+signature only and calls come from the file, so Dart has no function-level callers.
