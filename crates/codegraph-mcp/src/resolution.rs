@@ -57,6 +57,8 @@ pub(crate) struct SymbolCatalog {
     php_file_namespaces: HashMap<String, HashSet<String>>,
     /// Per PHP file, the case-folded class names its `use` clauses import.
     php_imports: HashMap<String, HashSet<String>>,
+    /// Per Kotlin file, each local import name and the qualified name it imports.
+    kotlin_imports: HashMap<String, HashMap<String, String>>,
     /// Indexed `.go` files directly inside each package directory.
     go_package_files: HashMap<String, Vec<String>>,
     /// Project root, to compare relative symbol paths with absolute package directories.
@@ -198,6 +200,7 @@ impl SymbolCatalog {
             php_methods: HashMap::new(),
             php_file_namespaces: HashMap::new(),
             php_imports: HashMap::new(),
+            kotlin_imports: HashMap::new(),
             go_package_files: HashMap::new(),
             go_root: None,
         };
@@ -459,6 +462,21 @@ impl SymbolCatalog {
                     .or_default()
                     .insert(class.to_lowercase());
             }
+            if (importer.file.ends_with(".kt") || importer.file.ends_with(".kts"))
+                && !edge.metadata.contains_key("wildcard")
+            {
+                let local = edge
+                    .metadata
+                    .get("alias")
+                    .cloned()
+                    .unwrap_or_else(|| edge.to.rsplit('.').next().unwrap_or("").to_string());
+                if !local.is_empty() {
+                    self.kotlin_imports
+                        .entry(importer.file.clone())
+                        .or_default()
+                        .insert(local, edge.to.clone());
+                }
+            }
             if importer.file.ends_with(".java")
                 && !edge.metadata.contains_key("static")
                 && !edge.metadata.contains_key("wildcard")
@@ -598,6 +616,41 @@ impl SymbolCatalog {
             })
             .collect();
         (candidates.len() == 1).then(|| candidates[0])
+    }
+
+    /// CRG `_resolve_typed_method_target` for Kotlin: a receiver whose declared type is
+    /// imported binds to that type's method in the imported file; a type declared in the
+    /// caller's file binds there. Anything else keeps its bare name.
+    pub(crate) fn kotlin_call_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        if edge.edge_type != EdgeType::Calls {
+            return None;
+        }
+        let type_name = edge.metadata.get("receiver_type")?;
+        let caller = self.symbols.get(&edge.from)?;
+        if !(caller.file.ends_with(".kt") || caller.file.ends_with(".kts")) {
+            return None;
+        }
+        let unique = |alias: String| {
+            let mut ids = self.aliases.get(&alias)?.iter().copied();
+            let id = ids.next()?;
+            ids.next().is_none().then_some(id)
+        };
+        if let Some(qualified) = self
+            .kotlin_imports
+            .get(&caller.file)
+            .and_then(|imports| imports.get(type_name))
+        {
+            let file = self.modules.resolve(&caller.file, qualified);
+            if let Some(file) = file
+                && let Some(id) = unique(format!("{file}::{type_name}.{}", edge.to))
+            {
+                return Some(id);
+            }
+            if file.is_some() {
+                return None;
+            }
+        }
+        unique(format!("{}::{type_name}.{}", caller.file, edge.to))
     }
 
     /// PHP class/method and namespace evidence of one node.
@@ -1095,6 +1148,41 @@ mod tests {
         own.metadata
             .insert(PHP_SAME_FILE_ATTR.into(), "true".into());
         assert_eq!(catalog.php_call_target(&own), Some(local.id));
+    }
+
+    #[test]
+    fn kotlin_typed_receiver_binds_through_the_resolved_import() {
+        let kt = |file: &str, qualified: &str| {
+            let mut node = node(file, qualified.rsplit(['.', ':']).next().unwrap());
+            node.metadata
+                .attributes
+                .insert("qualified_name".into(), format!("{file}::{qualified}"));
+            node
+        };
+        let file = |path: &str| {
+            let mut node = node(path, path);
+            node.node_type = Some(NodeType::Other("File".into()));
+            node.set_deterministic_id(path);
+            node
+        };
+        let caller = kt("src/demo/App.kt", "App.run");
+        let target = kt("src/demo/Helper.kt", "Helper.twice");
+        let mut catalog = SymbolCatalog::new(&[
+            file("src/demo/App.kt"),
+            file("src/demo/Helper.kt"),
+            caller.clone(),
+            target.clone(),
+        ]);
+        let mut import = edge(caller.id, "demo.Helper");
+        import.edge_type = EdgeType::Imports;
+        catalog.link_imports(&[import]);
+        let call = |ty: &str| {
+            let mut call = edge(caller.id, "twice");
+            call.metadata.insert("receiver_type".into(), ty.into());
+            call
+        };
+        assert_eq!(catalog.kotlin_call_target(&call("Helper")), Some(target.id));
+        assert_eq!(catalog.kotlin_call_target(&call("Other")), None);
     }
 
     #[test]

@@ -27,6 +27,7 @@ enum ImportLanguage {
     Java,
     Ruby,
     Php,
+    Kotlin,
 }
 
 fn language(importer: &str) -> Option<ImportLanguage> {
@@ -40,6 +41,7 @@ fn language(importer: &str) -> Option<ImportLanguage> {
         "java" => ImportLanguage::Java,
         "rb" => ImportLanguage::Ruby,
         "php" => ImportLanguage::Php,
+        "kt" | "kts" => ImportLanguage::Kotlin,
         _ => return None,
     })
 }
@@ -605,6 +607,25 @@ impl ModuleIndex {
             ImportLanguage::Java => self.java(importer, text),
             ImportLanguage::Ruby => self.ruby(text),
             ImportLanguage::Php => self.php(importer, text),
+            ImportLanguage::Kotlin => self.kotlin(importer, text),
+        }
+    }
+
+    /// CRG's Kotlin module resolution: `a.b.C` names `a/b/C.kt` (or `.kts`), searched from the
+    /// importer's directory upward; wildcard imports name no file.
+    fn kotlin(&self, importer: &str, text: &str) -> Option<&str> {
+        if text.ends_with(".*") {
+            return None;
+        }
+        let relative = text.replace('.', "/");
+        let mut dir = PathParts::new(importer).parent();
+        loop {
+            for suffix in [".kt", ".kts"] {
+                if let Some(file) = self.file(&dir.join(&format!("{relative}{suffix}"))) {
+                    return Some(file);
+                }
+            }
+            dir.segments.pop()?;
         }
     }
 

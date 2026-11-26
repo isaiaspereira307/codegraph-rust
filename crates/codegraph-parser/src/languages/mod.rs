@@ -11,6 +11,7 @@ pub mod cpp;
 pub mod csharp;
 pub mod go;
 pub mod java;
+pub mod kotlin;
 pub mod php;
 pub mod ruby;
 pub mod swift;
@@ -162,6 +163,11 @@ fn extract_unshaped(
         Language::Php => Some(<PhpExtractor as LanguageExtractor>::extract_with_edges(
             tree, content, file_path,
         )),
+        Language::Kotlin => Some(
+            <kotlin::KotlinExtractor as LanguageExtractor>::extract_with_edges(
+                tree, content, file_path,
+            ),
+        ),
         // Languages without dedicated extractors yet
         _ => None,
     }

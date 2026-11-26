@@ -89,14 +89,13 @@ impl LanguageRegistry {
             },
         );
 
-        // Temporarily disabled due to tree-sitter version conflicts - TODO: Fix when compatible versions available
-        // configs.insert(
-        //     Language::Kotlin,
-        //     LanguageConfig {
-        //         language: tree_sitter_kotlin::language(),
-        //         file_extensions: vec!["kt", "kts"],
-        //     },
-        // );
+        configs.insert(
+            Language::Kotlin,
+            LanguageConfig {
+                language: tree_sitter_kotlin_ng::LANGUAGE.into(),
+                file_extensions: vec!["kt", "kts"],
+            },
+        );
 
         configs.insert(
             Language::CSharp,
