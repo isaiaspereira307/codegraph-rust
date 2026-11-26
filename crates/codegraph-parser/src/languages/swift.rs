@@ -304,9 +304,11 @@ impl<'a> SwiftCollector<'a> {
                 // tree-sitter-swift exposes the module as a plain `identifier` child, not as the
                 // `module` field. CRG keeps the whole statement (`import XCTest`,
                 // `@testable import App`) as the unresolved edge target.
-                let module = self
-                    .child_text_by_field(node, "module")
-                    .or_else(|| node.named_children(&mut node.walk()).next().map(|c| self.node_text(&c)));
+                let module = self.child_text_by_field(node, "module").or_else(|| {
+                    node.named_children(&mut node.walk())
+                        .next()
+                        .map(|c| self.node_text(&c))
+                });
                 let Some(module) = module else {
                     return;
                 };
@@ -457,7 +459,9 @@ mod tests {
 
     fn extract(source: &str) -> ExtractionResult {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_swift::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_swift::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
         extract_for_language_at(
             &Language::Swift,
@@ -500,7 +504,9 @@ mod tests {
 
     #[test]
     fn swift_calls_are_attributed_to_the_enclosing_function() {
-        let result = extract("public func runService() {}\npublic struct Client {\n  public func go() { runService() }\n}\n");
+        let result = extract(
+            "public func runService() {}\npublic struct Client {\n  public func go() { runService() }\n}\n",
+        );
         assert_eq!(
             targets(&result, EdgeType::Calls),
             [(
@@ -513,8 +519,10 @@ mod tests {
     #[test]
     fn swift_inheritance_names_the_base_type() {
         let result = extract("final class ClientTests: XCTestCase {\n  func test_go() {}\n}\n");
-        assert!(targets(&result, EdgeType::Extends)
-            .iter()
-            .any(|(_, to)| to == "XCTestCase"));
+        assert!(
+            targets(&result, EdgeType::Extends)
+                .iter()
+                .any(|(_, to)| to == "XCTestCase")
+        );
     }
 }

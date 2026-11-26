@@ -421,13 +421,15 @@ impl<'a> CSharpCollector<'a> {
                             .child_by_field_name("name")
                             .map(|name| self.node_text(&name))
                             .unwrap_or_else(|| self.node_text(&callee));
-                        let method = method.rsplit('.').next().unwrap_or(&method).trim().to_string();
+                        let method = method
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(&method)
+                            .trim()
+                            .to_string();
                         if !method.is_empty() {
                             let mut meta = HashMap::new();
-                            meta.insert(
-                                "call_type".to_string(),
-                                "csharp_invocation".to_string(),
-                            );
+                            meta.insert("call_type".to_string(), "csharp_invocation".to_string());
                             // A plain identifier receiver typed by a parameter is enough for
                             // CRG's namespace-aware call binding; complex receivers stay bare.
                             if callee.kind() == "member_access_expression"
@@ -546,19 +548,23 @@ mod tests {
     #[test]
     fn csharp_file_scoped_namespace_prefixes_declarations() {
         let result = extract("using Demo.Helpers;\nnamespace Demo;\nclass App {}\n");
-        assert!(result.nodes.iter().any(|n| n
-            .metadata
-            .attributes
-            .get("qualified_name")
-            .is_some_and(|q| q == "src/App.cs::Demo.App")));
+        assert!(result.nodes.iter().any(|n| {
+            n.metadata
+                .attributes
+                .get("qualified_name")
+                .is_some_and(|q| q == "src/App.cs::Demo.App")
+        }));
     }
 
     #[test]
     fn csharp_using_directive_names_the_namespace() {
         let result = extract("using Demo.Helpers;\nnamespace Demo;\nclass App {}\n");
-        assert!(result.edges.iter().any(|e| {
-            e.edge_type == EdgeType::Imports && e.to == "Demo.Helpers"
-        }));
+        assert!(
+            result
+                .edges
+                .iter()
+                .any(|e| { e.edge_type == EdgeType::Imports && e.to == "Demo.Helpers" })
+        );
     }
 
     #[test]
@@ -569,7 +575,9 @@ mod tests {
         assert!(result.edges.iter().any(|e| {
             e.edge_type == EdgeType::Calls
                 && e.to == "Twice"
-                && e.metadata.get("receiver_type").is_some_and(|t| t == "Helper")
+                && e.metadata
+                    .get("receiver_type")
+                    .is_some_and(|t| t == "Helper")
         }));
     }
 }

@@ -605,7 +605,9 @@ mod tests {
 
     fn extract(source: &str, path: &str) -> ExtractionResult {
         let mut parser = Parser::new();
-        parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_cpp::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
         extract_for_language_at(
             &Language::Cpp,
@@ -634,11 +636,12 @@ mod tests {
             "class Helper { public: int twice(int value); };\n",
             "include/helper.h",
         );
-        assert!(result.nodes.iter().any(|n| n
-            .metadata
-            .attributes
-            .get("qualified_name")
-            .is_some_and(|q| q == "include/helper.h::Helper.twice(int)")));
+        assert!(result.nodes.iter().any(|n| {
+            n.metadata
+                .attributes
+                .get("qualified_name")
+                .is_some_and(|q| q == "include/helper.h::Helper.twice(int)")
+        }));
     }
 
     #[test]
@@ -657,8 +660,11 @@ mod tests {
             calls,
             [("src/app.cpp::run()".to_string(), "twice".to_string())]
         );
-        assert!(result.edges.iter().any(|e| {
-            e.edge_type == EdgeType::Imports && e.to == "../include/helper.h"
-        }));
+        assert!(
+            result
+                .edges
+                .iter()
+                .any(|e| { e.edge_type == EdgeType::Imports && e.to == "../include/helper.h" })
+        );
     }
 }
