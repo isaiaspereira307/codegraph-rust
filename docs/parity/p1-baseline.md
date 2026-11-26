@@ -118,3 +118,8 @@ debug com 3 repetições na Task 11; estes valores são apenas o registro da lin
   `/tmp/opencode/parity-p1-t7`: 91 pisos OK (86 + 5 do probe). Medição em
   [`p1-task7-go-packages.md`](p1-task7-go-packages.md), com o ruling R8 sobre o ramo ambíguo
   que não existe mais no CRG congelado.
+- Task 12: `flows.id` estável. `store_flows` reconcilia contra as linhas gravadas pela chave
+  `qualified_name` do entry point e só escreve o que mudou (traço e criticalidade seguem
+  completos). Neste repo, 3 builds debug seguidos: 0 de 355 ids iguais antes, 356 de 356 depois;
+  `flows_store_s` mediana 0,0131 s → 0,0037 s, `flows_s` (traço) inalterado. Snapshot completo:
+  151 pisos OK. Detalhes em [`p1-task12-flows.md`](p1-task12-flows.md).

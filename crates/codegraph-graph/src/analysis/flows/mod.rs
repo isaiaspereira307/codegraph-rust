@@ -142,41 +142,167 @@ fn criticality(
     round_half_even(crit.clamp(0.0, 1.0), 4)
 }
 
-/// Replaces every stored flow (flows.py `store_flows`). Returns the number written.
+/// Row-level outcome of [`reconcile_flows`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlowWriteStats {
+    pub inserted: usize,
+    pub updated: usize,
+    pub deleted: usize,
+    pub unchanged: usize,
+}
+
+/// Stores the traced flows (flows.py `store_flows`). Returns the number of flows now stored.
 pub fn store_flows(tx: &Transaction, flows: &[Flow]) -> Result<usize> {
-    tx.execute("DELETE FROM flow_memberships", [])?;
-    tx.execute("DELETE FROM flows", [])?;
+    reconcile_flows(tx, flows)?;
+    Ok(flows.len())
+}
+
+/// The stored columns of one flow, as compared against a freshly traced one.
+#[derive(PartialEq)]
+struct FlowRow {
+    name: String,
+    entry_point_id: i64,
+    depth: i64,
+    node_count: i64,
+    file_count: i64,
+    criticality: f64,
+    path_json: String,
+}
+
+impl FlowRow {
+    fn of(f: &Flow) -> Self {
+        Self {
+            name: f.name.clone(),
+            entry_point_id: f.entry_point_id,
+            depth: i64::from(f.depth),
+            node_count: f.node_count as i64,
+            file_count: f.file_count as i64,
+            criticality: f.criticality,
+            // Python's json.dumps puts a space after each comma.
+            path_json: format!(
+                "[{}]",
+                f.path
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+/// Writes `flows` as a diff against the stored rows so that `flows.id` is stable across runs.
+///
+/// A flow is identified by the `qualified_name` of its entry point (node rowids can change on a
+/// rebuild; qualified names cannot). A stored flow whose key is traced again keeps its id and is
+/// rewritten, memberships included, only when a column differs; keys no longer traced are deleted
+/// with their memberships; new keys are inserted in `flows` order, so a fresh database gets the
+/// same ids as a delete-and-reinsert would. Duplicates resolve deterministically: among stored rows
+/// sharing a key (or whose entry node is gone) the lowest id is kept and the rest deleted; a
+/// traced flow whose key was already claimed by an earlier one in `flows` is inserted as new.
+pub fn reconcile_flows(tx: &Transaction, flows: &[Flow]) -> Result<FlowWriteStats> {
+    let mut stats = FlowWriteStats::default();
+    let mut stored: HashMap<String, (i64, FlowRow)> = HashMap::new();
+    let mut stale: Vec<i64> = Vec::new();
+    {
+        let mut select = tx.prepare(
+            "SELECT f.id, n.qualified_name, f.name, f.entry_point_id, f.depth, f.node_count, \
+             f.file_count, f.criticality, f.path_json FROM flows f \
+             LEFT JOIN nodes n ON n.id = f.entry_point_id ORDER BY f.id",
+        )?;
+        let rows = select.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                FlowRow {
+                    name: r.get(2)?,
+                    entry_point_id: r.get(3)?,
+                    depth: r.get(4)?,
+                    node_count: r.get(5)?,
+                    file_count: r.get(6)?,
+                    criticality: r.get(7)?,
+                    path_json: r.get(8)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (id, key, row) = row?;
+            match key {
+                Some(key) if !stored.contains_key(&key) => {
+                    stored.insert(key, (id, row));
+                }
+                _ => stale.push(id),
+            }
+        }
+    }
+
+    let mut plan: Vec<(Option<i64>, &Flow, FlowRow)> = Vec::with_capacity(flows.len());
+    for f in flows {
+        let row = FlowRow::of(f);
+        match stored.remove(&f.entry_point) {
+            Some((_, old)) if old == row => stats.unchanged += 1,
+            Some((id, _)) => plan.push((Some(id), f, row)),
+            None => plan.push((None, f, row)),
+        }
+    }
+    stale.extend(stored.into_values().map(|(id, _)| id));
+    stale.sort_unstable();
+
+    let mut drop_members = tx.prepare("DELETE FROM flow_memberships WHERE flow_id = ?1")?;
+    let mut drop_flow = tx.prepare("DELETE FROM flows WHERE id = ?1")?;
+    for id in &stale {
+        drop_members.execute([id])?;
+        drop_flow.execute([id])?;
+    }
+    stats.deleted = stale.len();
+
     let mut insert = tx.prepare(
         "INSERT INTO flows (name, entry_point_id, depth, node_count, file_count, criticality, \
          path_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
+    let mut update = tx.prepare(
+        "UPDATE flows SET name = ?2, entry_point_id = ?3, depth = ?4, node_count = ?5, \
+         file_count = ?6, criticality = ?7, path_json = ?8, updated_at = datetime('now') \
+         WHERE id = ?1",
+    )?;
     let mut member = tx.prepare(
         "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) VALUES (?1, ?2, ?3)",
     )?;
-    for f in flows {
-        // Python's json.dumps puts a space after each comma.
-        let path_json = format!(
-            "[{}]",
-            f.path
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        insert.execute(rusqlite::params![
-            f.name,
-            f.entry_point_id,
-            f.depth,
-            f.node_count as i64,
-            f.file_count as i64,
-            f.criticality,
-            path_json
-        ])?;
-        let flow_id = tx.last_insert_rowid();
+    for (existing, f, row) in plan {
+        let flow_id = match existing {
+            Some(id) => {
+                update.execute(rusqlite::params![
+                    id,
+                    row.name,
+                    row.entry_point_id,
+                    row.depth,
+                    row.node_count,
+                    row.file_count,
+                    row.criticality,
+                    row.path_json
+                ])?;
+                drop_members.execute([id])?;
+                stats.updated += 1;
+                id
+            }
+            None => {
+                insert.execute(rusqlite::params![
+                    row.name,
+                    row.entry_point_id,
+                    row.depth,
+                    row.node_count,
+                    row.file_count,
+                    row.criticality,
+                    row.path_json
+                ])?;
+                stats.inserted += 1;
+                tx.last_insert_rowid()
+            }
+        };
         for (pos, node_id) in f.path.iter().enumerate() {
             member.execute(rusqlite::params![flow_id, node_id, pos as i64])?;
         }
     }
     tx.execute("DELETE FROM metadata WHERE key = 'csharp_flows_dirty'", [])?;
-    Ok(flows.len())
+    Ok(stats)
 }

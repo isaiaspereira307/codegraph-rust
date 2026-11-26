@@ -116,7 +116,7 @@ fn php_boot_only_for_php() {
 
 // ---- trace, criticality and storage ----
 
-use codegraph_graph::analysis::flows::{FLOW_MAX_DEPTH, store_flows, trace_flows};
+use codegraph_graph::analysis::flows::{FLOW_MAX_DEPTH, FlowWriteStats, store_flows, trace_flows};
 
 fn chain(n: usize) -> (Vec<String>, Vec<(String, String)>) {
     let names: Vec<String> = (0..n)
@@ -348,6 +348,180 @@ async fn get_flow_missing_is_none() {
     let (_d, q) = flow_db();
     assert!(q.get_flow(None, Some("nope"), 50).await.unwrap().is_none());
     assert!(q.get_flow(Some(9999), None, 50).await.unwrap().is_none());
+}
+
+// ---- stable flow IDs across post-process runs ----
+
+/// (entry qualified_name, flow id, updated_at, path_json), ordered by entry.
+fn stored_flows(conn: &rusqlite::Connection) -> Vec<(String, i64, String, String)> {
+    conn.prepare(
+        "SELECT n.qualified_name, f.id, f.updated_at, f.path_json FROM flows f \
+         JOIN nodes n ON n.id = f.entry_point_id ORDER BY n.qualified_name",
+    )
+    .unwrap()
+    .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+/// (flow_id, node_id, position) for every membership row.
+fn memberships(conn: &rusqlite::Connection) -> Vec<(i64, i64, i64)> {
+    conn.prepare("SELECT flow_id, node_id, position FROM flow_memberships ORDER BY 1, 3")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn add_call(conn: &rusqlite::Connection, src: &str, tgt: &str) {
+    conn.execute(
+        "INSERT INTO edges (kind, source_qualified, target_qualified, file_path, line, \
+         updated_at) VALUES ('CALLS', ?1, ?2, '', 1, 0)",
+        [src, tgt],
+    )
+    .unwrap();
+}
+
+#[test]
+fn flow_ids_stable_across_unchanged_postprocess_runs() {
+    let (dir, _q) = flow_db();
+    let mut conn = open_conn(dir.path());
+    let first = stored_flows(&conn);
+    assert_eq!(first.len(), 2);
+    let first_members = memberships(&conn);
+    // A sentinel shows whether the second run rewrote rows it did not need to.
+    conn.execute("UPDATE flows SET updated_at = 'sentinel'", [])
+        .unwrap();
+    let stats = run_postprocess(&mut conn, PostprocessLevel::Full).unwrap();
+    assert_eq!(
+        stats.flow_writes,
+        FlowWriteStats {
+            inserted: 0,
+            updated: 0,
+            deleted: 0,
+            unchanged: 2
+        }
+    );
+    assert_eq!(stats.flows, 2);
+    let second = stored_flows(&conn);
+    let ids = |v: &[(String, i64, String, String)]| {
+        v.iter()
+            .map(|(q, id, _, _)| (q.clone(), *id))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&second), ids(&first));
+    assert!(second.iter().all(|(_, _, u, _)| u == "sentinel"));
+    assert_eq!(memberships(&conn), first_members);
+}
+
+#[test]
+fn flow_id_survives_member_change() {
+    let (dir, _q) = flow_db();
+    let mut conn = open_conn(dir.path());
+    let first = stored_flows(&conn);
+    conn.execute("UPDATE flows SET updated_at = 'sentinel'", [])
+        .unwrap();
+    // main gains a member: main -> helper -> leaf, main -> c.py::step.
+    add_call(&conn, "a.py::main", "c.py::step");
+    let stats = run_postprocess(&mut conn, PostprocessLevel::Full).unwrap();
+    assert_eq!(
+        stats.flow_writes,
+        FlowWriteStats {
+            inserted: 0,
+            updated: 1,
+            deleted: 0,
+            unchanged: 1
+        }
+    );
+    let second = stored_flows(&conn);
+    let (main_before, main_after) = (&first[0], &second[0]);
+    assert_eq!(main_after.0, "a.py::main");
+    assert_eq!(main_after.1, main_before.1, "same entry point keeps its id");
+    assert_ne!(main_after.2, "sentinel", "changed flow is rewritten");
+    assert_ne!(main_after.3, main_before.3);
+    let (node_count,): (i64,) = conn
+        .query_row(
+            "SELECT node_count FROM flows WHERE id = ?1",
+            [main_after.1],
+            |r| Ok((r.get(0)?,)),
+        )
+        .unwrap();
+    assert_eq!(node_count, 4);
+    let main_members: Vec<i64> = memberships(&conn)
+        .into_iter()
+        .filter(|(f, _, _)| *f == main_after.1)
+        .map(|(_, n, _)| n)
+        .collect();
+    assert_eq!(main_members.len(), 4);
+    // The untouched flow is left alone.
+    assert_eq!(second[1].1, first[1].1);
+    assert_eq!(second[1].2, "sentinel");
+}
+
+#[test]
+fn removed_entry_point_deletes_flow_and_memberships() {
+    let (dir, _q) = flow_db();
+    let mut conn = open_conn(dir.path());
+    let first = stored_flows(&conn);
+    let zeta_id = first[1].1;
+    assert_eq!(first[1].0, "c.py::zeta_job");
+    conn.execute(
+        "DELETE FROM nodes WHERE qualified_name = 'c.py::zeta_job'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM edges WHERE source_qualified = 'c.py::zeta_job'",
+        [],
+    )
+    .unwrap();
+    let stats = run_postprocess(&mut conn, PostprocessLevel::Full).unwrap();
+    assert_eq!(
+        stats.flow_writes,
+        FlowWriteStats {
+            inserted: 0,
+            updated: 0,
+            deleted: 1,
+            unchanged: 1
+        }
+    );
+    assert_eq!(stats.flows, 1);
+    let ids: Vec<i64> = conn
+        .prepare("SELECT id FROM flows")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(ids, vec![first[0].1]);
+    assert!(memberships(&conn).iter().all(|(f, _, _)| *f != zeta_id));
+    assert_eq!(memberships(&conn).len(), 3);
+}
+
+#[test]
+fn store_flows_fresh_ids_follow_criticality_order() {
+    let g = flow_graph(
+        &["main", "a", "zeta_job", "b"],
+        &[("main", "a"), ("zeta_job", "b")],
+        &[],
+    );
+    let flows = trace_flows(&g, FLOW_MAX_DEPTH);
+    let (dir, _s) = fixture_db(&[], &[]);
+    let mut conn = open_conn(dir.path());
+    let tx = conn.transaction().unwrap();
+    assert_eq!(store_flows(&tx, &flows).unwrap(), 2);
+    tx.commit().unwrap();
+    let names: Vec<String> = conn
+        .prepare("SELECT name FROM flows ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let expected: Vec<String> = flows.iter().map(|f| f.name.clone()).collect();
+    assert_eq!(names, expected);
 }
 
 #[tokio::test]

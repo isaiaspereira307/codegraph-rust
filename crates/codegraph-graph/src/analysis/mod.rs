@@ -318,6 +318,8 @@ impl PostprocessLevel {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PostprocessStats {
     pub flows: usize,
+    /// How the flow rows were written: inserted, updated, deleted or left unchanged.
+    pub flow_writes: flows::FlowWriteStats,
     pub communities: usize,
 }
 
@@ -334,13 +336,21 @@ pub fn run_postprocess(conn: &mut Connection, level: PostprocessLevel) -> Result
     let communities = communities::detect_communities(&graph, 2);
     let communities_s = started.elapsed().as_secs_f64() - flows_s;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    stats.flows = flows::store_flows(&tx, &flows)?;
+    let store_started = std::time::Instant::now();
+    stats.flow_writes = flows::reconcile_flows(&tx, &flows)?;
+    stats.flows = flows.len();
+    let flows_store_s = store_started.elapsed().as_secs_f64();
     stats.communities = communities::store_communities(&tx, &communities)?;
     tx.commit()?;
     tracing::info!(
         flows_s,
+        flows_store_s,
         communities_s,
         flows = stats.flows,
+        flows_inserted = stats.flow_writes.inserted,
+        flows_updated = stats.flow_writes.updated,
+        flows_deleted = stats.flow_writes.deleted,
+        flows_unchanged = stats.flow_writes.unchanged,
         communities = stats.communities,
         "analysis stored"
     );
