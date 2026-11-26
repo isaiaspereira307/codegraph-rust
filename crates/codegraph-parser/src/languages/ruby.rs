@@ -3,6 +3,7 @@ use codegraph_core::{
     Span,
 };
 use std::collections::HashMap;
+use std::path::Path;
 use tree_sitter::{Node, Tree, TreeCursor};
 
 /// Advanced Ruby AST extractor for dynamic programming intelligence.
@@ -168,13 +169,14 @@ impl<'a> RubyCollector<'a> {
                 }
             }
 
-            // Ruby Modules
+            // Ruby Modules. code-review-graph indexes both `module` and `class` as Class
+            // nodes, and the module participates in the dotted scope of its members.
             "module" => {
                 if let Some(name) = self.child_text_by_field(node, "name") {
                     let loc = self.location(&node);
                     let mut code = CodeNode::new(
                         name.clone(),
-                        Some(NodeType::Module),
+                        Some(NodeType::Class),
                         Some(Language::Ruby),
                         loc,
                     )
@@ -256,24 +258,8 @@ impl<'a> RubyCollector<'a> {
                 }
             }
 
-            // Ruby Constants
-            "constant" => {
-                let name = self.node_text(&node);
-                let loc = self.location(&node);
-                let mut code = CodeNode::new(
-                    name.clone(),
-                    Some(NodeType::Variable),
-                    Some(Language::Ruby),
-                    loc,
-                )
-                .with_content(name.clone());
-
-                code.metadata
-                    .attributes
-                    .insert("kind".into(), "constant".into());
-                self.nodes.push(code);
-            }
-
+            // CRG emits no node for a bare Ruby constant: class and module names are already
+            // represented by their declaration nodes, and other constants are references.
             "call" => {
                 let call_text = self.node_text(&node);
                 if call_text.starts_with("attr_") {
@@ -331,6 +317,13 @@ impl<'a> RubyCollector<'a> {
                             .to_string()
                     } else {
                         call_text.clone()
+                    };
+                    // `require_relative` is anchored at the importer's directory and CRG keeps
+                    // the `.rb` suffix in the edge target.
+                    let path = if is_relative {
+                        self.require_relative_path(&path)
+                    } else {
+                        path
                     };
 
                     // Create import edge
@@ -393,6 +386,21 @@ impl<'a> RubyCollector<'a> {
         }
     }
 
+    /// Resolves a `require_relative` argument like CRG: from the importer's directory, with
+    /// the Ruby extension retained (and added when the source omitted it).
+    fn require_relative_path(&self, path: &str) -> String {
+        let path = path.trim();
+        let with_extension = if path.ends_with(".rb") {
+            path.to_string()
+        } else {
+            format!("{path}.rb")
+        };
+        let parent = Path::new(self.file_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        super::crg_shape::default_rel_path(&parent.join(with_extension).to_string_lossy())
+    }
+
     fn child_text_by_field(&self, node: Node, field_name: &str) -> Option<String> {
         node.child_by_field_name(field_name)
             .map(|child| self.node_text(&child))
@@ -412,5 +420,56 @@ impl<'a> RubyCollector<'a> {
             end_line: Some((node.end_position().row + 1) as u32),
             end_column: Some((node.end_position().column + 1) as u32),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ExtractionPolicy;
+    use crate::languages::extract_for_language_at;
+    use tree_sitter::Parser;
+
+    fn extract(source: &str) -> ExtractionResult {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_ruby::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        extract_for_language_at(
+            &Language::Ruby,
+            &tree,
+            source,
+            "app.rb",
+            "app.rb",
+            ExtractionPolicy::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ruby_modules_scope_classes_and_methods_like_crg() {
+        let result = extract("module Demo\n  class App\n    def run\n    end\n  end\nend\n");
+        let names: Vec<_> = result
+            .nodes
+            .iter()
+            .filter_map(|n| n.metadata.attributes.get("qualified_name").cloned())
+            .collect();
+        assert!(names.iter().any(|q| q == "app.rb::Demo"));
+        assert!(names.iter().any(|q| q == "app.rb::Demo.App"));
+        assert!(names.iter().any(|q| q == "app.rb::Demo.App.run"));
+        // CRG indexes a class name as the scope's Class node, never as a separate constant.
+        assert!(!names.iter().any(|q| q.contains("@L")));
+    }
+
+    #[test]
+    fn ruby_require_relative_keeps_the_rb_extension() {
+        let result = extract("require_relative 'lib/helper'\n");
+        assert!(
+            result
+                .edges
+                .iter()
+                .any(|e| { e.edge_type == EdgeType::Imports && e.to == "lib/helper.rb" })
+        );
     }
 }

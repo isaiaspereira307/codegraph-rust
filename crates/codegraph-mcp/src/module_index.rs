@@ -25,6 +25,7 @@ enum ImportLanguage {
     Script,
     Rust,
     Java,
+    Ruby,
 }
 
 fn language(importer: &str) -> Option<ImportLanguage> {
@@ -36,6 +37,7 @@ fn language(importer: &str) -> Option<ImportLanguage> {
         }
         "rs" => ImportLanguage::Rust,
         "java" => ImportLanguage::Java,
+        "rb" => ImportLanguage::Ruby,
         _ => return None,
     })
 }
@@ -553,7 +555,14 @@ impl ModuleIndex {
             ImportLanguage::Script => self.script(importer, text),
             ImportLanguage::Rust => self.rust(importer, text),
             ImportLanguage::Java => self.java(importer, text),
+            ImportLanguage::Ruby => self.ruby(text),
         }
+    }
+
+    /// Ruby `require_relative` targets are resolved by the extractor (relative to the
+    /// importer, with `.rb` kept); find the indexed file that exact path names.
+    fn ruby(&self, text: &str) -> Option<&str> {
+        text.ends_with(".rb").then(|| self.file(text)).flatten()
     }
 
     /// Top-level `sys.modules`/re-export evidence of one indexed Python file, read once.

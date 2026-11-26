@@ -906,6 +906,39 @@ mod tests {
     }
 
     #[test]
+    fn ruby_require_relative_binds_bare_calls_into_the_required_file() {
+        let mut caller = node("app.rb", "run");
+        caller
+            .metadata
+            .attributes
+            .insert("qualified_name".into(), "app.rb::Demo.App.run".into());
+        let mut target = node("lib/helper.rb", "twice");
+        target.metadata.attributes.insert(
+            "qualified_name".into(),
+            "lib/helper.rb::Demo.Helper.twice".into(),
+        );
+        let file = |path: &str| {
+            let mut node = node(path, path);
+            node.node_type = Some(NodeType::Other("File".into()));
+            node.set_deterministic_id(path);
+            node
+        };
+        let mut catalog = SymbolCatalog::new(&[
+            file("app.rb"),
+            file("lib/helper.rb"),
+            caller.clone(),
+            target.clone(),
+        ]);
+        let mut import = edge(caller.id, "lib/helper.rb");
+        import.edge_type = EdgeType::Imports;
+        catalog.link_imports(std::slice::from_ref(&import));
+        assert_eq!(
+            catalog.exact(&edge(caller.id, "twice"), &[]),
+            Some(target.id)
+        );
+    }
+
+    #[test]
     fn csharp_typed_receiver_call_binds_to_the_imported_namespace() {
         let mut caller = node("src/App.cs", "Run");
         caller
@@ -914,25 +947,26 @@ mod tests {
             .insert("qualified_name".into(), "src/App.cs::Demo.App.Run".into());
         let mut helper = node("src/Helper.cs", "Demo.Helpers.Helper");
         helper.node_type = Some(NodeType::Class);
-        helper
-            .metadata
-            .attributes
-            .insert("qualified_name".into(), "src/Helper.cs::Demo.Helpers.Helper".into());
+        helper.metadata.attributes.insert(
+            "qualified_name".into(),
+            "src/Helper.cs::Demo.Helpers.Helper".into(),
+        );
         helper
             .metadata
             .attributes
             .insert("csharp_namespace".into(), "Demo.Helpers".into());
         let mut target = node("src/Helper.cs", "Twice");
-        target
-            .metadata
-            .attributes
-            .insert("qualified_name".into(), "src/Helper.cs::Demo.Helpers.Helper.Twice".into());
+        target.metadata.attributes.insert(
+            "qualified_name".into(),
+            "src/Helper.cs::Demo.Helpers.Helper.Twice".into(),
+        );
         let mut catalog = SymbolCatalog::new(&[caller.clone(), helper, target.clone()]);
         let mut import = edge(caller.id, "Demo.Helpers");
         import.edge_type = EdgeType::Imports;
         catalog.link_imports(&[import]);
         let mut call = edge(caller.id, "Twice");
-        call.metadata.insert("receiver_type".into(), "Helper".into());
+        call.metadata
+            .insert("receiver_type".into(), "Helper".into());
         assert_eq!(catalog.csharp_call_target(&call), Some(target.id));
     }
 
