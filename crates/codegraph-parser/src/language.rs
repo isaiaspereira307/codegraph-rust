@@ -121,14 +121,13 @@ impl LanguageRegistry {
             },
         );
 
-        // Temporarily disabled due to tree-sitter version conflicts - TODO: Fix when compatible versions available
-        // configs.insert(
-        //     Language::Dart,
-        //     LanguageConfig {
-        //         language: tree_sitter_dart::language(),
-        //         file_extensions: vec!["dart"],
-        //     },
-        // );
+        configs.insert(
+            Language::Dart,
+            LanguageConfig {
+                language: tree_sitter_dart::LANGUAGE.into(),
+                file_extensions: vec!["dart"],
+            },
+        );
 
         Self { configs }
     }

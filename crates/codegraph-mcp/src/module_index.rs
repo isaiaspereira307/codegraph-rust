@@ -28,6 +28,7 @@ enum ImportLanguage {
     Ruby,
     Php,
     Kotlin,
+    Dart,
 }
 
 fn language(importer: &str) -> Option<ImportLanguage> {
@@ -42,6 +43,7 @@ fn language(importer: &str) -> Option<ImportLanguage> {
         "rb" => ImportLanguage::Ruby,
         "php" => ImportLanguage::Php,
         "kt" | "kts" => ImportLanguage::Kotlin,
+        "dart" => ImportLanguage::Dart,
         _ => return None,
     })
 }
@@ -258,6 +260,19 @@ pub(crate) struct ModuleIndex {
     shim_stack: RefCell<Vec<String>>,
     /// PSR-4 maps of each directory's `composer.json` (`None`: the directory has none).
     php_composer: RefCell<HashMap<String, Option<Psr4Mappings>>>,
+    /// The package name each directory's `pubspec.yaml` declares (`None`: no such file/name).
+    dart_pubspecs: RefCell<HashMap<String, Option<String>>>,
+}
+
+/// The top-level `name:` of `<dir>pubspec.yaml`, like CRG's `_find_dart_pubspec_root`.
+fn read_pubspec_name(dir: &str) -> Option<String> {
+    let text = std::fs::read_to_string(format!("{dir}pubspec.yaml")).ok()?;
+    text.lines().find_map(|line| {
+        let value = line.strip_prefix("name:")?;
+        let value = value.split('#').next().unwrap_or("").trim();
+        let value = value.trim_matches(|c| c == '\'' || c == '"');
+        (!value.is_empty()).then(|| value.to_string())
+    })
 }
 
 /// `(namespace prefix, destination directories)`, longest prefix first.
@@ -494,6 +509,7 @@ impl ModuleIndex {
             python_evidence: RefCell::new(HashMap::new()),
             shim_stack: RefCell::new(Vec::new()),
             php_composer: RefCell::new(HashMap::new()),
+            dart_pubspecs: RefCell::new(HashMap::new()),
         }
     }
 
@@ -608,7 +624,44 @@ impl ModuleIndex {
             ImportLanguage::Ruby => self.ruby(text),
             ImportLanguage::Php => self.php(importer, text),
             ImportLanguage::Kotlin => self.kotlin(importer, text),
+            ImportLanguage::Dart => self.dart(importer, text),
         }
+    }
+
+    /// CRG's Dart import resolution: a `.`-relative URI from the importer's directory (adding
+    /// `.dart` when missing), or `package:<name>/<path>` as `lib/<path>` under the nearest
+    /// ancestor whose `pubspec.yaml` declares that name. Other URIs (`dart:`, bare relative
+    /// paths) stay text, as at code-review-graph.
+    fn dart(&self, importer: &str, text: &str) -> Option<&str> {
+        let importer_dir = PathParts::new(importer).parent();
+        if text.starts_with('.') {
+            let base = importer_dir.join(text);
+            return self
+                .file(&base)
+                .or_else(|| self.file(&format!("{base}.dart")));
+        }
+        let (package, sub_path) = text.strip_prefix("package:")?.split_once('/')?;
+        if package.is_empty() || sub_path.is_empty() {
+            return None;
+        }
+        let mut dir = importer_dir;
+        // Bounded like CRG's walk, which stops after 20 levels.
+        for _ in 0..20 {
+            let key = dir.join("");
+            let cached = self.dart_pubspecs.borrow().get(&key).cloned();
+            let name = cached.unwrap_or_else(|| {
+                let name = read_pubspec_name(&key);
+                self.dart_pubspecs
+                    .borrow_mut()
+                    .insert(key.clone(), name.clone());
+                name
+            });
+            if name.as_deref() == Some(package) {
+                return self.file(&format!("{key}lib/{sub_path}"));
+            }
+            dir.segments.pop()?;
+        }
+        None
     }
 
     /// CRG's Kotlin module resolution: `a.b.C` names `a/b/C.kt` (or `.kts`), searched from the
@@ -1231,6 +1284,38 @@ mod tests {
             Some(paths[2].as_str())
         );
         assert_eq!(index.resolve(&paths[3], "unknown-package"), None);
+    }
+
+    #[test]
+    fn dart_imports_resolve_relative_and_package_uris_like_crg() {
+        let (_dir, paths) = py_repo(&[
+            ("pubspec.yaml", "name: probe # the package\n"),
+            ("lib/app.dart", "class App {}\n"),
+            ("lib/src/helper.dart", "class Helper {}\n"),
+            ("test/app_test.dart", "void main() {}\n"),
+        ]);
+        let index = ModuleIndex::new(paths.iter().map(String::as_str));
+        let test = paths[3].as_str();
+        assert_eq!(
+            index.resolve(test, "package:probe/app.dart"),
+            Some(paths[1].as_str())
+        );
+        assert_eq!(
+            index.resolve(test, "package:probe/src/helper.dart"),
+            Some(paths[2].as_str())
+        );
+        assert_eq!(index.resolve(test, "package:other/app.dart"), None);
+        assert_eq!(
+            index.resolve(&paths[1], "./src/helper.dart"),
+            Some(paths[2].as_str())
+        );
+        assert_eq!(
+            index.resolve(&paths[1], "./src/helper"),
+            Some(paths[2].as_str())
+        );
+        // A bare relative URI and SDK libraries stay text, as at code-review-graph.
+        assert_eq!(index.resolve(&paths[1], "src/helper.dart"), None);
+        assert_eq!(index.resolve(&paths[1], "dart:async"), None);
     }
 
     #[test]

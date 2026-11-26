@@ -9,6 +9,7 @@ pub mod rust;
 // Revolutionary universal language support
 pub mod cpp;
 pub mod csharp;
+pub mod dart;
 pub mod go;
 pub mod java;
 pub mod kotlin;
@@ -163,6 +164,11 @@ fn extract_unshaped(
         Language::Php => Some(<PhpExtractor as LanguageExtractor>::extract_with_edges(
             tree, content, file_path,
         )),
+        Language::Dart => Some(
+            <dart::DartExtractor as LanguageExtractor>::extract_with_edges(
+                tree, content, file_path,
+            ),
+        ),
         Language::Kotlin => Some(
             <kotlin::KotlinExtractor as LanguageExtractor>::extract_with_edges(
                 tree, content, file_path,
