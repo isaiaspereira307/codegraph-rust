@@ -81,6 +81,9 @@ pub(crate) fn aliases(node: &CodeNode) -> BTreeSet<String> {
         if let Some(symbol) = qualified.strip_prefix(&format!("{key}::")) {
             names.insert(format!("{}::{symbol}", node.location.file_path));
         }
+        // The catalog's own spelling (`qualified_symbol` looks a name up by it): a
+        // root-relative name restored to the absolute file of an absolute-path index.
+        names.insert(catalog_qualified(&node.location.file_path, qualified));
     }
     // The extractor's own qualified name, from before the CRG reshape.
     if let Some(original) = node
@@ -1347,6 +1350,22 @@ mod tests {
         );
         let names = aliases(&method);
         assert!(names.contains("m.rs::A.new") && names.contains("m.rs::impl<A>::new"));
+    }
+
+    #[test]
+    fn method_of_an_absolute_path_index_is_found_by_its_catalog_name() {
+        // Indexed by absolute path, the canonical `qualified_name` is root-relative; the
+        // catalog restores the absolute prefix and must find the method under that name.
+        let mut method = node("/repo/pkg/b.py", "go");
+        method
+            .metadata
+            .attributes
+            .insert("qualified_name".into(), "pkg/b.py::Thing.go".into());
+        let catalog = SymbolCatalog::new(std::slice::from_ref(&method));
+        assert_eq!(
+            catalog.qualified_symbol("/repo/pkg/b.py::Thing.go", false),
+            Some(method.id)
+        );
     }
 
     #[test]

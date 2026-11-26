@@ -325,6 +325,9 @@ mod tests {
         let impacted: Vec<_> = ctx.impacted.iter().map(|n| n.node.name.as_str()).collect();
         assert_eq!(impacted, vec!["b", "test_a"]);
         assert_eq!(ctx.tests.len(), 1);
+        // m.py holds the change, so only the test's file is outside it.
+        assert_eq!(ctx.affected_files.len(), 1, "{:?}", ctx.affected_files);
+        assert!(ctx.affected_files[0].ends_with("test_m.py"));
 
         // The minimal view keeps counts and ids, and is smaller than the full one.
         let full = serde_json::to_string(&ctx).unwrap();

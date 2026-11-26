@@ -67,6 +67,11 @@ em `metrics.json`. O impacto do CRG não segue herança em texto; o Rust segue (
 O risco 32/35 é uma melhoria sobre os 31/35 históricos; o piso do detector continua 31/35.
 O cenário 3 só é comparável em arquivos/funções alterados (ambos truncam o impacto em 1000 nós).
 
+Task 11 (2026-11-26): o piso do cenário 2 d=2 baixou de 0.960 para 0.957. A diferença são testes
+que chegam a `tools/build.py::run_postprocess`, nó que só o Rust alcança (o CRG deixa como texto
+o `from M import f as _f` dentro da função); eles chegam lá por um `import ... as m` local que o
+CRG também liga como receptor. Detalhes em [`changes.md`](changes.md#p1-task-11-semântica-do-impacto-e-update-2026-11-26).
+
 ## Tempo de `update` (2 arquivos, debug)
 
 | ferramenta | segundos |

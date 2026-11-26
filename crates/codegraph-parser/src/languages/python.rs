@@ -100,30 +100,12 @@ impl FileScope {
                         scope.defined.insert(name);
                     }
                 }
-                "import_from_statement" => {
-                    let Some(module) = target.child_by_field_name("module_name") else {
-                        continue;
-                    };
-                    let module = text(&module);
-                    for (original, local) in imported_names(&target, content) {
-                        scope.from_imports.insert(local, (module.clone(), original));
-                    }
-                }
-                "import_statement" => {
-                    // `import a.b` binds only `a`, to the module `a`; `import a.b as c`
-                    // binds `c` to `a.b`.
-                    for (original, local) in imported_names(&target, content) {
-                        let module = if original.split('.').next() == Some(local.as_str())
-                            && original != local
-                            && !is_aliased(&target, &original, content)
-                        {
-                            local.clone()
-                        } else {
-                            original
-                        };
-                        scope.module_aliases.insert(local, module);
-                    }
-                }
+                "import_from_statement" | "import_statement" => record_import(
+                    &target,
+                    content,
+                    &mut scope.from_imports,
+                    &mut scope.module_aliases,
+                ),
                 _ => {}
             }
         }
@@ -216,6 +198,9 @@ struct Frame {
     /// Local names bound to a class by an annotation (`service: AuthService`) or a
     /// constructor assignment (`svc = AuthService()`).
     types: HashMap<String, String>,
+    /// Imports in this function's body, shaped like `FileScope`'s.
+    from_imports: HashMap<String, (String, String)>,
+    module_aliases: HashMap<String, String>,
 }
 
 struct PythonCollector<'a> {
@@ -413,6 +398,8 @@ impl<'a> PythonCollector<'a> {
         };
         let mut local_defs = HashMap::new();
         let mut bound = HashSet::new();
+        let mut from_imports = HashMap::new();
+        let mut module_aliases = HashMap::new();
         if let Some(body) = node.child_by_field_name("body") {
             for inner in nested_defs(body) {
                 if let Some(inner_name) = self.field_text(&inner, "name") {
@@ -421,6 +408,12 @@ impl<'a> PythonCollector<'a> {
             }
             for statement in named_children(&body) {
                 bindings(statement, self.content, &mut bound);
+                local_imports(
+                    statement,
+                    self.content,
+                    &mut from_imports,
+                    &mut module_aliases,
+                );
             }
         }
         let mut types = HashMap::new();
@@ -435,6 +428,8 @@ impl<'a> PythonCollector<'a> {
             type_checking,
             typing_modules,
             types,
+            from_imports,
+            module_aliases,
         });
         self.walk_children(node);
         self.frames.pop();
@@ -486,6 +481,8 @@ impl<'a> PythonCollector<'a> {
             type_checking,
             typing_modules,
             types: HashMap::new(),
+            from_imports: HashMap::new(),
+            module_aliases: HashMap::new(),
         });
         let chain = match self.class_chains.last() {
             Some(outer) => format!("{outer}.{name}"),
@@ -655,7 +652,7 @@ impl<'a> PythonCollector<'a> {
             "self" | "cls" | "super" | "None" | "True" | "False"
         ) || name.chars().count() <= 1
             || is_upper(&name)
-            || !(self.scope.defined.contains(&name) || self.scope.from_imports.contains_key(&name))
+            || !(self.scope.defined.contains(&name) || self.import_binding(&name).is_some())
         {
             return;
         }
@@ -702,6 +699,25 @@ impl<'a> PythonCollector<'a> {
         }
     }
 
+    /// `from` import bound to `name`: the innermost function's own imports first, then the
+    /// file's.
+    fn import_binding(&self, name: &str) -> Option<&(String, String)> {
+        self.frames
+            .iter()
+            .rev()
+            .find_map(|f| f.from_imports.get(name))
+            .or_else(|| self.scope.from_imports.get(name))
+    }
+
+    /// Module bound to `name` by `import`, function scopes first, then the file.
+    fn module_alias(&self, name: &str) -> Option<&String> {
+        self.frames
+            .iter()
+            .rev()
+            .find_map(|f| f.module_aliases.get(name))
+            .or_else(|| self.scope.module_aliases.get(name))
+    }
+
     /// `name()`: a `def` of an enclosing function, then a top-level def/class, then a name
     /// imported with `from` (bare name plus `crg_py_import`); otherwise the bare name.
     fn bare_target(&self, name: &str, metadata: &mut HashMap<String, String>) -> String {
@@ -717,7 +733,7 @@ impl<'a> PythonCollector<'a> {
         if self.scope.defined.contains(name) {
             return format!("{}::{name}", self.file_path);
         }
-        if let Some((module, original)) = self.scope.from_imports.get(name) {
+        if let Some((module, original)) = self.import_binding(name) {
             metadata.insert(
                 crg_shape::PY_IMPORT_ATTR.to_string(),
                 format!("{module}|{original}"),
@@ -795,8 +811,19 @@ impl<'a> PythonCollector<'a> {
             metadata.insert("receiver_class".into(), ty.to_string());
             return Some(format!("{}::{ty}.{method}", self.file_path));
         }
+        // `from M import C [as D]`: the class lives in `M` (the resolver names
+        // `<file of M>::C.method`).
+        if let Some((module, original)) = self.import_binding(ty) {
+            metadata.insert(
+                crg_shape::PY_IMPORT_ATTR.to_string(),
+                format!("{module}|{original}"),
+            );
+            metadata.insert("receiver_binding".into(), "class".into());
+            metadata.insert("receiver_class".into(), ty.to_string());
+            return Some(method.to_string());
+        }
         if let Some((module, class)) = ty.split_once('.')
-            && self.scope.module_aliases.contains_key(module)
+            && self.module_alias(module).is_some()
         {
             metadata.insert(
                 crg_shape::PY_IMPORT_ATTR.to_string(),
@@ -865,7 +892,7 @@ impl<'a> PythonCollector<'a> {
         // `q.lib.f()` names a module path, not a symbol of the importing file.
         if !constructor
             && let Some((module, _)) = receiver.split_once('.')
-            && self.scope.module_aliases.contains_key(module)
+            && self.module_alias(module).is_some()
         {
             metadata.insert(
                 crg_shape::PY_IMPORT_ATTR.to_string(),
@@ -877,12 +904,12 @@ impl<'a> PythonCollector<'a> {
         if self.scope.classes.contains(&receiver) {
             return format!("{}::{receiver}.{method}", self.file_path);
         }
-        if let Some((module, original)) = self.scope.from_imports.get(&receiver) {
+        if let Some((module, original)) = self.import_binding(&receiver) {
             metadata.insert(
                 crg_shape::PY_IMPORT_ATTR.to_string(),
                 format!("{module}|{original}"),
             );
-        } else if let Some(module) = self.scope.module_aliases.get(&receiver) {
+        } else if let Some(module) = self.module_alias(&receiver) {
             metadata.insert(crg_shape::PY_IMPORT_ATTR.to_string(), format!("{module}|"));
         } else {
             metadata.insert(crg_shape::UNBOUND_ATTR.to_string(), "true".to_string());
@@ -958,6 +985,59 @@ fn is_aliased(node: &Node, original: &str, content: &str) -> bool {
 
 /// `(original, local)` names an import statement binds: `import a.b` -> `(a.b, a)`,
 /// `import a.b as c` -> `(a.b, c)`, `from M import x as y` -> `(x, y)`; `*` binds nothing.
+/// Records what an `import`/`from` statement binds: `from M import X [as Y]` maps `Y` to
+/// `(M, X)`; `import a.b` binds only `a` (to the module `a`) and `import a.b as c` binds `c`
+/// to `a.b`.
+fn record_import(
+    node: &Node,
+    content: &str,
+    from_imports: &mut HashMap<String, (String, String)>,
+    module_aliases: &mut HashMap<String, String>,
+) {
+    if node.kind() == "import_from_statement" {
+        let Some(module) = node.child_by_field_name("module_name") else {
+            return;
+        };
+        let module = node_text(&module, content);
+        for (original, local) in imported_names(node, content) {
+            from_imports.insert(local, (module.clone(), original));
+        }
+        return;
+    }
+    for (original, local) in imported_names(node, content) {
+        let module = if original.split('.').next() == Some(local.as_str())
+            && original != local
+            && !is_aliased(node, &original, content)
+        {
+            local.clone()
+        } else {
+            original
+        };
+        module_aliases.insert(local, module);
+    }
+}
+
+/// Imports anywhere in a function body, outside nested `def`s, classes and lambdas (CRG
+/// reads receiver evidence per function scope, so a local import binds that function's calls).
+fn local_imports(
+    node: Node,
+    content: &str,
+    from_imports: &mut HashMap<String, (String, String)>,
+    module_aliases: &mut HashMap<String, String>,
+) {
+    match node.kind() {
+        "function_definition" | "class_definition" | "lambda" => {}
+        "import_statement" | "import_from_statement" => {
+            record_import(&node, content, from_imports, module_aliases)
+        }
+        _ => {
+            for child in named_children(&node) {
+                local_imports(child, content, from_imports, module_aliases);
+            }
+        }
+    }
+}
+
 fn imported_names(node: &Node, content: &str) -> Vec<(String, String)> {
     let from = node.kind() == "import_from_statement";
     field_children(node, "name")
@@ -1573,6 +1653,82 @@ mod tests {
             go.metadata.get("receiver_class").map(String::as_str),
             Some("q.Thing")
         );
+    }
+
+    #[test]
+    fn receiver_typed_by_an_imported_class_carries_the_import() {
+        // `store: GraphStore` and `d = WatchDaemon()` with the class from another module
+        // (CRG `typed_receiver` / class receiver evidence across files).
+        let r = extract_py(
+            "from .graph import GraphStore\nfrom .daemon import WatchDaemon as WD\n\n\
+             def f(store: GraphStore):\n    store.get_all_nodes()\n\n\
+             def g():\n    d = WD()\n    d.start()\n",
+            "m.py",
+        );
+        for (method, binding, class) in [
+            ("get_all_nodes", ".graph|GraphStore", "GraphStore"),
+            ("start", ".daemon|WatchDaemon", "WD"),
+        ] {
+            let edge = r
+                .edges
+                .iter()
+                .find(|e| e.edge_type == EdgeType::Calls && e.to == method)
+                .unwrap_or_else(|| panic!("no call {method}"));
+            assert_eq!(
+                edge.metadata
+                    .get(crg_shape::PY_IMPORT_ATTR)
+                    .map(String::as_str),
+                Some(binding),
+                "{method}"
+            );
+            assert_eq!(
+                edge.metadata.get("receiver_binding").map(String::as_str),
+                Some("class")
+            );
+            assert_eq!(
+                edge.metadata.get("receiver_class").map(String::as_str),
+                Some(class)
+            );
+            assert!(!edge.metadata.contains_key(crg_shape::UNBOUND_ATTR));
+        }
+    }
+
+    #[test]
+    fn imports_inside_a_function_bind_its_calls() {
+        // CRG reads receiver evidence per function scope, imports in the body included.
+        let r = extract_py(
+            "def f():\n    from . import dsh\n    from .daemon import WatchDaemon\n    \
+             import json as js\n    dsh.with_row()\n    d = WatchDaemon()\n    d.start()\n    \
+             js.loads('1')\n\ndef g():\n    dsh.with_row()\n",
+            "m.py",
+        );
+        let attr = |from: &str, to: &str| {
+            r.edges
+                .iter()
+                .find(|e| {
+                    e.edge_type == EdgeType::Calls
+                        && e.to == to
+                        && r.nodes
+                            .iter()
+                            .any(|n| n.id == e.from && n.name.as_str() == from)
+                })
+                .unwrap_or_else(|| panic!("no call {from} -> {to}"))
+                .metadata
+                .clone()
+        };
+        let py = |m: &std::collections::HashMap<String, String>| {
+            m.get(crg_shape::PY_IMPORT_ATTR).cloned()
+        };
+        assert_eq!(py(&attr("f", "with_row")).as_deref(), Some(".|dsh"));
+        assert_eq!(
+            py(&attr("f", "start")).as_deref(),
+            Some(".daemon|WatchDaemon")
+        );
+        assert_eq!(py(&attr("f", "loads")).as_deref(), Some("json|"));
+        // The import is local to `f`: `g` knows nothing of `dsh`.
+        let g = attr("g", "with_row");
+        assert_eq!(py(&g), None);
+        assert!(g.contains_key(crg_shape::UNBOUND_ATTR));
     }
 
     #[test]

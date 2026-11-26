@@ -68,7 +68,8 @@ code_files = sorted({n.split("::")[0] for n in imp["changed_nodes"]})
 rel_code_files = [strip(f, crg_dir) for f in code_files]
 rimp = run("get_impact_radius", {"files": rel_code_files, "depth": DEPTH, "max_nodes": 1000})
 crg_imp = [strip(q, crg_dir) for q in imp["impacted_nodes"]]
-# Rust `impacted` is the CRG-equivalent set; its separate `tests` list adds one TESTED_BY hop.
+# Rust `impacted` is the CRG-equivalent set; its separate `tests` list stays within depth
+# (the TESTED_BY hop counts as a level, as in CRG), so adding it should not widen the set.
 rust_imp = [rqn(n) for n in rimp["impacted"]]
 rust_imp_tests = rust_imp + [rqn(n) for n in rimp["tests"]]
 trunc = f" CRG truncated={imp['truncated']} total={imp['total_impacted']}; Rust truncated={rimp['truncated']}"
@@ -83,7 +84,7 @@ def outside(qns):
     return [q for q in qns if q.split("::")[0] not in changed]
 
 
-# Rust `affected_files` also lists the changed files themselves; CRG does not.
+# Both sides now leave the changed files out; the filter keeps older binaries comparable.
 rows.append(show("impacted files outside changed files", outside(crg_if), outside(rust_if)))
 
 rfl = run("get_affected_flows", {"base_ref": base, "detail_level": "minimal", "max_flows": 500})

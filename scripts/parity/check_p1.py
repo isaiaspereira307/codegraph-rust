@@ -162,7 +162,10 @@ LIMITS = {
     "changes.crg-synthetic-d1.impacted": 0.995,
     "changes.crg-synthetic-d2.changed_files": 1.000,
     "changes.crg-synthetic-d2.changed_functions": 1.000,
-    "changes.crg-synthetic-d2.impacted": 0.960,
+    # Task 11: 0.960 -> 0.957. Tests reach tools/build.py::run_postprocess (only Rust reaches it:
+    # CRG leaves a function-local `from M import f as _f; _f()` as text) through a local
+    # `import ... as m; m.run_postprocess()` receiver that CRG binds too. See docs/parity/changes.md.
+    "changes.crg-synthetic-d2.impacted": 0.957,
 }
 
 TOLERANCE = 0.0006  # Markdown rounds to three decimals.

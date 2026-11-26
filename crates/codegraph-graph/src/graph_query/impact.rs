@@ -27,9 +27,10 @@ pub struct ImpactRadius {
     pub changed: Vec<NodeReference>,
     /// Transitive dependents of the changed nodes, nearest first.
     pub impacted: Vec<ImpactedNode>,
-    /// Distinct file paths of changed and impacted nodes, sorted.
+    /// Distinct file paths of impacted nodes outside the files holding changed nodes, sorted.
     pub affected_files: Vec<String>,
-    /// Tests that cover a changed or impacted node (TESTED_BY), sorted by name.
+    /// Tests within `depth` hops: TESTED_BY targets of changed nodes and of impacted nodes
+    /// above the last level, sorted by name.
     pub tests: Vec<NodeReference>,
     /// True when `max_nodes` stopped the walk before it ran out of dependents.
     pub truncated: bool,
@@ -104,13 +105,29 @@ impl GraphQuery {
             frontier = found;
         }
 
-        let mut files_out: BTreeSet<String> = BTreeSet::new();
-        for &ix in changed_ix.iter().chain(impacted.iter().map(|(ix, _)| ix)) {
-            files_out.insert(snap.node(ix).file_path.clone());
-        }
+        // Like code-review-graph's `impacted_files`: files reached by the walk, minus the files
+        // that hold the change (those are already in the caller's changed-file list).
+        let changed_files: HashSet<&str> = changed_ix
+            .iter()
+            .map(|&ix| snap.node(ix).file_path.as_str())
+            .collect();
+        let files_out: BTreeSet<String> = impacted
+            .iter()
+            .map(|&(ix, _)| snap.node(ix).file_path.as_str())
+            .filter(|f| !changed_files.contains(f))
+            .map(str::to_string)
+            .collect();
 
+        // The TESTED_BY hop counts against `depth`, as in code-review-graph's impact walk: a
+        // test is reported only when the node it covers sits above the last level.
         let mut tests: BTreeSet<(&str, &str, NodeIndex)> = BTreeSet::new();
-        for &ix in changed_ix.iter().chain(impacted.iter().map(|(ix, _)| ix)) {
+        let covered = changed_ix.iter().copied().chain(
+            impacted
+                .iter()
+                .filter(|&&(_, d)| d < depth)
+                .map(|&(ix, _)| ix),
+        );
+        for ix in covered {
             for t in snap.neighbours(ix, Outgoing, |k| k == "TESTED_BY") {
                 tests.insert((snap.order_key(t).0, snap.order_key(t).1, t));
             }

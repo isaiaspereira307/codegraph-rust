@@ -712,22 +712,24 @@ async fn impact_radius_walks_dependents_files_and_tests() {
     assert_eq!(got, vec![("c3", 1), ("c2", 2)]);
     assert_eq!(radius.changed.len(), 1);
     assert!(!radius.truncated);
-    // c2 is covered by the test, which is also reported.
-    assert_eq!(radius.tests.len(), 1);
-    assert_eq!(radius.tests[0].name, "test_c2");
+    // c2 sits at the last level, so the test covering it is a third hop: not reported (the
+    // TESTED_BY hop counts against the depth, as in code-review-graph).
+    assert!(radius.tests.is_empty());
+    // Only chain.py is touched, and it holds the changed node: no file outside the change.
+    assert!(radius.affected_files.is_empty());
+
+    // One more level and the test of c2 is in reach.
+    let deeper = q.get_impact_radius(&[id(14)], &[], 3, 0).await.unwrap();
+    assert_eq!(deeper.tests.len(), 1);
+    assert_eq!(deeper.tests[0].name, "test_c2");
 
     // Full depth reaches c1 too, and the test that calls c2 is a dependent as well.
     let full = q.get_impact_radius(&[id(14)], &[], 10, 0).await.unwrap();
     assert_eq!(full.impacted.len(), 4);
     assert!(full.impacted.iter().any(|n| n.node.name == "test_c2"));
-    // chain.py plus the test's own file.
-    assert_eq!(full.affected_files.len(), 2);
-    assert!(full.affected_files.iter().any(|f| f.ends_with("chain.py")));
-    assert!(
-        full.affected_files
-            .iter()
-            .any(|f| f.ends_with("test_chain.py"))
-    );
+    // Only the test's own file: chain.py holds the changed node.
+    assert_eq!(full.affected_files.len(), 1);
+    assert!(full.affected_files[0].ends_with("test_chain.py"));
 
     // Changing big.py: its file node set is seeded, and d1 depends on big.
     let by_file = q

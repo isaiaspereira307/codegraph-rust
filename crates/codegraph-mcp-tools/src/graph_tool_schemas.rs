@@ -319,7 +319,8 @@ impl GraphToolSchemas {
             name: "get_impact_radius".to_string(),
             description: "Blast radius of a change: the transitive dependents of the given nodes \
                    or of every node in the given files, grouped by depth, with the affected \
-                   files and the tests that cover them. Give node_ids, files, or both."
+                   files outside the change and the tests within depth (the TESTED_BY hop \
+                   counts as a level). Give node_ids, files, or both."
                 .to_string(),
             parameters: json!({
                 "type": "object",
