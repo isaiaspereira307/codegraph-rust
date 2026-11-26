@@ -119,8 +119,10 @@ resultado e `TESTED_BY` é uma aresta da BFS):
   (`flows.py:detect_entry_points`). A diferença vinha de chamadas que o Rust não ligava, então a
   correção foi no extrator Python: receptor tipado por classe vinda de `from M import C`
   (`store: GraphStore`, `d = WatchDaemon()`) e imports no corpo da função (`from . import dsh`
-  dentro de `def`), que o CRG lê por escopo de função. `GRAPH_SHAPE_VERSION` virou
-  `crg-shape-14`. Também corrigido: indexando por caminho absoluto, métodos não eram achados pelo
+  dentro de `def`). Como no `scan_declarations` do CRG, esses imports valem para o arquivo
+  inteiro (depois dos imports do topo; os da própria função vêm primeiro), e um parâmetro de
+  mesmo nome os esconde. `GRAPH_SHAPE_VERSION` virou
+  `crg-shape-14` (`crg-shape-15` depois da revisão). Também corrigido: indexando por caminho absoluto, métodos não eram achados pelo
   nome que o catálogo reconstrói (`/abs/pkg/b.py::Thing.go`), o que derrubava
   `python_submodule_imports_and_import_bound_calls_follow_crg`.
 
@@ -131,6 +133,7 @@ resultado e `TESTED_BY` é uma aresta da BFS):
 | base `27cb501` | 268 | 167 | 162 | 0.593 | 0.935 / 0.182 | 0.900 |
 | receptor por classe importada | 215 | 167 | 162 | 0.736 | 0.971 / 0.250 | 0.900 |
 | + imports dentro da função | 199 | 167 | 162 | 0.794 | 0.975 / 0.250 | 0.907 |
+| + escopo de arquivo e sombra por parâmetro (revisão) | 199 | 167 | 162 | 0.794 | 0.975 / 0.250 | 0.907 |
 
 O alvo do plano (diferença ≤ 5%) **não foi atingido**. Os 37 entry points só no Rust:
 

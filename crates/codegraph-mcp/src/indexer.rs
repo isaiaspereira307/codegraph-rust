@@ -47,7 +47,8 @@ use std::collections::HashMap;
 /// crg-shape-13: `qualified_name` is canonical across path forms.
 /// crg-shape-14: Python receivers typed by a `from`-imported class and imports inside a
 /// function body bind through the import; methods resolve by name in absolute-path indexes.
-pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-14";
+/// crg-shape-15: function-body Python imports bind file-wide; parameters shadow imports.
+pub const GRAPH_SHAPE_VERSION: &str = "crg-shape-15";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileChangeType {

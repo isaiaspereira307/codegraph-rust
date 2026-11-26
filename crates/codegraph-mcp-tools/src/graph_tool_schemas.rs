@@ -263,9 +263,9 @@ impl GraphToolSchemas {
                    changed nodes ordered by risk_score (0-1: flows, cross-community callers, \
                    missing tests, security-sensitive names, callers and file churn, each with \
                    its risk_signals), the overall risk_score and risk (high > 0.7, medium > \
-                   0.4, else low), the transitive impact by depth, affected files, covering \
-                   tests, and a snippet of each changed node. Use it instead of reading the \
-                   changed files."
+                   0.4, else low), the transitive impact by depth, affected files outside the \
+                   changed files, the tests within depth, and a snippet of each changed node. \
+                   Use it instead of reading the changed files."
                 .to_string(),
             parameters: review_parameters(),
         }
@@ -319,8 +319,8 @@ impl GraphToolSchemas {
             name: "get_impact_radius".to_string(),
             description: "Blast radius of a change: the transitive dependents of the given nodes \
                    or of every node in the given files, grouped by depth, with the affected \
-                   files outside the change and the tests within depth (the TESTED_BY hop \
-                   counts as a level). Give node_ids, files, or both."
+                   files outside the files holding a changed node and the tests within depth \
+                   (the TESTED_BY hop counts as a level). Give node_ids, files, or both."
                 .to_string(),
             parameters: json!({
                 "type": "object",

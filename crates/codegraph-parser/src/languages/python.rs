@@ -76,6 +76,10 @@ struct FileScope {
     from_imports: HashMap<String, (String, String)>,
     /// `import a.b as c`: `c` -> `a.b`; plain `import a.b`: `a` -> `a`.
     module_aliases: HashMap<String, String>,
+    /// Imports inside function bodies anywhere in the file. CRG's `scan_declarations` folds
+    /// them into the file-wide bindings; they rank after the top-level ones here.
+    nested_from_imports: HashMap<String, (String, String)>,
+    nested_module_aliases: HashMap<String, String>,
     /// Unshadowed local names of `typing.TYPE_CHECKING`.
     type_checking: HashSet<String>,
     /// Unshadowed local names of the `typing` module (`t.TYPE_CHECKING`).
@@ -109,6 +113,13 @@ impl FileScope {
                 _ => {}
             }
         }
+        collect_nested_imports(
+            root,
+            content,
+            false,
+            &mut scope.nested_from_imports,
+            &mut scope.nested_module_aliases,
+        );
         scope.collect_type_checking(root, content);
         scope.collect_class_chains(root, content, None);
         scope
@@ -201,6 +212,8 @@ struct Frame {
     /// Imports in this function's body, shaped like `FileScope`'s.
     from_imports: HashMap<String, (String, String)>,
     module_aliases: HashMap<String, String>,
+    /// This function's parameter names: they shadow any import of the same name.
+    params: HashSet<String>,
 }
 
 struct PythonCollector<'a> {
@@ -417,8 +430,10 @@ impl<'a> PythonCollector<'a> {
             }
         }
         let mut types = HashMap::new();
+        let mut params = HashSet::new();
         if let Some(parameters) = node.child_by_field_name("parameters") {
-            parameter_names(&parameters, self.content, &mut bound);
+            parameter_names(&parameters, self.content, &mut params);
+            bound.extend(params.iter().cloned());
             typed_parameter_types(&parameters, self.content, &mut types);
         }
         let (type_checking, typing_modules) = self.scoped_type_checking(&bound);
@@ -430,6 +445,7 @@ impl<'a> PythonCollector<'a> {
             types,
             from_imports,
             module_aliases,
+            params,
         });
         self.walk_children(node);
         self.frames.pop();
@@ -483,6 +499,7 @@ impl<'a> PythonCollector<'a> {
             types: HashMap::new(),
             from_imports: HashMap::new(),
             module_aliases: HashMap::new(),
+            params: HashSet::new(),
         });
         let chain = match self.class_chains.last() {
             Some(outer) => format!("{outer}.{name}"),
@@ -699,23 +716,49 @@ impl<'a> PythonCollector<'a> {
         }
     }
 
-    /// `from` import bound to `name`: the innermost function's own imports first, then the
-    /// file's.
+    /// `from` import bound to `name`: the enclosing functions' own imports (innermost
+    /// first), then the file's top level, then imports in any other function body (CRG binds
+    /// those file-wide). A parameter of an enclosing function named `name` shadows them all.
     fn import_binding(&self, name: &str) -> Option<&(String, String)> {
-        self.frames
-            .iter()
-            .rev()
-            .find_map(|f| f.from_imports.get(name))
-            .or_else(|| self.scope.from_imports.get(name))
+        self.scoped(
+            name,
+            |f| f.from_imports.get(name),
+            |s| {
+                s.from_imports
+                    .get(name)
+                    .or_else(|| s.nested_from_imports.get(name))
+            },
+        )
     }
 
-    /// Module bound to `name` by `import`, function scopes first, then the file.
+    /// Module bound to `name` by `import`, looked up like `import_binding`.
     fn module_alias(&self, name: &str) -> Option<&String> {
-        self.frames
-            .iter()
-            .rev()
-            .find_map(|f| f.module_aliases.get(name))
-            .or_else(|| self.scope.module_aliases.get(name))
+        self.scoped(
+            name,
+            |f| f.module_aliases.get(name),
+            |s| {
+                s.module_aliases
+                    .get(name)
+                    .or_else(|| s.nested_module_aliases.get(name))
+            },
+        )
+    }
+
+    fn scoped<'s, T>(
+        &'s self,
+        name: &str,
+        frame: impl Fn(&'s Frame) -> Option<&'s T>,
+        file: impl Fn(&'s FileScope) -> Option<&'s T>,
+    ) -> Option<&'s T> {
+        for f in self.frames.iter().rev() {
+            if f.params.contains(name) {
+                return None;
+            }
+            if let Some(hit) = frame(f) {
+                return Some(hit);
+            }
+        }
+        file(&self.scope)
     }
 
     /// `name()`: a `def` of an enclosing function, then a top-level def/class, then a name
@@ -1017,8 +1060,30 @@ fn record_import(
     }
 }
 
-/// Imports anywhere in a function body, outside nested `def`s, classes and lambdas (CRG
-/// reads receiver evidence per function scope, so a local import binds that function's calls).
+/// Imports in every function body of the file, nested ones included (`in_function` is true
+/// below a `def`).
+fn collect_nested_imports(
+    node: Node,
+    content: &str,
+    in_function: bool,
+    from_imports: &mut HashMap<String, (String, String)>,
+    module_aliases: &mut HashMap<String, String>,
+) {
+    match node.kind() {
+        "import_statement" | "import_from_statement" if in_function => {
+            record_import(&node, content, from_imports, module_aliases)
+        }
+        _ => {
+            let inside = in_function || node.kind() == "function_definition";
+            for child in named_children(&node) {
+                collect_nested_imports(child, content, inside, from_imports, module_aliases);
+            }
+        }
+    }
+}
+
+/// Imports anywhere in a function body, outside nested `def`s, classes and lambdas: they bind
+/// that function's own calls first.
 fn local_imports(
     node: Node,
     content: &str,
@@ -1695,11 +1760,14 @@ mod tests {
 
     #[test]
     fn imports_inside_a_function_bind_its_calls() {
-        // CRG reads receiver evidence per function scope, imports in the body included.
+        // CRG's `scan_declarations` collects imports from every function body into the
+        // file-wide bindings; only a function's own parameters shadow them.
         let r = extract_py(
             "def f():\n    from . import dsh\n    from .daemon import WatchDaemon\n    \
              import json as js\n    dsh.with_row()\n    d = WatchDaemon()\n    d.start()\n    \
-             js.loads('1')\n\ndef g():\n    dsh.with_row()\n",
+             js.loads('1')\n\ndef g():\n    dsh.with_row()\n\n\
+             def h(dsh):\n    dsh.with_row()\n\n\
+             def outer():\n    from . import svc\n    def inner(svc):\n        svc.go()\n",
             "m.py",
         );
         let attr = |from: &str, to: &str| {
@@ -1725,10 +1793,14 @@ mod tests {
             Some(".daemon|WatchDaemon")
         );
         assert_eq!(py(&attr("f", "loads")).as_deref(), Some("json|"));
-        // The import is local to `f`: `g` knows nothing of `dsh`.
-        let g = attr("g", "with_row");
-        assert_eq!(py(&g), None);
-        assert!(g.contains_key(crg_shape::UNBOUND_ATTR));
+        // Like CRG, `f`'s import binds `g` too (file-wide, not Python's runtime scoping).
+        assert_eq!(py(&attr("g", "with_row")).as_deref(), Some(".|dsh"));
+        // A parameter of the same name shadows the import (CRG pops parameter names).
+        for (from, to) in [("h", "with_row"), ("inner", "go")] {
+            let m = attr(from, to);
+            assert_eq!(py(&m), None, "{from}");
+            assert!(m.contains_key(crg_shape::UNBOUND_ATTR), "{from}");
+        }
     }
 
     #[test]
