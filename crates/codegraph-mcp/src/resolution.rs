@@ -4,6 +4,9 @@
 use crate::module_index::ModuleIndex;
 use crate::rust_crates::RustCrates;
 use codegraph_core::{CodeNode, EdgeRelationship, EdgeType, NodeId, NodeType};
+use codegraph_parser::languages::php::{
+    PHP_NAMESPACE_ATTR, PHP_SAME_FILE_ATTR, PHP_SCOPE_ATTR, PHP_USE_KIND_ATTR,
+};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -48,6 +51,12 @@ pub(crate) struct SymbolCatalog {
     csharp_file_namespaces: HashMap<String, String>,
     /// Per C# file, the namespaces its `using` directives name.
     csharp_imports: HashMap<String, HashSet<String>>,
+    /// PHP methods by case-folded `(class, method)`, for receiver and `Class::` calls.
+    php_methods: HashMap<(String, String), Vec<NodeId>>,
+    /// Case-folded namespaces declared in each PHP file.
+    php_file_namespaces: HashMap<String, HashSet<String>>,
+    /// Per PHP file, the case-folded class names its `use` clauses import.
+    php_imports: HashMap<String, HashSet<String>>,
     /// Indexed `.go` files directly inside each package directory.
     go_package_files: HashMap<String, Vec<String>>,
     /// Project root, to compare relative symbol paths with absolute package directories.
@@ -186,6 +195,9 @@ impl SymbolCatalog {
             csharp_types: HashMap::new(),
             csharp_file_namespaces: HashMap::new(),
             csharp_imports: HashMap::new(),
+            php_methods: HashMap::new(),
+            php_file_namespaces: HashMap::new(),
+            php_imports: HashMap::new(),
             go_package_files: HashMap::new(),
             go_root: None,
         };
@@ -216,6 +228,9 @@ impl SymbolCatalog {
                 if !ids.contains(&node.id) {
                     ids.push(node.id);
                 }
+            }
+            if node.location.file_path.ends_with(".php") {
+                catalog.index_php(node);
             }
             if let Some(namespace) = node.metadata.attributes.get("csharp_namespace") {
                 let file = &node.location.file_path;
@@ -433,6 +448,17 @@ impl SymbolCatalog {
                     .or_default()
                     .insert(edge.to.clone());
             }
+            if importer.file.ends_with(".php")
+                && edge.metadata.get("import_type").map(String::as_str) == Some("php_use")
+                && !edge.metadata.contains_key(PHP_USE_KIND_ATTR)
+                && let Some(class) = edge.to.rsplit('\\').next()
+                && !class.is_empty()
+            {
+                self.php_imports
+                    .entry(importer.file.clone())
+                    .or_default()
+                    .insert(class.to_lowercase());
+            }
             if importer.file.ends_with(".java")
                 && !edge.metadata.contains_key("static")
                 && !edge.metadata.contains_key("wildcard")
@@ -572,6 +598,135 @@ impl SymbolCatalog {
             })
             .collect();
         (candidates.len() == 1).then(|| candidates[0])
+    }
+
+    /// PHP class/method and namespace evidence of one node.
+    fn index_php(&mut self, node: &CodeNode) {
+        let file = &node.location.file_path;
+        if let Some(namespace) = node.metadata.attributes.get(PHP_NAMESPACE_ATTR) {
+            self.php_file_namespaces
+                .entry(file.clone())
+                .or_default()
+                .insert(namespace.to_lowercase());
+        }
+        let is_function = matches!(&node.node_type, Some(NodeType::Function))
+            || matches!(&node.node_type, Some(NodeType::Other(kind)) if kind == "Test");
+        if !is_function {
+            return;
+        }
+        let Some(symbol) = self.symbols.get(&node.id) else {
+            return;
+        };
+        let Some(member) = symbol.qualified.strip_prefix(&format!("{file}::")) else {
+            return;
+        };
+        let Some((class, method)) = member.rsplit_once('.') else {
+            return;
+        };
+        self.php_methods
+            .entry((class.to_lowercase(), method.to_lowercase()))
+            .or_default()
+            .push(node.id);
+    }
+
+    /// A PHP call with a recorded class scope, as code-review-graph binds it: `self::`/
+    /// `static::` only to the enclosing class in the same file; `Class::m()` to the class file
+    /// its name resolves to (`_resolve_php_scoped_calls`); otherwise, like the graph-wide
+    /// scoped resolver, the single `Class.m` in the graph when the caller's file backs it (same
+    /// file, imported file, `use` of the class, or its namespace).
+    pub(crate) fn php_call_target(&self, edge: &EdgeRelationship) -> Option<NodeId> {
+        if edge.edge_type != EdgeType::Calls {
+            return None;
+        }
+        let scope = edge.metadata.get(PHP_SCOPE_ATTR)?;
+        let caller = self.symbols.get(&edge.from)?;
+        if !caller.file.ends_with(".php") {
+            return None;
+        }
+        let (written, method) = match edge.to.rsplit_once("::") {
+            Some((written, method)) => (written, method),
+            None => (scope.as_str(), edge.to.as_str()),
+        };
+        let class = scope.rsplit('\\').next().unwrap_or(scope);
+        let mut candidates = self
+            .php_methods
+            .get(&(class.to_lowercase(), method.to_lowercase()))?
+            .clone();
+        candidates.sort();
+        candidates.dedup();
+        let file_of = |id: &NodeId| self.symbols.get(id).map(|s| s.file.as_str());
+        let unique_in = |file: &str| {
+            let mut found = candidates.iter().filter(|id| file_of(id) == Some(file));
+            match (found.next(), found.next()) {
+                (Some(id), None) => Some(*id),
+                _ => None,
+            }
+        };
+        if edge.metadata.contains_key(PHP_SAME_FILE_ATTR) {
+            return unique_in(&caller.file);
+        }
+        if edge.to.contains("::") {
+            if !written.contains('\\')
+                && let Some(id) = unique_in(&caller.file)
+            {
+                return Some(id);
+            }
+            if let Some(file) = self.modules.resolve(&caller.file, scope)
+                && let Some(id) = unique_in(file)
+            {
+                return Some(id);
+            }
+        }
+        let [candidate] = candidates.as_slice() else {
+            return None;
+        };
+        let candidate_file = file_of(candidate)?;
+        self.php_backed(candidate_file, &caller.file, class, written)
+            .then_some(*candidate)
+    }
+
+    /// CRG `backed` for PHP: does the caller's file say the candidate's class is the one meant?
+    fn php_backed(
+        &self,
+        candidate_file: &str,
+        caller_file: &str,
+        class: &str,
+        scope: &str,
+    ) -> bool {
+        if candidate_file == caller_file
+            || self
+                .imported_files
+                .get(caller_file)
+                .is_some_and(|files| files.contains(candidate_file))
+            || self
+                .php_imports
+                .get(caller_file)
+                .is_some_and(|classes| classes.contains(&class.to_lowercase()))
+        {
+            return true;
+        }
+        let empty = HashSet::new();
+        let theirs = self
+            .php_file_namespaces
+            .get(candidate_file)
+            .unwrap_or(&empty);
+        let ours = self.php_file_namespaces.get(caller_file).unwrap_or(&empty);
+        let normalized = scope.trim_matches('\\');
+        let written = normalized
+            .rsplit_once('\\')
+            .map(|(namespace, _)| namespace.to_lowercase())
+            .unwrap_or_default();
+        if written.is_empty() {
+            return theirs.intersection(ours).next().is_some()
+                || (theirs.is_empty() && ours.is_empty());
+        }
+        if scope.starts_with('\\') {
+            return theirs.contains(&written);
+        }
+        theirs.contains(&written)
+            || ours
+                .iter()
+                .any(|ns| theirs.contains(&format!("{ns}\\{written}")))
     }
 
     /// A C# call on a receiver whose parameter type was recorded binds to that type's method
@@ -903,6 +1058,43 @@ mod tests {
             metadata: Default::default(),
             span: None,
         }
+    }
+
+    #[test]
+    fn php_constructed_receiver_binds_only_with_namespace_evidence() {
+        let php = |file: &str, qualified: &str, namespace: &str| {
+            let mut node = node(file, qualified.rsplit(['.', ':']).next().unwrap());
+            node.metadata
+                .attributes
+                .insert("qualified_name".into(), format!("{file}::{qualified}"));
+            node.metadata
+                .attributes
+                .insert(PHP_NAMESPACE_ATTR.into(), namespace.into());
+            node
+        };
+        let caller = php("tests/AppTest.php", "AppTest.testRun", "Demo\\Tests");
+        let target = php("Demo/Helper.php", "Helper.twice", "Demo");
+        let local = php("tests/AppTest.php", "AppTest.offset", "Demo\\Tests");
+        let catalog = SymbolCatalog::new(&[caller.clone(), target.clone(), local.clone()]);
+        let call = |to: &str, scope: &str| {
+            let mut call = edge(caller.id, to);
+            call.metadata.insert(PHP_SCOPE_ATTR.into(), scope.into());
+            call
+        };
+        assert_eq!(
+            catalog.php_call_target(&call("twice", "Demo\\Helper")),
+            Some(target.id)
+        );
+        // The only `Helper.twice` in the graph, but nothing says the caller means it.
+        assert_eq!(
+            catalog.php_call_target(&call("twice", "Vendor\\Helper")),
+            None
+        );
+        assert_eq!(catalog.php_call_target(&call("twice", "Helper")), None);
+        let mut own = call("self::offset", "AppTest");
+        own.metadata
+            .insert(PHP_SAME_FILE_ATTR.into(), "true".into());
+        assert_eq!(catalog.php_call_target(&own), Some(local.id));
     }
 
     #[test]

@@ -26,6 +26,7 @@ enum ImportLanguage {
     Rust,
     Java,
     Ruby,
+    Php,
 }
 
 fn language(importer: &str) -> Option<ImportLanguage> {
@@ -38,6 +39,7 @@ fn language(importer: &str) -> Option<ImportLanguage> {
         "rs" => ImportLanguage::Rust,
         "java" => ImportLanguage::Java,
         "rb" => ImportLanguage::Ruby,
+        "php" => ImportLanguage::Php,
         _ => return None,
     })
 }
@@ -252,6 +254,51 @@ pub(crate) struct ModuleIndex {
     python_evidence: RefCell<HashMap<String, Arc<PythonModuleEvidence>>>,
     /// Files currently being followed through `sys.modules`, to stop shim cycles.
     shim_stack: RefCell<Vec<String>>,
+    /// PSR-4 maps of each directory's `composer.json` (`None`: the directory has none).
+    php_composer: RefCell<HashMap<String, Option<Psr4Mappings>>>,
+}
+
+/// `(namespace prefix, destination directories)`, longest prefix first.
+type Psr4Mappings = Arc<Vec<(String, Vec<String>)>>;
+
+/// Reads the PSR-4 maps of `<dir>composer.json`; `None` when the file is missing, and an
+/// empty map when it is unreadable or has none (the nearest file still decides).
+fn read_psr4(dir: &str) -> Option<Psr4Mappings> {
+    let text = std::fs::read_to_string(format!("{dir}composer.json")).ok()?;
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Some(Arc::new(Vec::new()));
+    };
+    let mut combined: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for section in ["autoload", "autoload-dev"] {
+        let Some(psr4) = value
+            .get(section)
+            .and_then(|section| section.get("psr-4"))
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        for (raw_prefix, raw_paths) in psr4 {
+            let prefix = raw_prefix.trim_matches('\\').to_string();
+            let paths: Vec<&str> = match raw_paths {
+                Value::String(path) => vec![path.as_str()],
+                Value::Array(paths) => paths.iter().filter_map(Value::as_str).collect(),
+                _ => Vec::new(),
+            };
+            let destinations = combined.entry(prefix).or_default();
+            for path in paths {
+                let destination = normalize(&join_path(dir.trim_end_matches('/'), path));
+                if !destinations.contains(&destination) {
+                    destinations.push(destination);
+                }
+            }
+        }
+    }
+    let mut mappings: Vec<_> = combined
+        .into_iter()
+        .filter(|(_, destinations)| !destinations.is_empty())
+        .collect();
+    mappings.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+    Some(Arc::new(mappings))
 }
 
 /// Directories containing a readable `package.json`, found by walking up from indexed files.
@@ -444,6 +491,7 @@ impl ModuleIndex {
             go_root: None,
             python_evidence: RefCell::new(HashMap::new()),
             shim_stack: RefCell::new(Vec::new()),
+            php_composer: RefCell::new(HashMap::new()),
         }
     }
 
@@ -556,7 +604,82 @@ impl ModuleIndex {
             ImportLanguage::Rust => self.rust(importer, text),
             ImportLanguage::Java => self.java(importer, text),
             ImportLanguage::Ruby => self.ruby(text),
+            ImportLanguage::Php => self.php(importer, text),
         }
+    }
+
+    /// CRG's PHP module resolution: a literal include path relative to the importer; otherwise
+    /// a class name through the nearest `composer.json` PSR-4 map, then as a namespace path
+    /// (`A\B` -> `A/B.php`) from the importer's directory upward.
+    fn php(&self, importer: &str, text: &str) -> Option<&str> {
+        let importer_dir = PathParts::new(importer).parent();
+        if text.contains('/') || text.ends_with(".php") {
+            let target = if text.starts_with('/') {
+                text.to_string()
+            } else {
+                importer_dir.join(text)
+            };
+            return self.file(&target);
+        }
+        let module = text.trim_start_matches('\\');
+        if module.is_empty() {
+            return None;
+        }
+        if let Some(file) = self.php_composer(&importer_dir, module) {
+            return Some(file);
+        }
+        let relative = format!("{}.php", module.replace('\\', "/"));
+        let mut dir = importer_dir;
+        loop {
+            if let Some(file) = self.file(&dir.join(&relative)) {
+                return Some(file);
+            }
+            dir.segments.pop()?;
+        }
+    }
+
+    /// The PSR-4 maps of the `composer.json` nearest above `dir` (`autoload` and
+    /// `autoload-dev`), longest prefix first, like CRG's `_read_php_composer_psr4`.
+    fn php_composer(&self, dir: &PathParts, module: &str) -> Option<&str> {
+        let mut dir = dir.clone();
+        let mappings = loop {
+            let key = dir.join("");
+            let cached = self.php_composer.borrow().get(&key).cloned();
+            let mappings = match cached {
+                Some(mappings) => mappings,
+                None => {
+                    let mappings = read_psr4(&key);
+                    self.php_composer.borrow_mut().insert(key, mappings.clone());
+                    mappings
+                }
+            };
+            if let Some(mappings) = mappings {
+                break mappings;
+            }
+            dir.segments.pop()?;
+        };
+        for (prefix, destinations) in mappings.iter() {
+            let relative = if prefix.is_empty() {
+                module
+            } else if let Some(rest) = module
+                .strip_prefix(prefix.as_str())
+                .and_then(|rest| rest.strip_prefix('\\'))
+            {
+                rest
+            } else {
+                continue;
+            };
+            if relative.is_empty() {
+                continue;
+            }
+            let relative = format!("{}.php", relative.replace('\\', "/"));
+            for destination in destinations {
+                if let Some(file) = self.file(&join_path(destination, &relative)) {
+                    return Some(file);
+                }
+            }
+        }
+        None
     }
 
     /// Ruby `require_relative` targets are resolved by the extractor (relative to the
@@ -1087,6 +1210,42 @@ mod tests {
             Some(paths[2].as_str())
         );
         assert_eq!(index.resolve(&paths[3], "unknown-package"), None);
+    }
+
+    #[test]
+    fn php_imports_resolve_include_paths_composer_psr4_and_namespace_paths() {
+        let (_dir, paths) = py_repo(&[
+            (
+                "composer.json",
+                r#"{"autoload":{"psr-4":{"App\\":"src/","App\\Admin\\":["admin/"]}}}"#,
+            ),
+            ("src/Models/User.php", "<?php\n"),
+            ("admin/Panel.php", "<?php\n"),
+            ("Lib/Tool.php", "<?php\n"),
+            ("src/Http/Controller.php", "<?php\n"),
+        ]);
+        let index = ModuleIndex::new(paths.iter().map(String::as_str));
+        let importer = paths[4].as_str();
+        assert_eq!(
+            index.resolve(importer, "App\\Models\\User"),
+            Some(paths[1].as_str())
+        );
+        // The longest PSR-4 prefix wins.
+        assert_eq!(
+            index.resolve(importer, "App\\Admin\\Panel"),
+            Some(paths[2].as_str())
+        );
+        // Outside the PSR-4 map, the namespace path is searched upward from the importer.
+        assert_eq!(
+            index.resolve(importer, "Lib\\Tool"),
+            Some(paths[3].as_str())
+        );
+        assert_eq!(
+            index.resolve(importer, "../Models/User.php"),
+            Some(paths[1].as_str())
+        );
+        assert_eq!(index.resolve(importer, "App\\Missing"), None);
+        assert_eq!(index.resolve(importer, "Exception"), None);
     }
 
     #[test]

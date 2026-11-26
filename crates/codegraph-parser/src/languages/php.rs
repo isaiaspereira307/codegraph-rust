@@ -1,71 +1,62 @@
+// ABOUTME: PHP extractor shaped like code-review-graph: classes/interfaces/traits/enums as Class,
+// ABOUTME: `use`/include imports, call names and constructed-receiver scopes for resolution.
+
+use super::crg_shape;
+use super::test_detection;
 use codegraph_core::{
     CodeNode, EdgeRelationship, EdgeType, ExtractionResult, Language, Location, NodeId, NodeType,
     Span,
 };
 use std::collections::HashMap;
-use tree_sitter::{Node, Tree, TreeCursor};
+use tree_sitter::{Node, Tree};
 
-/// Advanced PHP AST extractor for web development intelligence.
+/// Set on a PHP call edge: the class scope its receiver or `Scope::` names, as code-review-graph
+/// records it (`receiver_scope`, or the resolved `Class::method` scope). The indexer binds the
+/// call to that class's method only with file or namespace evidence.
+pub const PHP_SCOPE_ATTR: &str = "php_scope";
+/// Set with [`PHP_SCOPE_ATTR`] when the scope is `self`/`static`: only the enclosing class in
+/// the caller's own file may answer.
+pub const PHP_SAME_FILE_ATTR: &str = "php_same_file";
+/// Set on PHP class and function nodes: the namespace declared around them.
+pub const PHP_NAMESPACE_ATTR: &str = "php_namespace";
+/// Set on PHP `use` import edges that import a function or constant, not a class.
+pub const PHP_USE_KIND_ATTR: &str = "php_use_kind";
+
+/// PHP extractor.
 ///
-/// Extracts:
-/// - classes, interfaces, traits, enums (PHP 8.1+)
-/// - functions, methods, properties, constants
-/// - namespace organization and use statements
-/// - Laravel/Symfony framework patterns
-/// - dynamic property access and magic methods
-/// - closures and anonymous functions
-/// - array/object patterns and type hints
-///
-/// Notes:
-/// - Optimized for modern PHP (7.4+, 8.x) patterns
-/// - Captures Laravel/Symfony MVC patterns
-/// - Handles dynamic typing and magic methods
-/// - Understands Composer autoloading patterns
+/// Extracts classes, interfaces, traits and enums (all `Class`, like code-review-graph),
+/// functions and methods (PHPUnit `test*` methods in test files, `@test` docblocks and
+/// `#[Test]` attributes become tests), `use` and literal include imports, and calls:
+/// functions, methods, `Scope::method` and `new Class`.
 pub struct PhpExtractor;
 
 #[derive(Default, Clone)]
 struct PhpContext {
-    namespace_path: Vec<String>,
     current_class: Option<String>,
-    current_trait: Option<String>,
-    use_statements: Vec<String>,
+    current_function: Option<NodeId>,
     is_framework_file: bool,
 }
 
 impl PhpExtractor {
     pub fn extract(tree: &Tree, content: &str, file_path: &str) -> Vec<CodeNode> {
-        let mut collector = PhpCollector::new(content, file_path);
-        let mut cursor = tree.walk();
-
-        // Detect framework patterns from file structure
-        let is_framework = file_path.contains("/app/")
-            || file_path.contains("/src/")
-            || file_path.contains("Controller.php")
-            || file_path.contains("Model.php");
-
-        let mut ctx = PhpContext::default();
-        ctx.is_framework_file = is_framework;
-
-        collector.walk(&mut cursor, ctx);
-        collector.into_nodes()
+        Self::extract_with_edges(tree, content, file_path).nodes
     }
 
     /// Unified extraction of nodes AND edges in single AST traversal
     pub fn extract_with_edges(tree: &Tree, content: &str, file_path: &str) -> ExtractionResult {
         let mut collector = PhpCollector::new(content, file_path);
-        let mut cursor = tree.walk();
-
-        // Detect framework patterns from file structure
-        let is_framework = file_path.contains("/app/")
-            || file_path.contains("/src/")
-            || file_path.contains("Controller.php")
-            || file_path.contains("Model.php");
-
-        let mut ctx = PhpContext::default();
-        ctx.is_framework_file = is_framework;
-
-        collector.walk(&mut cursor, ctx);
-        collector.into_result()
+        let ctx = PhpContext {
+            is_framework_file: file_path.contains("/app/")
+                || file_path.contains("/src/")
+                || file_path.contains("Controller.php")
+                || file_path.contains("Model.php"),
+            ..PhpContext::default()
+        };
+        collector.walk(tree.root_node(), &ctx);
+        ExtractionResult {
+            nodes: collector.nodes,
+            edges: collector.edges,
+        }
     }
 }
 
@@ -91,10 +82,43 @@ impl super::LanguageExtractor for PhpExtractor {
 struct PhpCollector<'a> {
     content: &'a str,
     file_path: &'a str,
+    is_test_file: bool,
     nodes: Vec<CodeNode>,
     edges: Vec<EdgeRelationship>,
-    current_function_id: Option<NodeId>,
-    _current_class_id: Option<NodeId>,
+    /// Namespace in effect (`namespace A\B;` applies to the statements after it).
+    namespace: String,
+    /// Class `use` aliases of the current namespace: case-folded local name → qualified name.
+    imports: HashMap<String, String>,
+    /// `$variable` → the class text of the `new` last assigned to it in this scope.
+    bindings: HashMap<String, String>,
+}
+
+/// CRG `_php_resolve_class_reference`: an absolute name as written, an imported head through
+/// its alias, otherwise relative to the current namespace.
+fn resolve_class_reference(
+    reference: &str,
+    namespace: &str,
+    imports: &HashMap<String, String>,
+) -> String {
+    let normalized = reference.trim_matches('\\');
+    if reference.starts_with('\\') {
+        return normalized.to_string();
+    }
+    let (head, tail) = match normalized.split_once('\\') {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (normalized, None),
+    };
+    if let Some(imported) = imports.get(&head.to_lowercase()) {
+        return match tail {
+            Some(tail) => format!("{imported}\\{tail}"),
+            None => imported.clone(),
+        };
+    }
+    if namespace.is_empty() {
+        normalized.to_string()
+    } else {
+        format!("{namespace}\\{normalized}")
+    }
 }
 
 impl<'a> PhpCollector<'a> {
@@ -102,21 +126,12 @@ impl<'a> PhpCollector<'a> {
         Self {
             content,
             file_path,
+            is_test_file: test_detection::is_test_file(&crg_shape::default_rel_path(file_path)),
             nodes: Vec::new(),
             edges: Vec::new(),
-            current_function_id: None,
-            _current_class_id: None,
-        }
-    }
-
-    fn into_nodes(self) -> Vec<CodeNode> {
-        self.nodes
-    }
-
-    fn into_result(self) -> ExtractionResult {
-        ExtractionResult {
-            nodes: self.nodes,
-            edges: self.edges,
+            namespace: String::new(),
+            imports: HashMap::new(),
+            bindings: HashMap::new(),
         }
     }
 
@@ -127,304 +142,493 @@ impl<'a> PhpCollector<'a> {
         }
     }
 
-    fn walk(&mut self, cursor: &mut TreeCursor, mut ctx: PhpContext) {
-        let node = cursor.node();
+    fn walk_children(&mut self, node: Node, ctx: &PhpContext) {
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for child in children {
+            self.walk(child, ctx);
+        }
+    }
 
+    fn walk(&mut self, node: Node, ctx: &PhpContext) {
         match node.kind() {
-            // PHP Namespaces
             "namespace_definition" => {
-                if let Some(name) = self.child_text_by_field(node, "name") {
-                    let loc = self.location(&node);
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Module),
-                        Some(Language::Php),
-                        loc,
-                    )
-                    .with_content(self.node_text(&node));
-
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "namespace".into());
-                    self.nodes.push(code);
-                    ctx.namespace_path.push(name);
-                }
-            }
-
-            // PHP Classes
-            "class_declaration" => {
-                if let Some(name) = self.child_text_by_field(node, "name") {
-                    let loc = self.location(&node);
-                    let content_text = self.node_text(&node);
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Class),
-                        Some(Language::Php),
-                        loc,
-                    )
-                    .with_content(content_text.clone());
-
-                    // Detect extends/implements
-                    if let Some(base_clause) = self.child_text_by_field(node, "base_clause") {
-                        code.metadata
-                            .attributes
-                            .insert("inheritance".into(), base_clause);
+                let name = self
+                    .child_text_by_field(node, "name")
+                    .map(|name| name.trim_matches('\\').to_string())
+                    .unwrap_or_default();
+                match node.child_by_field_name("body") {
+                    Some(body) => {
+                        let saved_namespace = std::mem::replace(&mut self.namespace, name);
+                        let saved_imports = std::mem::take(&mut self.imports);
+                        self.walk(body, ctx);
+                        self.namespace = saved_namespace;
+                        self.imports = saved_imports;
                     }
-
-                    // Detect Laravel patterns
-                    if ctx.is_framework_file {
-                        if name.ends_with("Controller") {
-                            code.metadata
-                                .attributes
-                                .insert("laravel_pattern".into(), "controller".into());
-                        } else if content_text.contains("extends Model") {
-                            code.metadata
-                                .attributes
-                                .insert("laravel_pattern".into(), "model".into());
-                        } else if content_text.contains("extends Migration") {
-                            code.metadata
-                                .attributes
-                                .insert("laravel_pattern".into(), "migration".into());
-                        }
+                    None => {
+                        self.namespace = name;
+                        self.imports.clear();
                     }
-
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "class".into());
-                    self.nodes.push(code);
-                    ctx.current_class = Some(name);
                 }
             }
 
-            // PHP Interfaces
-            "interface_declaration" => {
-                if let Some(name) = self.child_text_by_field(node, "name") {
-                    let loc = self.location(&node);
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Interface),
-                        Some(Language::Php),
-                        loc,
-                    )
-                    .with_content(self.node_text(&node));
+            "namespace_use_declaration" => self.use_declaration(node),
 
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "interface".into());
-                    self.nodes.push(code);
-                }
+            "include_expression"
+            | "include_once_expression"
+            | "require_expression"
+            | "require_once_expression" => {
+                self.include(node);
+                self.walk_children(node, ctx);
             }
 
-            // PHP Traits
-            "trait_declaration" => {
-                if let Some(name) = self.child_text_by_field(node, "name") {
-                    let loc = self.location(&node);
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Trait),
-                        Some(Language::Php),
-                        loc,
-                    )
-                    .with_content(self.node_text(&node));
-
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "trait".into());
-                    self.nodes.push(code);
-                    ctx.current_trait = Some(name);
-                }
+            "class_declaration"
+            | "interface_declaration"
+            | "trait_declaration"
+            | "enum_declaration" => {
+                let Some(name) = self.child_text_by_field(node, "name") else {
+                    return self.walk_children(node, ctx);
+                };
+                self.class_node(node, &name, ctx);
+                let inner = PhpContext {
+                    current_class: Some(name),
+                    current_function: None,
+                    ..ctx.clone()
+                };
+                let saved = std::mem::take(&mut self.bindings);
+                self.walk_children(node, &inner);
+                self.bindings = saved;
             }
 
-            // PHP Functions/Methods
             "function_definition" | "method_declaration" => {
-                if let Some(name) = self.child_text_by_field(node, "name") {
-                    let loc = self.location(&node);
-                    let content_text = self.node_text(&node);
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Function),
-                        Some(Language::Php),
-                        loc,
-                    )
-                    .with_content(content_text.clone())
-                    .with_complexity(
-                        crate::complexity::calculate_cyclomatic_complexity(&node, self.content),
-                    );
-                    code.span = Some(self.span_for(&node));
+                let Some(name) = self.child_text_by_field(node, "name") else {
+                    return self.walk_children(node, ctx);
+                };
+                let id = self.function_node(node, &name, ctx);
+                let inner = PhpContext {
+                    current_function: Some(id),
+                    ..ctx.clone()
+                };
+                let saved = self.bindings.clone();
+                self.walk_children(node, &inner);
+                self.bindings = saved;
+            }
 
-                    // Detect visibility modifiers
-                    if content_text.contains("private ") {
-                        code.metadata
-                            .attributes
-                            .insert("visibility".into(), "private".into());
-                    } else if content_text.contains("protected ") {
-                        code.metadata
-                            .attributes
-                            .insert("visibility".into(), "protected".into());
-                    } else if content_text.contains("public ") {
-                        code.metadata
-                            .attributes
-                            .insert("visibility".into(), "public".into());
+            "compound_statement" => {
+                let saved = self.bindings.clone();
+                self.walk_children(node, ctx);
+                self.bindings = saved;
+            }
+
+            "assignment_expression" => {
+                // The initializer runs before the new binding is visible.
+                self.walk_children(node, ctx);
+                let Some(left) = node.child_by_field_name("left") else {
+                    return;
+                };
+                if left.kind() != "variable_name" {
+                    return;
+                }
+                let variable = self.node_text(&left);
+                self.bindings.remove(&variable);
+                if let Some(right) = node.child_by_field_name("right")
+                    && right.kind() == "object_creation_expression"
+                    && let Some(class) = self.creation_class(right)
+                {
+                    let class = class.trim_matches('\\').to_string();
+                    if !class.is_empty() {
+                        self.bindings.insert(variable, class);
                     }
-
-                    // Detect static methods
-                    if content_text.contains("static ") {
-                        code.metadata
-                            .attributes
-                            .insert("static".into(), "true".into());
-                    }
-
-                    // Detect magic methods
-                    if name.starts_with("__") {
-                        code.metadata
-                            .attributes
-                            .insert("magic_method".into(), "true".into());
-                    }
-
-                    // Detect return types (PHP 7+)
-                    if let Some(return_type) = self.child_text_by_field(node, "return_type") {
-                        code.metadata
-                            .attributes
-                            .insert("return_type".into(), return_type);
-                    }
-
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "function".into());
-                    if let Some(ref current_class) = ctx.current_class {
-                        code.metadata
-                            .attributes
-                            .insert("parent_class".into(), current_class.clone());
-                    }
-
-                    // Track current function for call edge attribution
-                    self.current_function_id = Some(code.id);
-                    self.nodes.push(code);
                 }
             }
 
-            // PHP Properties
-            "property_declaration" => {
-                if let Some(name) = self.child_text_by_field(node, "name") {
-                    let loc = self.location(&node);
-                    let content_text = self.node_text(&node);
-                    let mut code = CodeNode::new(
-                        name.clone(),
-                        Some(NodeType::Variable),
-                        Some(Language::Php),
-                        loc,
-                    )
-                    .with_content(content_text.clone());
-
-                    // Detect visibility
-                    if content_text.contains("private ") {
-                        code.metadata
-                            .attributes
-                            .insert("visibility".into(), "private".into());
-                    } else if content_text.contains("protected ") {
-                        code.metadata
-                            .attributes
-                            .insert("visibility".into(), "protected".into());
-                    } else if content_text.contains("public ") {
-                        code.metadata
-                            .attributes
-                            .insert("visibility".into(), "public".into());
-                    }
-
-                    // Detect static properties
-                    if content_text.contains("static ") {
-                        code.metadata
-                            .attributes
-                            .insert("static".into(), "true".into());
-                    }
-
-                    code.metadata
-                        .attributes
-                        .insert("kind".into(), "property".into());
-                    self.nodes.push(code);
-                }
+            "function_call_expression"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression"
+            | "object_creation_expression" => {
+                self.call(node, ctx);
+                self.walk_children(node, ctx);
             }
 
-            // PHP Use statements
-            "use_declaration" => {
-                if let Some(name) = self.child_text_by_field(node, "name") {
-                    let loc = self.location(&node);
-                    let mut code = CodeNode::new(
-                        format!("use {}", name),
-                        Some(NodeType::Import),
-                        Some(Language::Php),
-                        loc,
-                    )
-                    .with_content(self.node_text(&node));
-                    code.span = Some(self.span_for(&node));
+            _ => self.walk_children(node, ctx),
+        }
+    }
 
-                    code.metadata.attributes.insert("kind".into(), "use".into());
-                    code.metadata
-                        .attributes
-                        .insert("namespace".into(), name.clone());
-
-                    // Create import edge
-                    let edge = EdgeRelationship {
-                        from: code.id,
-                        to: name.clone(),
-                        edge_type: EdgeType::Imports,
-                        metadata: {
-                            let mut meta = HashMap::new();
-                            meta.insert("import_type".to_string(), "php_use".to_string());
-                            meta.insert("source_file".to_string(), self.file_path.to_string());
-                            meta
-                        },
-                        span: Some(self.span_for(&node)),
-                    };
-                    self.edges.push(edge);
-
-                    ctx.use_statements.push(name);
-                    self.nodes.push(code);
+    fn class_node(&mut self, node: Node, name: &str, ctx: &PhpContext) {
+        let content_text = self.node_text(&node);
+        let mut code = CodeNode::new(
+            name.to_string(),
+            Some(NodeType::Class),
+            Some(Language::Php),
+            self.location(&node),
+        )
+        .with_content(content_text.clone());
+        let attributes = &mut code.metadata.attributes;
+        let kind = node.kind().trim_end_matches("_declaration");
+        attributes.insert("kind".into(), kind.into());
+        attributes.insert("php_kind".into(), kind.into());
+        if !self.namespace.is_empty() {
+            attributes.insert(PHP_NAMESPACE_ATTR.into(), self.namespace.clone());
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "base_clause" => {
+                    attributes.insert("inheritance".into(), self.node_text(&child));
                 }
+                "class_interface_clause" => {
+                    attributes.insert("interfaces".into(), self.node_text(&child));
+                }
+                _ => {}
             }
+        }
+        if ctx.is_framework_file && node.kind() == "class_declaration" {
+            let pattern = if name.ends_with("Controller") {
+                Some("controller")
+            } else if content_text.contains("extends Model") {
+                Some("model")
+            } else if content_text.contains("extends Migration") {
+                Some("migration")
+            } else {
+                None
+            };
+            if let Some(pattern) = pattern {
+                attributes.insert("laravel_pattern".into(), pattern.into());
+            }
+        }
+        self.nodes.push(code);
+    }
 
-            // PHP Function calls - extract call edges
-            "function_call_expression" | "member_call_expression" => {
-                if let Some(current_fn) = self.current_function_id {
-                    // Extract the function/method being called
-                    let callee = if let Some(name_node) = node.child_by_field_name("name") {
-                        self.node_text(&name_node)
-                    } else if let Some(func_node) = node.child_by_field_name("function") {
-                        self.node_text(&func_node)
+    fn function_node(&mut self, node: Node, name: &str, ctx: &PhpContext) -> NodeId {
+        let content_text = self.node_text(&node);
+        let mut code = CodeNode::new(
+            name.to_string(),
+            Some(NodeType::Function),
+            Some(Language::Php),
+            self.location(&node),
+        )
+        .with_content(content_text.clone())
+        .with_complexity(crate::complexity::calculate_cyclomatic_complexity(
+            &node,
+            self.content,
+        ));
+        code.span = Some(self.span_for(&node));
+        let modifiers: Vec<String> = {
+            let mut cursor = node.walk();
+            node.children(&mut cursor)
+                .filter(|child| {
+                    matches!(
+                        child.kind(),
+                        "visibility_modifier" | "static_modifier" | "abstract_modifier"
+                    )
+                })
+                .map(|child| self.node_text(&child))
+                .collect()
+        };
+        let decorators = self.test_decorators(node, name);
+        let attributes = &mut code.metadata.attributes;
+        attributes.insert("kind".into(), "function".into());
+        if let Some(visibility) = modifiers
+            .iter()
+            .find(|m| matches!(m.as_str(), "public" | "protected" | "private"))
+        {
+            attributes.insert("visibility".into(), visibility.clone());
+        }
+        if modifiers.iter().any(|m| m == "static") {
+            attributes.insert("static".into(), "true".into());
+        }
+        if name.starts_with("__") {
+            attributes.insert("magic_method".into(), "true".into());
+        }
+        if let Some(return_type) = node
+            .child_by_field_name("return_type")
+            .map(|n| self.node_text(&n))
+        {
+            attributes.insert("return_type".into(), return_type);
+        }
+        if let Some(class) = &ctx.current_class {
+            attributes.insert("parent_class".into(), class.clone());
+        }
+        if !self.namespace.is_empty() {
+            attributes.insert(PHP_NAMESPACE_ATTR.into(), self.namespace.clone());
+        }
+        if !decorators.is_empty() {
+            attributes.insert(crg_shape::DECORATORS_ATTR.into(), decorators.join(","));
+        }
+        let id = code.id;
+        self.nodes.push(code);
+        id
+    }
+
+    /// CRG's PHP test marks: `#[Test]` attributes (PHPUnit's attribute class counts), a
+    /// `/** @test */` docblock right before the method, and the PHPUnit `test*` name
+    /// convention for methods in test files. Each is recorded as the `Test` decorator.
+    fn test_decorators(&self, node: Node, name: &str) -> Vec<String> {
+        let mut decorators = Vec::new();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "attribute_list" {
+                self.attribute_names(child, &mut decorators);
+            }
+        }
+        if let Some(previous) = node.prev_sibling()
+            && previous.kind() == "comment"
+            && docblock_marks_test(&self.node_text(&previous))
+        {
+            decorators.push("Test".into());
+        }
+        if node.kind() == "method_declaration" && self.is_test_file && name.starts_with("test") {
+            decorators.push("Test".into());
+        }
+        decorators
+    }
+
+    fn attribute_names(&self, list: Node, out: &mut Vec<String>) {
+        let mut groups = list.walk();
+        for group in list.children(&mut groups) {
+            if group.kind() != "attribute_group" {
+                continue;
+            }
+            let mut attributes = group.walk();
+            for attribute in group.children(&mut attributes) {
+                if attribute.kind() != "attribute" {
+                    continue;
+                }
+                let mut parts = attribute.walk();
+                let name = attribute
+                    .children(&mut parts)
+                    .find(|part| matches!(part.kind(), "name" | "qualified_name"))
+                    .map(|part| self.node_text(&part));
+                if let Some(name) = name {
+                    let normalized = name.trim_start_matches('\\');
+                    if normalized.eq_ignore_ascii_case("PHPUnit\\Framework\\Attributes\\Test") {
+                        out.push("Test".into());
                     } else {
-                        String::new()
-                    };
-
-                    if !callee.is_empty() {
-                        let edge = EdgeRelationship {
-                            from: current_fn,
-                            to: callee,
-                            edge_type: EdgeType::Calls,
-                            metadata: {
-                                let mut meta = HashMap::new();
-                                meta.insert("call_type".to_string(), "php_call".to_string());
-                                meta
-                            },
-                            span: Some(self.span_for(&node)),
-                        };
-                        self.edges.push(edge);
+                        out.push(normalized.to_string());
                     }
                 }
             }
-
-            _ => {}
         }
+    }
 
-        // Recursively walk children
-        if cursor.goto_first_child() {
-            loop {
-                self.walk(cursor, ctx.clone());
-                if !cursor.goto_next_sibling() {
-                    break;
+    /// `use A\B;`, `use A\B as C;`, `use A\{B, C as D};`, `use function a\b;`: one import per
+    /// clause, naming the fully qualified symbol (the alias only binds the local name).
+    fn use_declaration(&mut self, node: Node) {
+        let statement = self.node_text(&node);
+        let lowered = statement.trim_start().to_lowercase();
+        let symbol_kind = if lowered.starts_with("use function ") {
+            Some("function")
+        } else if lowered.starts_with("use const ") {
+            Some("const")
+        } else {
+            None
+        };
+        let mut prefix = String::new();
+        let mut clauses = Vec::new();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "namespace_name" => prefix = self.node_text(&child).trim_matches('\\').to_string(),
+                "namespace_use_clause" => clauses.push(child),
+                "namespace_use_group" => {
+                    let mut group = child.walk();
+                    clauses.extend(
+                        child
+                            .children(&mut group)
+                            .filter(|clause| clause.kind() == "namespace_use_clause"),
+                    );
+                }
+                _ => {}
+            }
+        }
+        let mut targets = Vec::new();
+        for clause in clauses {
+            let alias_node = clause.child_by_field_name("alias");
+            let alias = alias_node.map(|alias| self.node_text(&alias));
+            let mut parts = clause.walk();
+            let imported = clause
+                .children(&mut parts)
+                .find(|part| {
+                    matches!(part.kind(), "name" | "qualified_name") && Some(*part) != alias_node
+                })
+                .map(|part| self.node_text(&part).trim_matches('\\').to_string());
+            let Some(imported) = imported.filter(|i| !i.is_empty()) else {
+                continue;
+            };
+            let qualified = if prefix.is_empty() {
+                imported
+            } else {
+                format!("{prefix}\\{imported}")
+            };
+            if symbol_kind.is_none() {
+                let local = alias
+                    .clone()
+                    .unwrap_or_else(|| qualified.rsplit('\\').next().unwrap_or("").to_string());
+                self.imports.insert(local.to_lowercase(), qualified.clone());
+            }
+            targets.push(qualified);
+        }
+        if targets.is_empty() {
+            return;
+        }
+        let mut code = CodeNode::new(
+            statement.clone(),
+            Some(NodeType::Import),
+            Some(Language::Php),
+            self.location(&node),
+        )
+        .with_content(statement);
+        code.span = Some(self.span_for(&node));
+        code.metadata.attributes.insert("kind".into(), "use".into());
+        for target in targets {
+            let mut metadata = HashMap::from([
+                ("import_type".to_string(), "php_use".to_string()),
+                ("source_file".to_string(), self.file_path.to_string()),
+            ]);
+            if let Some(kind) = symbol_kind {
+                metadata.insert(PHP_USE_KIND_ATTR.into(), kind.into());
+            }
+            self.edges.push(EdgeRelationship {
+                from: code.id,
+                to: target,
+                edge_type: EdgeType::Imports,
+                metadata,
+                span: Some(self.span_for(&node)),
+            });
+        }
+        self.nodes.push(code);
+    }
+
+    /// `include`/`require` with a literal path (a double-quoted one only without
+    /// interpolation or escapes); computed paths such as `__DIR__ . '/x.php'` are skipped,
+    /// as at code-review-graph.
+    fn include(&mut self, node: Node) {
+        let mut cursor = node.walk();
+        let literal = node.children(&mut cursor).find_map(|child| {
+            let plain = child.kind() == "string"
+                || (child.kind() == "encapsed_string" && {
+                    let mut parts = child.walk();
+                    child
+                        .named_children(&mut parts)
+                        .all(|part| part.kind() == "string_content")
+                });
+            plain.then(|| {
+                self.node_text(&child)
+                    .trim_matches(|c| c == '\'' || c == '"')
+                    .to_string()
+            })
+        });
+        let Some(path) = literal.filter(|path| !path.is_empty()) else {
+            return;
+        };
+        let statement = self.node_text(&node);
+        let mut code = CodeNode::new(
+            statement.clone(),
+            Some(NodeType::Import),
+            Some(Language::Php),
+            self.location(&node),
+        )
+        .with_content(statement);
+        code.span = Some(self.span_for(&node));
+        code.metadata
+            .attributes
+            .insert("kind".into(), "include".into());
+        self.edges.push(EdgeRelationship {
+            from: code.id,
+            to: path,
+            edge_type: EdgeType::Imports,
+            metadata: HashMap::from([
+                ("import_type".to_string(), "php_include".to_string()),
+                ("source_file".to_string(), self.file_path.to_string()),
+            ]),
+            span: Some(self.span_for(&node)),
+        });
+        self.nodes.push(code);
+    }
+
+    fn creation_class(&self, node: Node) -> Option<String> {
+        let mut cursor = node.walk();
+        node.children(&mut cursor)
+            .find(|child| matches!(child.kind(), "name" | "qualified_name"))
+            .map(|child| self.node_text(&child))
+    }
+
+    /// One CALLS edge, named like CRG's `_get_call_name`: the function, the method, the
+    /// `Scope::method` or the instantiated class, without a leading `\`.
+    fn call(&mut self, node: Node, ctx: &PhpContext) {
+        let mut metadata = HashMap::from([("call_type".to_string(), "php_call".to_string())]);
+        let target = match node.kind() {
+            "function_call_expression" => node
+                .child_by_field_name("function")
+                .filter(|f| matches!(f.kind(), "name" | "qualified_name"))
+                .map(|f| self.node_text(&f).trim_start_matches('\\').to_string()),
+            "member_call_expression" | "nullsafe_member_call_expression" => {
+                let method = node.child_by_field_name("name").map(|n| self.node_text(&n));
+                if method.is_some()
+                    && let Some(object) = node.child_by_field_name("object")
+                    && object.kind() == "variable_name"
+                    && let Some(class) = self.bindings.get(&self.node_text(&object))
+                {
+                    // CRG `_resolve_typed_method_target`: the local class name through the
+                    // imports, otherwise the class as written.
+                    let local = class.rsplit('\\').next().unwrap_or(class);
+                    let scope = self
+                        .imports
+                        .get(&local.to_lowercase())
+                        .cloned()
+                        .unwrap_or_else(|| class.clone());
+                    metadata.insert(PHP_SCOPE_ATTR.into(), scope);
+                }
+                method
+            }
+            "scoped_call_expression" => {
+                let scope = node
+                    .child_by_field_name("scope")
+                    .map(|s| self.node_text(&s));
+                let method = node.child_by_field_name("name").map(|n| self.node_text(&n));
+                match (scope, method) {
+                    (Some(scope), Some(method)) if !scope.is_empty() && !method.is_empty() => {
+                        let lowered = scope.trim_matches('\\').to_lowercase();
+                        if matches!(lowered.as_str(), "self" | "static") {
+                            if let Some(class) = &ctx.current_class {
+                                metadata.insert(PHP_SCOPE_ATTR.into(), class.clone());
+                                metadata.insert(PHP_SAME_FILE_ATTR.into(), "true".into());
+                            }
+                        } else if lowered != "parent" && !scope.starts_with('$') {
+                            metadata.insert(
+                                PHP_SCOPE_ATTR.into(),
+                                resolve_class_reference(&scope, &self.namespace, &self.imports),
+                            );
+                        }
+                        metadata.insert(crg_shape::VERBATIM_TARGET_ATTR.into(), "true".into());
+                        Some(format!("{}::{method}", scope.trim_start_matches('\\')))
+                    }
+                    _ => None,
                 }
             }
-            cursor.goto_parent();
-        }
+            "object_creation_expression" => self
+                .creation_class(node)
+                .map(|class| class.trim_start_matches('\\').to_string()),
+            _ => None,
+        };
+        let Some(target) = target.filter(|t| !t.is_empty()) else {
+            return;
+        };
+        let from = match ctx.current_function {
+            Some(id) => id,
+            None => {
+                metadata.insert(crg_shape::FILE_SCOPE_ATTR.into(), "true".into());
+                NodeId::nil()
+            }
+        };
+        self.edges.push(EdgeRelationship {
+            from,
+            to: target,
+            edge_type: EdgeType::Calls,
+            metadata,
+            span: Some(self.span_for(&node)),
+        });
     }
 
     fn child_text_by_field(&self, node: Node, field_name: &str) -> Option<String> {
@@ -446,5 +650,141 @@ impl<'a> PhpCollector<'a> {
             end_line: Some((node.end_position().row + 1) as u32),
             end_column: Some((node.end_position().column + 1) as u32),
         }
+    }
+}
+
+/// CRG `_PHP_TEST_DOC_TAG_RE`: an `@test` tag not glued to a word or `-`.
+fn docblock_marks_test(comment: &str) -> bool {
+    let bytes = comment.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+    comment.match_indices("@test").any(|(start, _)| {
+        let end = start + "@test".len();
+        (start == 0 || !word(bytes[start - 1])) && (end >= bytes.len() || !word(bytes[end]))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ExtractionPolicy;
+    use crate::languages::extract_for_language_at;
+    use tree_sitter::Parser;
+
+    fn extract(path: &str, source: &str) -> ExtractionResult {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_php::LANGUAGE_PHP.into())
+            .unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        extract_for_language_at(
+            &Language::Php,
+            &tree,
+            source,
+            path,
+            path,
+            ExtractionPolicy::default(),
+        )
+        .unwrap()
+    }
+
+    fn qualified(result: &ExtractionResult) -> Vec<(String, String)> {
+        result
+            .nodes
+            .iter()
+            .filter_map(|n| {
+                Some((
+                    format!("{:?}", n.node_type.as_ref()?),
+                    n.metadata.attributes.get("qualified_name")?.clone(),
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn php_namespaces_are_not_nodes_and_type_likes_are_classes() {
+        let result = extract(
+            "src/App.php",
+            "<?php\nnamespace Demo;\ninterface I {}\ntrait T {}\nenum E {}\nclass App { private $x; public function run() {} }\n",
+        );
+        let names = qualified(&result);
+        for class in ["I", "T", "E", "App"] {
+            assert!(
+                names.contains(&("Class".into(), format!("src/App.php::{class}"))),
+                "{class}: {names:?}"
+            );
+        }
+        assert!(names.contains(&("Function".into(), "src/App.php::App.run".into())));
+        assert!(!names.iter().any(|(_, q)| q.contains("Demo")), "{names:?}");
+    }
+
+    #[test]
+    fn php_use_clauses_import_fully_qualified_names() {
+        let result = extract(
+            "src/App.php",
+            "<?php\nnamespace A;\nuse \\B\\C;\nuse D\\{E, F as G};\nuse function h\\i;\nrequire_once 'x.php';\nrequire_once __DIR__ . '/y.php';\n",
+        );
+        let mut imports: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Imports)
+            .map(|e| e.to.as_str())
+            .collect();
+        imports.sort();
+        assert_eq!(imports, ["B\\C", "D\\E", "D\\F", "h\\i", "x.php"]);
+    }
+
+    #[test]
+    fn php_calls_record_names_and_receiver_scopes() {
+        let result = extract(
+            "src/App.php",
+            "<?php\nnamespace Demo;\nuse Lib\\Repo;\nclass App {\n  function run() {\n    $r = new Repo();\n    $r->save();\n    $o = new \\Other\\Thing();\n    $o->go();\n    $o = 1;\n    $o->stop();\n    Helper::make();\n    self::local();\n    \\strlen('a');\n  }\n}\n",
+        );
+        let calls: HashMap<&str, Option<&String>> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+            .map(|e| (e.to.as_str(), e.metadata.get(PHP_SCOPE_ATTR)))
+            .collect();
+        assert_eq!(calls["Repo"], None);
+        assert_eq!(calls["save"].map(String::as_str), Some("Lib\\Repo"));
+        assert_eq!(calls["Other\\Thing"], None);
+        assert_eq!(calls["go"].map(String::as_str), Some("Other\\Thing"));
+        assert_eq!(calls["stop"], None);
+        assert_eq!(
+            calls["Helper::make"].map(String::as_str),
+            Some("Demo\\Helper")
+        );
+        assert_eq!(calls["self::local"].map(String::as_str), Some("App"));
+        assert!(calls.contains_key("strlen"));
+    }
+
+    #[test]
+    fn phpunit_conventions_mark_tests() {
+        let result = extract(
+            "tests/AppTest.php",
+            "<?php\nclass AppTest {\n  public function testRun() {}\n  /** @test */\n  public function buildsFresh() {}\n  #[Test]\n  public function viaAttribute() {}\n  /** @testing */\n  public function helper() {}\n}\n",
+        );
+        let names = qualified(&result);
+        for test in ["testRun", "buildsFresh", "viaAttribute"] {
+            assert!(
+                names.contains(&(
+                    "Other(\"Test\")".into(),
+                    format!("tests/AppTest.php::AppTest.{test}")
+                )),
+                "{test}: {names:?}"
+            );
+        }
+        assert!(names.contains(&(
+            "Function".into(),
+            "tests/AppTest.php::AppTest.helper".into()
+        )));
+        // Outside a test file, the `test*` name alone is not a PHPUnit test.
+        let result = extract(
+            "src/App.php",
+            "<?php\nclass App { function testRun() {} }\n",
+        );
+        assert!(
+            qualified(&result).contains(&("Function".into(), "src/App.php::App.testRun".into()))
+        );
     }
 }
