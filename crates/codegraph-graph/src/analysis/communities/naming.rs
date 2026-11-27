@@ -32,7 +32,7 @@ fn most_common<'a>(items: impl IntoIterator<Item = &'a str>) -> Vec<(&'a str, us
             }
         }
     }
-    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
     counts
 }
 

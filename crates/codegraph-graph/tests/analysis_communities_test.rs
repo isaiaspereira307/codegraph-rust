@@ -100,9 +100,15 @@ fn first_edge_kind_sets_weight() {
             ("INHERITS", "a.py::a0", "ext"),
         ],
     );
+    // Same file and line (the fixture's): kind order decides, CALLS before IMPORTS_FROM.
     let (vertices, wg) = community_graph(&g);
     assert_eq!(vertices, vec![0, 1]);
-    assert_eq!(wg.weight(0, 1), Some(0.5));
+    assert_eq!(wg.weight(0, 1), Some(1.0));
+    // An earlier line comes first whatever the kind or the row order.
+    let mut edges = g.edges.clone();
+    edges.iter_mut().find(|e| e.kind == "CALLS").unwrap().line = 2;
+    let g = AnalysisGraph::from_parts(g.nodes.clone(), edges);
+    assert_eq!(community_graph(&g).1.weight(0, 1), Some(0.5));
 }
 
 #[test]
