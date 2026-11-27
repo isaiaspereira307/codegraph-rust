@@ -511,6 +511,53 @@ async fn writer_stores_decorators_in_extra() {
     assert_eq!(extra("plain"), "{}");
 }
 
+/// A shared database: code-review-graph wrote its own `extra` keys on the nodes. A Rust
+/// re-index keeps them and owns only `decorators`, which it rewrites or removes.
+#[tokio::test]
+async fn writer_merges_extra_into_crg_written_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, conn) = open(dir.path());
+    let mut login = node(1, "login", NodeType::Function, "app.py", 3);
+    login
+        .metadata
+        .attributes
+        .insert("decorators".into(), "app.get".into());
+    let plain = node(2, "plain", NodeType::Function, "app.py", 9);
+    let broken = node(3, "broken", NodeType::Function, "app.py", 12);
+    let all = [login.clone(), plain.clone(), broken.clone()];
+    store.upsert_nodes_batch(&all).await.unwrap();
+    // What the CRG leaves behind (fixture): its keys, stale decorators, a truncated value.
+    conn.execute(
+        "UPDATE nodes SET extra = '{\"decorators\":[\"old\"],\"crg_score\":0.7,\
+         \"nested\":{\"a\":1}}' WHERE name IN ('login', 'plain')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE nodes SET extra = '{\"trunc' WHERE name = 'broken'",
+        [],
+    )
+    .unwrap();
+    store.upsert_nodes_batch(&all).await.unwrap();
+    let extra = |name: &str| -> serde_json::Value {
+        let text: String = conn
+            .query_row("SELECT extra FROM nodes WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+    assert_eq!(
+        extra("login"),
+        serde_json::json!({"decorators": ["app.get"], "crg_score": 0.7, "nested": {"a": 1}})
+    );
+    assert_eq!(
+        extra("plain"),
+        serde_json::json!({"crg_score": 0.7, "nested": {"a": 1}})
+    );
+    assert_eq!(extra("broken"), serde_json::json!({}));
+}
+
 fn names(conn: &Connection, sql: &str) -> Vec<String> {
     let mut stmt = conn.prepare(sql).unwrap();
     stmt.query_map([], |r| r.get(0))

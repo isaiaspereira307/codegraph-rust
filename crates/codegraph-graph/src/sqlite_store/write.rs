@@ -164,6 +164,10 @@ fn write_node(tx: &Transaction, root: &Path, node: &CodeNode, now: f64) -> Resul
         .map(|d| d.trim().chars().take(DOCSTRING_CHARS).collect::<String>());
     let tokens = mapping::name_tokens(&kind, &node.name, parent.map(String::as_str), &file_path);
 
+    // `extra` is merged, not replaced: a database shared with code-review-graph keeps the keys
+    // it wrote. `decorators` is the only key the Rust writer owns, so it is dropped from the
+    // stored value first and comes back only when the node still has decorators. Invalid or
+    // non-object JSON (a killed writer) is replaced.
     let extra = extra_json(attrs);
     tx.execute(
         "INSERT INTO nodes (kind, name, qualified_name, file_path, line_start, line_end, \
@@ -175,7 +179,11 @@ fn write_node(tx: &Transaction, root: &Path, node: &CodeNode, now: f64) -> Resul
          line_end = excluded.line_end, language = excluded.language, \
          parent_name = excluded.parent_name, params = excluded.params, \
          return_type = excluded.return_type, modifiers = excluded.modifiers, \
-         is_test = excluded.is_test, extra = excluded.extra, file_hash = excluded.file_hash, symbol = excluded.symbol, \
+         is_test = excluded.is_test, extra = CASE \
+           WHEN nodes.extra IS NULL OR json_valid(nodes.extra) = 0 \
+             OR json_type(nodes.extra) != 'object' THEN excluded.extra \
+           ELSE json_patch(json_remove(nodes.extra, '$.decorators'), excluded.extra) END, \
+         file_hash = excluded.file_hash, symbol = excluded.symbol, \
          docstring = excluded.docstring, name_tokens = excluded.name_tokens, \
          updated_at = excluded.updated_at",
         params![
