@@ -46,6 +46,15 @@ async fn inheritors(q: &GraphQuery, base: &str) -> Vec<(String, i32)> {
         .collect()
 }
 
+/// Snapshot dependency edges leaving `node` (INHERITS/IMPLEMENTS included).
+async fn efferent(q: &GraphQuery, node: &str) -> i32 {
+    q.calculate_coupling_metrics(node)
+        .await
+        .unwrap()
+        .metrics
+        .efferent_coupling
+}
+
 #[tokio::test]
 async fn impact_radius_reaches_a_subclass_through_a_text_base() {
     let (_dir, q) = fixture(
@@ -98,7 +107,7 @@ async fn ambiguous_base_adds_no_edge() {
     );
     assert!(inheritors(&q, "b.py::Base").await.is_empty());
     assert!(inheritors(&q, "c.py::Base").await.is_empty());
-    assert!(q.get_hub_nodes(1).await.unwrap().is_empty());
+    assert_eq!(efferent(&q, "a.py::Child").await, 0);
 }
 
 #[tokio::test]
@@ -119,7 +128,7 @@ async fn external_base_adds_no_edge() {
         .unwrap()
         .unwrap();
     assert!(out.nodes.is_empty());
-    assert!(q.get_hub_nodes(1).await.unwrap().is_empty());
+    assert_eq!(efferent(&q, "t.py::MyTest").await, 0);
 }
 
 #[tokio::test]
@@ -131,12 +140,11 @@ async fn existing_qualified_target_is_not_duplicated() {
         ],
         &[("INHERITS", "child.java::Child", "base.java::Base")],
     );
-    let hubs = q.get_hub_nodes(1).await.unwrap();
-    let base = hubs
-        .iter()
-        .find(|h| h.node_id == "base.java::Base")
+    let base = q
+        .calculate_coupling_metrics("base.java::Base")
+        .await
         .unwrap();
-    assert_eq!(base.afferent_degree, 1);
+    assert_eq!(base.metrics.afferent_coupling, 1);
     assert_eq!(
         inheritors(&q, "base.java::Base").await,
         vec![("child.java::Child".to_string(), 1)]

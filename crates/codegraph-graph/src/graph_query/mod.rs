@@ -36,7 +36,6 @@ use types::*;
 
 const CALLS: &str = "CALLS";
 const MAX_CALLERS: usize = 10;
-const MAX_HUBS: usize = 50;
 
 type Cached = Option<((i64, i64), Arc<Snapshot>)>;
 type AnalysisCached = Option<((i64, i64), Arc<crate::analysis::AnalysisGraph>)>;
@@ -369,45 +368,6 @@ impl GraphQuery {
                 .map(|d| snap.reference(d))
                 .collect(),
         })
-    }
-
-    /// Nodes with at least `min_degree` dependency edges (default 5), top 50 by total degree.
-    /// Like code-review-graph's `find_hub_nodes`, File nodes are never hubs.
-    pub async fn get_hub_nodes(&self, min_degree: i32) -> Result<Vec<HubNode>> {
-        let snap = self.snapshot().await?;
-        let threshold = if min_degree > 0 { min_degree } else { 5 };
-        let mut hubs: Vec<HubNode> = snap
-            .graph
-            .node_indices()
-            .filter(|&ix| snap.node(ix).kind.as_deref() != Some("File"))
-            .filter_map(|ix| {
-                let incoming = snap.degree_by_kind(ix, Incoming, is_dependency);
-                let outgoing = snap.degree_by_kind(ix, Outgoing, is_dependency);
-                let afferent: i32 = incoming.iter().map(|(_, c)| c).sum();
-                let efferent: i32 = outgoing.iter().map(|(_, c)| c).sum();
-                let to_counts = |rows: Vec<(String, i32)>| {
-                    rows.into_iter()
-                        .map(|(edge_type, count)| EdgeTypeCount { edge_type, count })
-                        .collect()
-                };
-                (afferent + efferent >= threshold).then(|| HubNode {
-                    node_id: snap.node(ix).id.clone(),
-                    node: snap.summary(ix),
-                    afferent_degree: afferent,
-                    efferent_degree: efferent,
-                    total_degree: afferent + efferent,
-                    incoming_by_type: to_counts(incoming),
-                    outgoing_by_type: to_counts(outgoing),
-                })
-            })
-            .collect();
-        hubs.sort_by(|a, b| {
-            b.total_degree
-                .cmp(&a.total_degree)
-                .then_with(|| (&a.node.name, &a.node_id).cmp(&(&b.node.name, &b.node_id)))
-        });
-        hubs.truncate(MAX_HUBS);
-        Ok(hubs)
     }
 
     /// Functions with complexity ≥ `min_complexity` (default 5), ranked by

@@ -73,18 +73,6 @@ pub struct CouplingMetrics {
     pub coupling_category: String,
 }
 
-/// Hub node with degree information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubNode {
-    pub node_id: String,
-    pub node: NodeInfo,
-    pub afferent_degree: i32,
-    pub efferent_degree: i32,
-    pub total_degree: i32,
-    pub incoming_by_type: Vec<EdgeTypeCount>,
-    pub outgoing_by_type: Vec<EdgeTypeCount>,
-}
-
 /// Directory summary for bootstrap
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectorySummary {
@@ -93,13 +81,6 @@ pub struct DirectorySummary {
     pub full_path: String,
     pub depth: Option<i32>,
     pub file_count: i32,
-}
-
-/// Edge type count
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EdgeTypeCount {
-    pub edge_type: String,
-    pub count: i32,
 }
 
 /// Node information

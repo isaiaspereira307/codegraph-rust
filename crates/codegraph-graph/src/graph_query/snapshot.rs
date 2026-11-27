@@ -189,15 +189,6 @@ impl Snapshot {
         }
     }
 
-    /// Identity and location only, for ranked lists.
-    pub fn summary(&self, ix: NodeIndex) -> NodeInfo {
-        NodeInfo {
-            content: None,
-            metadata: None,
-            ..self.info(ix)
-        }
-    }
-
     pub fn reference(&self, ix: NodeIndex) -> NodeReference {
         let n = self.node(ix);
         NodeReference {

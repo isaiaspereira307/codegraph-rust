@@ -204,24 +204,14 @@ async fn coupling_metrics_classify_stability() {
 async fn hub_nodes_rank_by_total_degree() {
     let dir = tempfile::tempdir().unwrap();
     let (_, q) = fixture(dir.path()).await;
-    let hubs = q.get_hub_nodes(5).await.unwrap();
-    assert_eq!(hubs.len(), 1);
-    assert_eq!(hubs[0].node_id, id(20));
+    // The get_hub_nodes tool's source: the AnalysisGraph ranking (every edge kind counted).
+    let hubs = q.hub_nodes().await.unwrap();
+    assert_eq!(hubs[0].name, "h");
     assert_eq!(
-        (
-            hubs[0].afferent_degree,
-            hubs[0].efferent_degree,
-            hubs[0].total_degree
-        ),
+        (hubs[0].in_degree, hubs[0].out_degree, hubs[0].total_degree),
         (6, 0, 6)
     );
-    assert_eq!(hubs[0].incoming_by_type.len(), 1);
-    assert_eq!(hubs[0].incoming_by_type[0].edge_type, "CALLS");
-    assert_eq!(hubs[0].incoming_by_type[0].count, 6);
-    assert!(hubs[0].node.content.is_none());
-    // min_degree <= 0 falls back to 5.
-    assert_eq!(q.get_hub_nodes(0).await.unwrap().len(), 1);
-    assert_eq!(q.get_hub_nodes(2).await.unwrap()[0].node_id, id(20));
+    assert!(hubs[1..].iter().all(|h| h.total_degree < 6));
 }
 
 #[tokio::test]
@@ -278,7 +268,14 @@ async fn accepts_legacy_record_id_forms() {
 async fn snapshot_reloads_after_write() {
     let dir = tempfile::tempdir().unwrap();
     let (store, q) = fixture(dir.path()).await;
-    assert_eq!(q.get_hub_nodes(5).await.unwrap()[0].afferent_degree, 6);
+    let afferent = async |q: &GraphQuery| {
+        q.calculate_coupling_metrics(&id(20))
+            .await
+            .unwrap()
+            .metrics
+            .afferent_coupling
+    };
+    assert_eq!(afferent(&q).await, 6);
 
     // A write through the same store handle.
     store
@@ -289,7 +286,7 @@ async fn snapshot_reloads_after_write() {
         .upsert_edges_batch(&[calls(227, 27, 20)])
         .await
         .unwrap();
-    assert_eq!(q.get_hub_nodes(5).await.unwrap()[0].afferent_degree, 7);
+    assert_eq!(afferent(&q).await, 7);
 
     // A write from another connection (another process in production).
     let other = Connection::open(dir.path().join(".code-review-graph/graph.db")).unwrap();
@@ -299,7 +296,7 @@ async fn snapshot_reloads_after_write() {
             [],
         )
         .unwrap();
-    assert_eq!(q.get_hub_nodes(5).await.unwrap()[0].afferent_degree, 5);
+    assert_eq!(afferent(&q).await, 5);
 }
 
 #[tokio::test]
@@ -329,9 +326,9 @@ async fn graph_tools_skip_dangling_targets() {
         .unwrap();
     assert!(out.is_empty());
     assert!(q.find_nodes_by_name("print", 10).await.unwrap().is_empty());
-    let hubs = q.get_hub_nodes(5).await.unwrap();
-    assert_eq!(hubs.len(), 1);
-    assert_eq!(hubs[0].node_id, id(20));
+    // The six `print` calls are no snapshot edges: c4 still depends on nothing.
+    let c4 = q.calculate_coupling_metrics(&id(14)).await.unwrap();
+    assert_eq!(c4.metrics.efferent_coupling, 0);
     assert_eq!(
         q.detect_circular_dependencies("CALLS").await.unwrap().len(),
         1
@@ -380,14 +377,9 @@ async fn hub_nodes_exclude_file_nodes() {
     store.upsert_edges_batch(&edges).await.unwrap();
     store.finalize("full").await.unwrap();
     let q = GraphQuery::new(store.clone());
-    let hubs: Vec<_> = q
-        .get_hub_nodes(5)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|h| h.node_id)
-        .collect();
-    assert_eq!(hubs, vec![id(20)]);
+    let hubs = q.hub_nodes().await.unwrap();
+    assert!(hubs.iter().all(|h| h.kind != "File"), "{hubs:?}");
+    assert_eq!(hubs[0].name, "h");
 }
 
 #[tokio::test]
