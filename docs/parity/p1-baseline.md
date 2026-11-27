@@ -127,3 +127,9 @@ debug com 3 repetições na Task 11; estes valores são apenas o registro da lin
   `import_cycles` ignora arquivos de nós `extra.virtual`. Neste repo, Rust e CRG têm os mesmos
   320 pares `File → File`, 318 após o filtro e 15 em 4 ciclos. Detalhes em
   [`p1-task13.md`](p1-task13.md).
+- Task 14: desempates das análises (entry points/caminho dos flows, hubs, pontes, lacunas,
+  conexões surpreendentes) pela ordem canônica relativa ao repo, como as comunidades
+  (`161390f`). Escala a 12k/25k/50k nós em [`scale.md`](scale.md): comunidades e memória
+  lineares, flows superlineares pelo número de memberships (igual ao CRG). Herança no
+  `AnalysisGraph` medida e recusada, `OVERRIDES` descartado:
+  [`analysis-heritage.md`](analysis-heritage.md).
