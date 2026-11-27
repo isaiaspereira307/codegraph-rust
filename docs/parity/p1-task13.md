@@ -13,14 +13,16 @@ Os extratores passam a gravar `import_context` como o `parser.py` do CRG
 
 `import_cycles` já ignorava `type_only`/`parent_package` e tirava `deferred` do `load_time`;
 agora também deixa fora os arquivos de nós `extra.virtual` (verdadeiro ou 1), como
-`get_all_files` do CRG. `GRAPH_SHAPE_VERSION` foi a `crg-shape-16`.
+`get_all_files` do CRG. `GRAPH_SHAPE_VERSION` foi a `crg-shape-16` (e a `crg-shape-17` com o `extra` copiado para
+`TESTED_BY` no item 2).
 
 Diferenças conhecidas:
 
 - O CRG mantém `import { type A }` como import real quando o `tsconfig.json` tem
   `verbatimModuleSyntax` ou `importsNotUsedAsValues` `preserve`/`error`. O extrator do Rust não
   lê tsconfig, então marca sempre `type_only`.
-- O CRG não emite `autoload` de Ruby (`deferred`); o extrator Ruby do Rust não extrai `autoload`.
+- O CRG emite `autoload` de Ruby como import `deferred`; o extrator Ruby do Rust não emite import
+  de `autoload` (não portado).
 - O CRG funde `require('./x')` e `import('./x')` do mesmo arquivo numa aresta com o contexto
   mais forte; o Rust grava uma aresta por chamada. `import_cycles` dá o mesmo resultado (o par
   conta se alguma aresta conta).

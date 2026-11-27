@@ -167,7 +167,8 @@ fn write_node(tx: &Transaction, root: &Path, node: &CodeNode, now: f64) -> Resul
     // `extra` is merged, not replaced: a database shared with code-review-graph keeps the keys
     // it wrote. `decorators` is the only key the Rust writer owns, so it is dropped from the
     // stored value first and comes back only when the node still has decorators. Invalid or
-    // non-object JSON (a killed writer) is replaced.
+    // non-object JSON (a killed writer) is replaced. Trade-off: CRG-written parse-derived keys
+    // (`virtual`, `sql_kind`) survive a Rust re-index, and `is_virtual` reads `extra.virtual`.
     let extra = extra_json(attrs);
     tx.execute(
         "INSERT INTO nodes (kind, name, qualified_name, file_path, line_start, line_end, \
