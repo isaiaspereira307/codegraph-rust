@@ -41,46 +41,18 @@ fn is_test_node(n: &AnalysisNode) -> bool {
     n.kind == "Test" || n.is_test
 }
 
-/// Indices (into `g.nodes`) of the non-File nodes in canonical order: file, start line, outer
-/// span first, qualified name. Row ids are not used: the indexer writes rows in an order derived
-/// from absolute paths, and an update appends rows. Every path shares the repository root, so
-/// the order is the same wherever the repository lives. On a fresh build it is the CRG's own
-/// insertion order (files by path, nodes in source order), which its Leiden vertex ids follow.
+/// Indices (into `g.nodes`) of the non-File nodes in canonical order
+/// ([`AnalysisGraph::canonical_nodes`]), which the CRG's Leiden vertex ids follow.
 pub fn canonical_vertices(g: &AnalysisGraph) -> Vec<usize> {
-    let mut vertices: Vec<usize> = (0..g.nodes.len())
+    g.canonical_nodes()
+        .into_iter()
         .filter(|&i| g.nodes[i].kind != "File")
-        .collect();
-    fn key(n: &AnalysisNode) -> (&str, i64, std::cmp::Reverse<i64>, &str) {
-        (
-            n.file_path.as_str(),
-            n.line_start.unwrap_or(0),
-            std::cmp::Reverse(n.line_end.unwrap_or(0)),
-            n.qualified.as_str(),
-        )
-    }
-    vertices.sort_by(|&a, &b| key(&g.nodes[a]).cmp(&key(&g.nodes[b])));
-    vertices
-}
-
-/// Edges in canonical order (file, line, kind, source, target), independent of row ids like
-/// `canonical_vertices`; the CRG adds them file by file in source order.
-fn canonical_edges(g: &AnalysisGraph) -> Vec<&AnalysisEdge> {
-    let mut edges: Vec<&AnalysisEdge> = g.edges.iter().collect();
-    edges.sort_by(|a, b| {
-        (&a.file_path, a.line, &a.kind, &a.source, &a.target).cmp(&(
-            &b.file_path,
-            b.line,
-            &b.kind,
-            &b.source,
-            &b.target,
-        ))
-    });
-    edges
+        .collect()
 }
 
 /// Indices (into `g.nodes`) of the non-File nodes in `canonical_vertices` order, and the
-/// weighted graph over them. The first edge for a vertex pair in `canonical_edges` order fixes
-/// its weight; edges to unknown targets are ignored.
+/// weighted graph over them. The first edge for a vertex pair in
+/// `AnalysisGraph::canonical_edges` order fixes its weight; edges to unknown targets are ignored.
 pub fn community_graph(g: &AnalysisGraph) -> (Vec<usize>, WeightedGraph) {
     let vertices = canonical_vertices(g);
     let index: HashMap<&str, usize> = vertices
@@ -89,7 +61,7 @@ pub fn community_graph(g: &AnalysisGraph) -> (Vec<usize>, WeightedGraph) {
         .map(|(v, &i)| (g.nodes[i].qualified.as_str(), v))
         .collect();
     let mut wg = WeightedGraph::new(vertices.len());
-    for e in canonical_edges(g) {
+    for e in g.canonical_edges() {
         if let (Some(&a), Some(&b)) = (index.get(e.source.as_str()), index.get(e.target.as_str())) {
             wg.add_edge(a, b, edge_weight(&e.kind));
         }

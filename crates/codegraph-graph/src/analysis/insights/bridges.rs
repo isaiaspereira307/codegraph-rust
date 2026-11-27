@@ -83,11 +83,13 @@ pub fn betweenness(n: usize, adj: &[Vec<usize>], sources: Option<&[usize]>) -> V
 }
 
 /// Non-File nodes with positive betweenness over the directed graph of every edge (parallel edges
-/// collapsed; text endpoints are vertices too), highest first; ties by node id.
+/// collapsed; text endpoints are vertices too), highest first; ties in canonical node order.
+/// Vertices are numbered in canonical edge order, so the float sums do not depend on row ids.
 pub fn bridge_nodes(g: &AnalysisGraph) -> Vec<BridgeRow> {
     let mut index: HashMap<&str, usize> = HashMap::new();
     let mut names: Vec<&str> = Vec::new();
-    for e in &g.edges {
+    let edges = g.canonical_edges();
+    for e in &edges {
         for qn in [e.source.as_str(), e.target.as_str()] {
             if !index.contains_key(qn) {
                 index.insert(qn, names.len());
@@ -100,7 +102,7 @@ pub fn bridge_nodes(g: &AnalysisGraph) -> Vec<BridgeRow> {
         return Vec::new();
     }
     let mut adj: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
-    for e in &g.edges {
+    for e in &edges {
         let (a, b) = (index[e.source.as_str()], index[e.target.as_str()]);
         if a != b {
             adj[a].insert(b);
@@ -118,8 +120,9 @@ pub fn bridge_nodes(g: &AnalysisGraph) -> Vec<BridgeRow> {
         betweenness(n, &adj, None)
     };
     let mut rows: Vec<BridgeRow> = g
-        .nodes
-        .iter()
+        .canonical_nodes()
+        .into_iter()
+        .map(|i| &g.nodes[i])
         .filter(|node| node.kind != "File")
         .filter_map(|node| {
             let score = scores[*index.get(node.qualified.as_str())?];

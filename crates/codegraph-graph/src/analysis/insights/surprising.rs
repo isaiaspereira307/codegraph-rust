@@ -24,7 +24,8 @@ fn extension(path: &str) -> &str {
 }
 
 /// Edges between two non-File nodes scored for unexpected coupling
-/// (`find_surprising_connections` in the CRG), highest score first; ties keep edge order.
+/// (`find_surprising_connections` in the CRG), highest score first; ties keep canonical edge
+/// order ([`AnalysisGraph::canonical_edges`]).
 pub fn surprising_connections(g: &AnalysisGraph) -> Vec<SurprisingRow> {
     let degree = undirected_degree(g);
     let mut degrees: Vec<usize> = degree.values().copied().filter(|&d| d > 0).collect();
@@ -37,7 +38,7 @@ pub fn surprising_connections(g: &AnalysisGraph) -> Vec<SurprisingRow> {
     let deg = |qn: &str| degree.get(qn).copied().unwrap_or(0);
 
     let mut rows = Vec::new();
-    for e in &g.edges {
+    for e in g.canonical_edges() {
         let (Some(si), Some(ti)) = (g.index_of(&e.source), g.index_of(&e.target)) else {
             continue;
         };

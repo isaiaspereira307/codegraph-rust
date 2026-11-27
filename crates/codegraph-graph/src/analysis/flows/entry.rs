@@ -89,7 +89,7 @@ fn matches_entry_name(node: &AnalysisNode) -> bool {
         && PHP_NAME_PATTERNS.iter().any(|p| p.is_match(&node.name))
 }
 
-/// Indices (in `g.nodes`, id order, no repeats) of the Function/Test nodes that start a flow.
+/// Indices (in `g.nodes`, canonical order, no repeats) of the Function/Test nodes that start a flow.
 pub fn detect_entry_points(g: &AnalysisGraph, include_tests: bool) -> Vec<usize> {
     let is_file = |qn: &str| g.index_of(qn).is_some_and(|i| g.nodes[i].kind == "File");
     let mut called: HashSet<&str> = HashSet::new();
@@ -106,7 +106,8 @@ pub fn detect_entry_points(g: &AnalysisGraph, include_tests: bool) -> Vec<usize>
     }
     let mut seen: HashSet<&str> = HashSet::new();
     let mut out = Vec::new();
-    for (i, node) in g.nodes.iter().enumerate() {
+    for i in g.canonical_nodes() {
+        let node = &g.nodes[i];
         if node.kind != "Function" && node.kind != "Test" {
             continue;
         }

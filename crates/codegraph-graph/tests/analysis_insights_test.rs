@@ -266,9 +266,10 @@ fn isolated_nodes_have_degree_at_most_one() {
         .iter()
         .map(|n| (n.qualified_name.as_str(), n.degree))
         .collect();
-    // The File node and nodes of degree 2 are not isolated; id order is kept.
-    assert_eq!(got, [("f.py::lonely", 0), ("f.py::leaf", 1)]);
-    assert_eq!(gaps.isolated_nodes[0].name, "lonely");
+    // The File node and nodes of degree 2 are not isolated; canonical order (no lines here, so
+    // by qualified name), not id order.
+    assert_eq!(got, [("f.py::leaf", 1), ("f.py::lonely", 0)]);
+    assert_eq!(gaps.isolated_nodes[1].name, "lonely");
     assert_eq!(gaps.isolated_nodes[0].kind, "Function");
     assert_eq!(gaps.isolated_nodes[0].file, "f.py");
 }

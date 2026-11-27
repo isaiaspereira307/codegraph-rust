@@ -18,7 +18,7 @@ pub struct HubRow {
 }
 
 /// Non-File nodes with at least one edge end, by total degree (in + out over every edge, repeats
-/// included), highest first; ties by node id.
+/// included), highest first; ties in canonical node order ([`AnalysisGraph::canonical_nodes`]).
 pub fn hub_nodes(g: &AnalysisGraph) -> Vec<HubRow> {
     let mut degree: HashMap<&str, (usize, usize)> = HashMap::new();
     for e in &g.edges {
@@ -26,8 +26,9 @@ pub fn hub_nodes(g: &AnalysisGraph) -> Vec<HubRow> {
         degree.entry(e.target.as_str()).or_default().0 += 1;
     }
     let mut rows: Vec<HubRow> = g
-        .nodes
-        .iter()
+        .canonical_nodes()
+        .into_iter()
+        .map(|i| &g.nodes[i])
         .filter(|n| n.kind != "File")
         .filter_map(|n| {
             let (ind, outd) = degree
@@ -46,7 +47,7 @@ pub fn hub_nodes(g: &AnalysisGraph) -> Vec<HubRow> {
             })
         })
         .collect();
-    // `g.nodes` is in id order and the sort is stable, so ties keep id order.
+    // The sort is stable, so ties keep canonical order.
     rows.sort_by_key(|r| std::cmp::Reverse(r.total_degree));
     rows
 }

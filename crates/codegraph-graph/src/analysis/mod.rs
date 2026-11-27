@@ -260,6 +260,42 @@ impl AnalysisGraph {
         })
     }
 
+    /// Indices into `nodes` in canonical order: file, start line, outer span first, qualified
+    /// name (unique). Row ids are not used: the indexer writes rows in an order derived from
+    /// absolute paths, and an update appends rows. Every path shares the repository root, so the
+    /// order is the same wherever the repository lives. On a fresh build it is the CRG's own
+    /// insertion order (files by path, nodes in source order), which its rowid-ordered queries
+    /// (`get_all_nodes`) and stable sorts follow.
+    pub fn canonical_nodes(&self) -> Vec<usize> {
+        fn key(n: &AnalysisNode) -> (&str, i64, std::cmp::Reverse<i64>, &str) {
+            (
+                n.file_path.as_str(),
+                n.line_start.unwrap_or(0),
+                std::cmp::Reverse(n.line_end.unwrap_or(0)),
+                n.qualified.as_str(),
+            )
+        }
+        let mut order: Vec<usize> = (0..self.nodes.len()).collect();
+        order.sort_by(|&a, &b| key(&self.nodes[a]).cmp(&key(&self.nodes[b])));
+        order
+    }
+
+    /// Edges in canonical order (file, line, kind, source, target), independent of row ids like
+    /// [`Self::canonical_nodes`]; the CRG adds them file by file in source order (`get_all_edges`).
+    pub fn canonical_edges(&self) -> Vec<&AnalysisEdge> {
+        let mut edges: Vec<&AnalysisEdge> = self.edges.iter().collect();
+        edges.sort_by(|a, b| {
+            (&a.file_path, a.line, &a.kind, &a.source, &a.target).cmp(&(
+                &b.file_path,
+                b.line,
+                &b.kind,
+                &b.source,
+                &b.target,
+            ))
+        });
+        edges
+    }
+
     pub fn index_of(&self, qualified: &str) -> Option<usize> {
         self.by_qualified.get(qualified).copied()
     }

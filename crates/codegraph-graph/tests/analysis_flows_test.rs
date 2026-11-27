@@ -108,9 +108,10 @@ fn php_boot_only_for_php() {
     let py = graph(&[A, boot], &edges, &[("f::boot", "language", "python")]);
     assert_eq!(qnames(&py, &detect_entry_points(&py, false)), ["f.py::a"]);
     let php = graph(&[A, boot], &edges, &[("f::boot", "language", "php")]);
+    // Canonical order: file `f` sorts before `f.py`.
     assert_eq!(
         qnames(&php, &detect_entry_points(&php, false)),
-        ["f.py::a", "f::boot"]
+        ["f::boot", "f.py::a"]
     );
 }
 

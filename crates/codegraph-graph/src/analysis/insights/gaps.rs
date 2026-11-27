@@ -68,7 +68,14 @@ pub fn knowledge_gaps(
         .filter(|e| e.kind == "TESTED_BY")
         .map(|e| e.source.as_str())
         .collect();
-    let nodes: Vec<&AnalysisNode> = g.nodes.iter().filter(|n| n.kind != "File").collect();
+    // Canonical order, as the CRG's rowid order on a fresh build: the isolated cap and the
+    // stable hotspot sort keep it.
+    let nodes: Vec<&AnalysisNode> = g
+        .canonical_nodes()
+        .into_iter()
+        .map(|i| &g.nodes[i])
+        .filter(|n| n.kind != "File")
+        .collect();
     let deg = |n: &AnalysisNode| degree.get(n.qualified.as_str()).copied().unwrap_or(0);
 
     let isolated_nodes: Vec<GapNode> = nodes

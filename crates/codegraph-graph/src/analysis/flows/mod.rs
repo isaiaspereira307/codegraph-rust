@@ -26,11 +26,12 @@ pub struct Flow {
 
 /// Traces one flow per entry point by BFS over CALLS edges (flows.py `_trace_single_flow`).
 /// Flows with fewer than two nodes are dropped; the result is ordered by criticality, descending,
-/// keeping entry order for ties.
+/// keeping entry order (canonical node order) for ties. Calls are followed in canonical edge order,
+/// so `path` does not depend on row ids either.
 pub fn trace_flows(g: &AnalysisGraph, max_depth: u32) -> Vec<Flow> {
     let mut calls_out: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut has_tested_by: HashSet<&str> = HashSet::new();
-    for e in &g.edges {
+    for e in g.canonical_edges() {
         match e.kind.as_str() {
             "CALLS" => calls_out
                 .entry(e.source.as_str())
