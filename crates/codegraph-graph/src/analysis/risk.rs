@@ -24,6 +24,10 @@ const TEST_LIFECYCLE_NAMES: &[&str] = &[
     "__init__",
     "__destruct",
 ];
+/// Lifecycle names only in a migration file (`_MIGRATION_METHOD_NAMES`).
+const MIGRATION_METHOD_NAMES: &[&str] = &["up", "down"];
+/// Folders that make a file a migration (`_MIGRATION_DIRS`): Laravel/Phinx/Doctrine/Knex, Rails.
+const MIGRATION_DIRS: &[&str] = &["migrations", "migrate"];
 
 /// Each term of the risk score, in the order the score adds them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
@@ -37,19 +41,24 @@ pub struct RiskSignals {
 }
 
 /// The risk terms of node `ix`. `flow_criticalities` holds the criticality of every flow the
-/// node belongs to, in flow id order; `churn_commits` is the commits to its file in the churn
-/// window, or `None` when churn is off or unavailable.
+/// node belongs to, in flow id order; `flow_count` is its `flow_memberships` rows, which only
+/// score (0.05 each) when no membership has a flow row to give a criticality; `churn_commits`
+/// is the commits to its file in the churn window, or `None` when churn is off or unavailable.
 pub fn risk_signals(
     g: &AnalysisGraph,
     ix: usize,
     flow_criticalities: &[f64],
+    flow_count: usize,
     churn_commits: Option<u32>,
 ) -> RiskSignals {
     let node = &g.nodes[ix];
 
-    // A flow with criticality 0.0 is still a membership; only membership without any flow row
-    // would fall back to 0.05 per flow, and the caller has no such rows to give.
-    let flows = flow_criticalities.iter().sum::<f64>().min(0.25);
+    // A flow with criticality 0.0 is still a membership with a criticality.
+    let flows = if flow_criticalities.is_empty() {
+        (flow_count as f64 * 0.05).min(0.25)
+    } else {
+        flow_criticalities.iter().sum::<f64>().min(0.25)
+    };
 
     let callers: Vec<&str> = g
         .edges_to(&node.qualified)
@@ -110,15 +119,38 @@ pub fn risk_score(s: &RiskSignals) -> f64 {
     round_half_even(sum.clamp(0.0, 1.0), 4)
 }
 
-/// A lifecycle method (`setUp`, `__init__`, ...) of test code.
+/// A lifecycle method (`setUp`, `__init__`, ..., or `up`/`down` of a migration) of test code
+/// (`_is_test_lifecycle`). The CRG also accepts a node in a test file that is not marked
+/// `is_test`; the graph crate has no test-path rules, so only `is_test` counts here.
 fn is_test_lifecycle(g: &AnalysisGraph, ix: usize) -> bool {
     let n = &g.nodes[ix];
-    n.kind == "Function" && n.is_test && TEST_LIFECYCLE_NAMES.contains(&n.name.as_str())
+    let name = n.name.as_str();
+    n.kind == "Function"
+        && n.is_test
+        && (TEST_LIFECYCLE_NAMES.contains(&name)
+            || (MIGRATION_METHOD_NAMES.contains(&name) && is_migration_file(&n.file_path)))
+}
+
+/// CRG `_is_migration_file` as risk scoring calls it, with no repository root: a relative
+/// path with a `migrations`/`migrate` folder. An absolute path cannot be placed in the
+/// repository without the root, so it never is one.
+fn is_migration_file(file_path: &str) -> bool {
+    let path = file_path.replace('\\', "/");
+    let absolute = path.starts_with('/')
+        || (path.as_bytes().get(1) == Some(&b':') && path.as_bytes()[0].is_ascii_alphabetic());
+    if absolute {
+        return false;
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    parts[..parts.len().saturating_sub(1)]
+        .iter()
+        .any(|part| MIGRATION_DIRS.contains(part))
 }
 
 /// Distinct test nodes covering node `ix` (`get_transitive_tests` with `max_depth = 1` and no
 /// helper routes): TESTED_BY from the node (a Class adds its CONTAINS members, a File its
-/// classes and functions), then TESTED_BY from its bound CALLS callees, at most 50 of them,
+/// classes and functions), the bare-name fallback (`bare_name_tests`), then TESTED_BY from its
+/// bound CALLS callees, at most 50 of them,
 /// bound callees first and by name. Unresolved edges are skipped; tests without a node are
 /// not counted.
 fn transitive_test_count(g: &AnalysisGraph, ix: usize) -> usize {
@@ -145,19 +177,10 @@ fn transitive_test_count(g: &AnalysisGraph, ix: usize) -> usize {
 
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut count = 0;
-    let mut collect = |source: &str, count: &mut usize| {
-        for e in g.edges_from(source) {
-            if e.kind != "TESTED_BY" || e.unresolved {
-                continue;
-            }
-            if seen.insert(e.target.as_str()) && g.index_of(&e.target).is_some() {
-                *count += 1;
-            }
-        }
-    };
     for qn in &inputs {
-        collect(qn, &mut count);
+        collect_tested_by(g, qn, &mut seen, &mut count);
     }
+    bare_name_tests(g, node, &mut seen, &mut count);
 
     let frontier: BTreeSet<&str> = inputs.iter().copied().collect();
     let callees: BTreeSet<&str> = frontier
@@ -170,10 +193,153 @@ fn transitive_test_count(g: &AnalysisGraph, ix: usize) -> usize {
     callees.sort_by_key(|qn| (g.index_of(qn).is_none(), *qn));
     for callee in callees.into_iter().take(MAX_TEST_FRONTIER) {
         if g.index_of(callee).is_some() {
-            collect(callee, &mut count);
+            collect_tested_by(g, callee, &mut seen, &mut count);
         }
     }
     count
+}
+
+/// Counts the resolved TESTED_BY targets of `source` not seen yet that have a node.
+fn collect_tested_by<'g>(
+    g: &'g AnalysisGraph,
+    source: &str,
+    seen: &mut BTreeSet<&'g str>,
+    count: &mut usize,
+) {
+    for e in g.edges_from(source) {
+        if e.kind != "TESTED_BY" || e.unresolved {
+            continue;
+        }
+        if seen.insert(e.target.as_str()) && g.index_of(&e.target).is_some() {
+            *count += 1;
+        }
+    }
+}
+
+/// CRG `get_transitive_tests` bare-name fallback for TESTED_BY edges whose source is the
+/// node's bare name (`qualified.rsplit("::")`, so a method keeps its class): the edge counts
+/// when the test file itself or a file it imports holds exactly one Function/Test/Class of that
+/// name, that one is this node, and the edge's receiver evidence can mean it.
+fn bare_tested_by_admits(
+    g: &AnalysisGraph,
+    node: &crate::analysis::AnalysisNode,
+    bare: &str,
+    edge: &crate::analysis::AnalysisEdge,
+    imports: &mut std::collections::HashMap<String, BTreeSet<String>>,
+) -> bool {
+    let context = edge.file_path.as_str();
+    let imported = imports.entry(context.to_string()).or_insert_with(|| {
+        let modules = g.python_module_files();
+        let mut files = BTreeSet::new();
+        for import in g.imports_in(context) {
+            let target = import.target.split("::").next().unwrap_or_default();
+            files.insert(target.to_string());
+            if let Some(file) = modules.get(target) {
+                files.insert(file.clone());
+            }
+        }
+        files
+    });
+    let mut supported = g
+        .nodes_named(bare)
+        .filter(|c| matches!(c.kind.as_str(), "Function" | "Test" | "Class"))
+        .filter(|c| c.file_path == context || imported.contains(&c.file_path));
+    let (Some(only), None) = (supported.next(), supported.next()) else {
+        return false;
+    };
+    only.qualified == node.qualified && receiver_evidence_admits(edge, node)
+}
+
+fn bare_name_tests<'g>(
+    g: &'g AnalysisGraph,
+    node: &crate::analysis::AnalysisNode,
+    seen: &mut BTreeSet<&'g str>,
+    count: &mut usize,
+) {
+    let bare = node
+        .qualified
+        .rsplit_once("::")
+        .map_or(node.qualified.as_str(), |(_, b)| b);
+    let mut imports = std::collections::HashMap::new();
+    for e in g.edges_from(bare) {
+        if e.kind != "TESTED_BY" || e.unresolved {
+            continue;
+        }
+        if !bare_tested_by_admits(g, node, bare, e, &mut imports) {
+            continue;
+        }
+        if seen.insert(e.target.as_str()) && g.index_of(&e.target).is_some() {
+            *count += 1;
+        }
+    }
+}
+
+/// CRG `_receiver_evidence_admits_candidate` over the single candidate `node`.
+fn receiver_evidence_admits(
+    edge: &crate::analysis::AnalysisEdge,
+    node: &crate::analysis::AnalysisNode,
+) -> bool {
+    let Some(extra) = edge.evidence.as_deref() else {
+        return true;
+    };
+    let text = |key: &str| extra.get(key).and_then(|v| v.as_str());
+    let parent = node.parent_name.as_deref().filter(|p| !p.is_empty());
+    match extra.get("receiver_binding") {
+        None => {
+            // `_claimed_owner`: `a.py::Helper.ping` names `Helper`.
+            let claimed = text("claimed_endpoint").and_then(|c| {
+                let leaf = c.rsplit("::").next().unwrap_or(c);
+                leaf.rsplit_once('.')
+                    .map(|(owner, _)| owner)
+                    .filter(|o| !o.is_empty())
+            });
+            let owner = claimed.or_else(|| {
+                (text("receiver_resolution") == Some("typed_receiver_unresolved"))
+                    .then(|| text("receiver_type"))
+                    .flatten()
+            });
+            owner.is_none_or(|owner| same_owner(parent, owner))
+        }
+        Some(binding) => match binding.as_str() {
+            Some("module") => text("receiver_module")
+                .filter(|m| !m.is_empty())
+                .is_some_and(|m| node.file_path == m && parent.is_none()),
+            Some("class") => {
+                let Some(class) = text("receiver_class").filter(|c| !c.is_empty()) else {
+                    return false;
+                };
+                let class_file = match extra.get("receiver_class_file") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(f)) => Some(f.as_str()),
+                    Some(_) => return false,
+                };
+                let scopes: Vec<String> = extra
+                    .get("receiver_scopes")
+                    .and_then(|s| s.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|s| s.as_str().filter(|s| !s.is_empty()))
+                    .map(|scope| format!("{scope}.{class}"))
+                    .chain(std::iter::once(class.to_string()))
+                    .collect();
+                // The first scope path any candidate answers to decides; here the only
+                // candidate is the node, so it is admitted when it answers to one of them.
+                scopes.iter().any(|path| {
+                    parent == Some(path.as_str())
+                        && class_file.is_none_or(|f| f.is_empty() || node.file_path == f)
+                })
+            }
+            _ => false,
+        },
+    }
+}
+
+/// CRG `_same_owner`: scopes compared from the innermost name out, as far as both go.
+fn same_owner(parent: Option<&str>, owner: &str) -> bool {
+    let have: Vec<&str> = parent.unwrap_or("").split('.').collect();
+    let want: Vec<&str> = owner.split('.').collect();
+    let depth = have.len().min(want.len());
+    have[have.len() - depth..] == want[want.len() - depth..]
 }
 
 #[cfg(test)]
@@ -195,6 +361,7 @@ mod tests {
             decorators: vec![],
             community_id,
             is_virtual: false,
+            parent_name: None,
         }
     }
 
@@ -207,6 +374,7 @@ mod tests {
             line: 0,
             import_context: None,
             unresolved: false,
+            evidence: None,
         }
     }
 
@@ -224,7 +392,7 @@ mod tests {
             vec![node(1, "Function", "a.py::check_password", None)],
             vec![],
         );
-        let s = risk_signals(&g, ix(&g, "a.py::check_password"), &[], None);
+        let s = risk_signals(&g, ix(&g, "a.py::check_password"), &[], 0, None);
         assert_eq!(s.tests, 0.30);
         assert_eq!(s.security, 0.20);
         assert_eq!(
@@ -238,8 +406,8 @@ mod tests {
     fn flow_signal_caps_at_quarter() {
         let g = graph(vec![node(1, "Function", "a.py::f", None)], vec![]);
         let f = ix(&g, "a.py::f");
-        assert_eq!(risk_signals(&g, f, &[0.1, 0.05], None).flows, 0.1 + 0.05);
-        assert_eq!(risk_signals(&g, f, &[0.2, 0.2, 0.2], None).flows, 0.25);
+        assert_eq!(risk_signals(&g, f, &[0.1, 0.05], 0, None).flows, 0.1 + 0.05);
+        assert_eq!(risk_signals(&g, f, &[0.2, 0.2, 0.2], 0, None).flows, 0.25);
     }
 
     #[test]
@@ -257,7 +425,7 @@ mod tests {
         nodes.push(node(7, "Function", "c.py::loose", None));
         edges.push(edge("CALLS", "c.py::loose", "a.py::f"));
         let g = graph(nodes, edges);
-        let s = risk_signals(&g, ix(&g, "a.py::f"), &[], None);
+        let s = risk_signals(&g, ix(&g, "a.py::f"), &[], 0, None);
         // Four distinct cross-community callers: 0.20, capped at 0.15.
         assert_eq!(s.cross_community, 0.15);
         // Seven incoming CALLS edges: 7 / 20 = 0.35, capped at 0.10.
@@ -271,7 +439,7 @@ mod tests {
             ],
             vec![edge("CALLS", "b.py::c", "a.py::f")],
         );
-        let s = risk_signals(&g, ix(&g, "a.py::f"), &[], None);
+        let s = risk_signals(&g, ix(&g, "a.py::f"), &[], 0, None);
         assert_eq!((s.cross_community, s.callers), (0.0, 0.05));
     }
 
@@ -297,14 +465,14 @@ mod tests {
             ..edge("TESTED_BY", "a.py::f", "t.py::test_guess")
         });
         let g = graph(nodes.clone(), edges.clone());
-        let s = risk_signals(&g, ix(&g, "a.py::f"), &[], None);
+        let s = risk_signals(&g, ix(&g, "a.py::f"), &[], 0, None);
         // 4 distinct tests: 0.30 - 0.8 * 0.25 = 0.10.
         assert!((s.tests - 0.10).abs() < 1e-12, "{}", s.tests);
 
         nodes.push(node(14, "Test", "t.py::test_4", None));
         edges.push(edge("TESTED_BY", "a.py::f", "t.py::test_4"));
         let g = graph(nodes, edges);
-        let s = risk_signals(&g, ix(&g, "a.py::f"), &[], None);
+        let s = risk_signals(&g, ix(&g, "a.py::f"), &[], 0, None);
         assert!((s.tests - 0.05).abs() < 1e-12, "{}", s.tests);
         assert_eq!(risk_score(&s), 0.05);
     }
@@ -322,7 +490,7 @@ mod tests {
                 edge("TESTED_BY", "a.py::Auth.run", "t.py::test_run"),
             ],
         );
-        let s = risk_signals(&g, ix(&g, "a.py::Auth"), &[], None);
+        let s = risk_signals(&g, ix(&g, "a.py::Auth"), &[], 0, None);
         assert!((s.tests - 0.25).abs() < 1e-12, "{}", s.tests);
     }
 
@@ -331,18 +499,126 @@ mod tests {
         let mut setup = node(1, "Function", "t.py::setUp", None);
         setup.is_test = true;
         let g = graph(vec![setup], vec![]);
-        assert_eq!(risk_signals(&g, 0, &[], None).tests, 0.0);
+        assert_eq!(risk_signals(&g, 0, &[], 0, None).tests, 0.0);
+    }
+
+    /// CRG `_risk_signals_from`: memberships with no flow row (no criticality) still score
+    /// 0.05 each, capped at 0.25; criticalities win when there are any.
+    #[test]
+    fn flow_count_fallback_without_criticalities() {
+        let g = graph(vec![node(1, "Function", "a.py::f", None)], vec![]);
+        let f = ix(&g, "a.py::f");
+        assert!((risk_signals(&g, f, &[], 3, None).flows - 0.15).abs() < 1e-12);
+        assert_eq!(risk_signals(&g, f, &[], 9, None).flows, 0.25);
+        assert_eq!(risk_signals(&g, f, &[0.1], 3, None).flows, 0.1);
+    }
+
+    /// CRG `is_test_gap_exempt` without a repository root: `up`/`down` are lifecycle names
+    /// only in a relative `migrations`/`migrate` folder; an absolute path is never placed.
+    #[test]
+    fn migration_up_and_down_have_no_coverage_term() {
+        let tests_of = |qn: &str| {
+            let mut n = node(1, "Function", qn, None);
+            n.is_test = true;
+            let g = graph(vec![n], vec![]);
+            risk_signals(&g, 0, &[], 0, None).tests
+        };
+        assert_eq!(tests_of("db/migrations/001_init.py::up"), 0.0);
+        assert_eq!(tests_of("db/migrate/002.rb::down"), 0.0);
+        assert_eq!(tests_of("src/app.py::up"), 0.30);
+        assert_eq!(tests_of("migrations.py::up"), 0.30);
+        assert_eq!(tests_of("/r/db/migrations/001_init.py::up"), 0.30);
+        assert_eq!(tests_of("db/migrations/001_init.py::apply"), 0.30);
+    }
+
+    /// CRG `get_transitive_tests` bare-name fallback: a TESTED_BY edge whose source is the
+    /// bare name counts when the test file holds or imports exactly one candidate of that name,
+    /// and its receiver evidence can mean the node.
+    #[test]
+    fn bare_tested_by_counts_with_import_evidence() {
+        let tested = |extra_nodes: Vec<AnalysisNode>, evidence: Option<serde_json::Value>| {
+            let mut nodes = vec![
+                node(1, "Function", "a.py::f", None),
+                node(2, "Test", "t.py::test_f", None),
+                node(3, "File", "a.py", None),
+            ];
+            nodes.extend(extra_nodes);
+            let edges = vec![
+                AnalysisEdge {
+                    file_path: "t.py".into(),
+                    evidence: evidence.and_then(|v| v.as_object().cloned()).map(Box::new),
+                    ..edge("TESTED_BY", "f", "t.py::test_f")
+                },
+                AnalysisEdge {
+                    file_path: "t.py".into(),
+                    ..edge("IMPORTS_FROM", "t.py", "a.py")
+                },
+                AnalysisEdge {
+                    file_path: "t.py".into(),
+                    ..edge("IMPORTS_FROM", "t.py", "b.py")
+                },
+            ];
+            let g = graph(nodes, edges);
+            risk_signals(&g, ix(&g, "a.py::f"), &[], 0, None).tests
+        };
+        assert_eq!(tested(vec![], None), 0.25);
+        // A second imported candidate makes the name ambiguous.
+        assert_eq!(
+            tested(vec![node(4, "Function", "b.py::f", None)], None),
+            0.30
+        );
+        // A candidate the test file does not import is no evidence against.
+        assert_eq!(
+            tested(vec![node(4, "Function", "c.py::f", None)], None),
+            0.25
+        );
+        // Receiver evidence naming a module that is not a.py rules it out.
+        let module = serde_json::json!({"receiver_binding": "module", "receiver_module": "z.py"});
+        assert_eq!(tested(vec![], Some(module)), 0.30);
+        let module = serde_json::json!({"receiver_binding": "module", "receiver_module": "a.py"});
+        assert_eq!(tested(vec![], Some(module)), 0.25);
+        // A local with no evidence (`some_dict.f()`) admits nothing.
+        let local = serde_json::json!({"receiver_binding": "local"});
+        assert_eq!(tested(vec![], Some(local)), 0.30);
+        // A typed receiver the resolver could not place must own the method.
+        let typed = serde_json::json!({
+            "receiver_resolution": "typed_receiver_unresolved", "receiver_type": "Pet"
+        });
+        assert_eq!(tested(vec![], Some(typed)), 0.30);
+    }
+
+    /// Only the node's own bare name falls back, and a method's bare name keeps its class
+    /// (`Auth.run`), which no node is named, as in the CRG.
+    #[test]
+    fn bare_tested_by_does_not_reach_methods() {
+        let mut run = node(1, "Function", "a.py::Auth.run", None);
+        run.name = "run".into();
+        run.parent_name = Some("Auth".into());
+        let g = graph(
+            vec![run, node(2, "Test", "t.py::test_run", None)],
+            vec![
+                AnalysisEdge {
+                    file_path: "a.py".into(),
+                    ..edge("TESTED_BY", "Auth.run", "t.py::test_run")
+                },
+                AnalysisEdge {
+                    file_path: "a.py".into(),
+                    ..edge("TESTED_BY", "run", "t.py::test_run")
+                },
+            ],
+        );
+        assert_eq!(risk_signals(&g, 0, &[], 0, None).tests, 0.30);
     }
 
     #[test]
     fn churn_saturates() {
         let g = graph(vec![node(1, "Function", "a.py::f", None)], vec![]);
         let f = ix(&g, "a.py::f");
-        assert_eq!(risk_signals(&g, f, &[], None).churn, 0.0);
-        assert_eq!(risk_signals(&g, f, &[], Some(0)).churn, 0.0);
-        assert!((risk_signals(&g, f, &[], Some(4)).churn - 0.06).abs() < 1e-12);
-        assert_eq!(risk_signals(&g, f, &[], Some(10)).churn, 0.15);
-        assert_eq!(risk_signals(&g, f, &[], Some(250)).churn, 0.15);
+        assert_eq!(risk_signals(&g, f, &[], 0, None).churn, 0.0);
+        assert_eq!(risk_signals(&g, f, &[], 0, Some(0)).churn, 0.0);
+        assert!((risk_signals(&g, f, &[], 0, Some(4)).churn - 0.06).abs() < 1e-12);
+        assert_eq!(risk_signals(&g, f, &[], 0, Some(10)).churn, 0.15);
+        assert_eq!(risk_signals(&g, f, &[], 0, Some(250)).churn, 0.15);
     }
 
     #[test]

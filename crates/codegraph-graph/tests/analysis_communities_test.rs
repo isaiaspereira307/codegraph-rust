@@ -181,6 +181,7 @@ fn cohesion_counts_external_both_sides() {
                 line: 0,
                 import_context: None,
                 unresolved: false,
+                evidence: None,
             })
             .collect()
     };

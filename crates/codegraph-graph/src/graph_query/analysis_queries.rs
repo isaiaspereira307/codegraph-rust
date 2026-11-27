@@ -467,6 +467,14 @@ impl GraphQuery {
                     .collect();
                 drop(snap);
                 let graph = super::analysis_graph_in(&conn, &analysis_cache, &loads)?;
+                // Memberships per node, flow row or not: they score only when none has one.
+                let mut memberships: std::collections::HashMap<i64, usize> = Default::default();
+                let mut stmt = conn
+                    .prepare("SELECT node_id, count(*) FROM flow_memberships GROUP BY node_id")?;
+                for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))? {
+                    let (node, count) = row?;
+                    memberships.insert(node, count as usize);
+                }
                 let mut crits: std::collections::HashMap<i64, Vec<f64>> = Default::default();
                 let mut stmt = conn.prepare(
                     "SELECT m.node_id, f.criticality FROM flow_memberships m \
@@ -488,6 +496,7 @@ impl GraphQuery {
                         &graph,
                         ix,
                         crits.get(&node.id).map_or(&[][..], Vec::as_slice),
+                        memberships.get(&node.id).copied().unwrap_or(0),
                         commits,
                     );
                     out.insert(id, (crate::analysis::risk::risk_score(&signals), signals));

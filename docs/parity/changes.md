@@ -242,3 +242,43 @@ fuzzy léxico, medido com instrumentação temporária). Resolver só o que mudo
 |---|---|---|---|---|
 | 1: Rust `HEAD~3` | 452 068 | 49 506 | 68 078 (6.6x menos) | 6 139 (74x menos) |
 | 2: CRG sintético | 87 385 | 880 | 32 818 (2.7x menos) | 3 685 (24x menos) |
+
+## P1 Task 13: fallbacks de risco (2026-11-26)
+
+Portados de `changes.py`/`graph.py` do CRG v2.4.0:
+
+- **Flows sem criticalidade**: sem linha em `flows` para as participações do nó, o termo vale
+  0,05 por linha de `flow_memberships` (teto 0,25), como `count_flow_memberships`.
+- **Migration**: `up`/`down` de teste contam como ciclo de vida (sem termo de testes) só num
+  caminho relativo com pasta `migrations`/`migrate`. O CRG chama `is_test_gap_exempt(node)` sem
+  raiz, então um caminho absoluto (o normal nos dois bancos) nunca é migration; o Rust segue isso.
+  O CRG também aceita nó num arquivo de teste sem `is_test`; o crate de grafo não tem as regras
+  de caminho de teste e usa só `is_test`.
+- **TESTED_BY por nome solto**: aresta `TESTED_BY` cuja origem é o nome solto do nó
+  (`qualified.rsplit("::")`, então um método mantém a classe) conta quando o arquivo do teste ou
+  um arquivo que ele importa tem exatamente um Function/Test/Class com esse nome, esse é o nó, e
+  a evidência de receptor (`receiver_binding`, `claimed_endpoint`, `typed_receiver_unresolved`)
+  admite o nó. Para isso `TESTED_BY` passa a copiar o `extra` da chamada, como o parser do CRG
+  (`extra=edge.extra.copy()`); com isso um `TESTED_BY` de chamada com `claimed_endpoint` fica
+  não resolvido, como no CRG.
+
+**Medição, cenário 1 (este repo, `HEAD~3`, d=2)**, binário debug, CRG `bbdda4b`:
+
+| | risco igual (±0,001) | `risk_score` geral |
+|---|---|---|
+| antes (item 1, `d208a9d`) | 32/35 | 1.0 / 1.0 |
+| depois | 32/35 | 1.0 / 1.0 |
+
+Os cenários 2 e 3 seguem 2/2, 2/2 e 5/5. A tabela da Fase 3 dizia 31/35; o item 1 já mediu
+32/35. **O alvo de 34/35 não foi atingido** e não dá para forçá-lo pelos fallbacks: as três
+funções que divergem não passam por nenhum deles. Sinais do CRG (`risk_signals`) contra os dados
+do banco Rust:
+
+| função | CRG | Rust | causa |
+|---|---|---|---|
+| `graph_query/mod.rs::GraphQuery.change_marker` | 0,90 | 0,65 | flows: CRG 1 flow (crit. 0,61), Rust 0 |
+| `graph_query/mod.rs::change_marker` | 1,00 | 0,95 | callers: CRG 3 chamadores `CALLS`, Rust 1 |
+| `indexer.rs::ProjectIndexer.new` | 0,95 | 0,90 | cross_community: CRG 3 chamadores em outra comunidade, Rust 2 |
+
+As três vêm de arestas `CALLS` e flows diferentes (resolução de chamadas Rust e Leiden), fora do
+escopo da task.

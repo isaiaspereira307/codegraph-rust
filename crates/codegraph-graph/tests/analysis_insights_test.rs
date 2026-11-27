@@ -138,6 +138,7 @@ fn sampled_betweenness_is_deterministic() {
             decorators: vec![],
             community_id: None,
             is_virtual: false,
+            parent_name: None,
         })
         .collect();
     let mut edges = Vec::new();
@@ -151,6 +152,7 @@ fn sampled_betweenness_is_deterministic() {
                 line: 0,
                 import_context: None,
                 unresolved: false,
+                evidence: None,
             });
         }
     }
@@ -189,6 +191,7 @@ fn node(n: N) -> AnalysisNode {
         decorators: vec![],
         community_id,
         is_virtual: false,
+        parent_name: None,
     }
 }
 
@@ -201,6 +204,7 @@ fn edge(kind: &str, s: &str, t: &str) -> AnalysisEdge {
         line: 0,
         import_context: None,
         unresolved: false,
+        evidence: None,
     }
 }
 

@@ -55,6 +55,8 @@ pub struct AnalysisNode {
     /// `extra.virtual` is true (or 1): a resolver's marker (CRG Spring `Event` nodes), whose
     /// file is no file of the repository (`get_all_files`).
     pub is_virtual: bool,
+    /// `nodes.parent_name`: the class of a method (`Outer.Inner` for a nested one).
+    pub parent_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +71,23 @@ pub struct AnalysisEdge {
     /// `extra` names candidate targets (`ambiguous_targets`, `unresolved_targets`) or a claimed
     /// endpoint, so the edge is not a fact about one symbol (`_edge_extra_is_unresolved`).
     pub unresolved: bool,
+    /// Receiver evidence a TESTED_BY edge inherits from its test's CALLS edge (`receiver_*`,
+    /// `claimed_endpoint` keys of `extra`), read by the bare-name test fallback. `None` for
+    /// other kinds and for edges without such keys.
+    pub evidence: Option<Box<serde_json::Map<String, serde_json::Value>>>,
 }
+
+/// `extra` keys the bare-name TESTED_BY fallback reads (CRG `_receiver_evidence_admits_candidate`).
+const EVIDENCE_KEYS: &[&str] = &[
+    "receiver_binding",
+    "receiver_module",
+    "receiver_class",
+    "receiver_class_file",
+    "receiver_scopes",
+    "receiver_resolution",
+    "receiver_type",
+    "claimed_endpoint",
+];
 
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisGraph {
@@ -79,6 +97,11 @@ pub struct AnalysisGraph {
     by_node_id: HashMap<i64, usize>,
     by_source: HashMap<String, Vec<usize>>,
     by_target: HashMap<String, Vec<usize>>,
+    by_name: HashMap<String, Vec<usize>>,
+    /// IMPORTS_FROM edges by the file that holds them.
+    imports_by_file: HashMap<String, Vec<usize>>,
+    /// Dotted Python module -> its one `.py` file (`_python_module_file_index`), built on use.
+    python_modules: std::sync::OnceLock<HashMap<String, String>>,
 }
 
 impl AnalysisGraph {
@@ -87,7 +110,7 @@ impl AnalysisGraph {
         let mut nodes = Vec::new();
         let mut stmt = conn.prepare(
             "SELECT id, qualified_name, name, kind, file_path, language, line_start, line_end, \
-             is_test, extra, community_id FROM nodes ORDER BY id",
+             is_test, extra, community_id, parent_name FROM nodes ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
             let extra: Option<String> = r.get(9)?;
@@ -104,6 +127,7 @@ impl AnalysisGraph {
                 decorators: decorators_from_extra(extra.as_deref()),
                 community_id: r.get(10)?,
                 is_virtual: virtual_from_extra(extra.as_deref()),
+                parent_name: r.get(11)?,
             })
         })?;
         for row in rows {
@@ -118,8 +142,14 @@ impl AnalysisGraph {
             let extra = r
                 .get::<_, Option<String>>(5)?
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            let kind: String = r.get(0)?;
+            let evidence = if kind == "TESTED_BY" {
+                extra.as_ref().and_then(evidence_from_extra)
+            } else {
+                None
+            };
             Ok(AnalysisEdge {
-                kind: r.get(0)?,
+                kind,
                 source: r.get(1)?,
                 target: r.get(2)?,
                 file_path: r.get(3)?,
@@ -128,6 +158,7 @@ impl AnalysisGraph {
                     .as_ref()
                     .and_then(|v| v.get("import_context")?.as_str().map(str::to_string)),
                 unresolved: extra.as_ref().is_some_and(extra_is_unresolved),
+                evidence,
             })
         })?;
         for row in rows {
@@ -144,11 +175,22 @@ impl AnalysisGraph {
             .map(|(i, n)| (n.qualified.clone(), i))
             .collect();
         let by_node_id = nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            by_name.entry(n.name.clone()).or_default().push(i);
+        }
         let mut by_source: HashMap<String, Vec<usize>> = HashMap::new();
         let mut by_target: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut imports_by_file: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, e) in edges.iter().enumerate() {
             by_source.entry(e.source.clone()).or_default().push(i);
             by_target.entry(e.target.clone()).or_default().push(i);
+            if e.kind == "IMPORTS_FROM" {
+                imports_by_file
+                    .entry(e.file_path.clone())
+                    .or_default()
+                    .push(i);
+            }
         }
         AnalysisGraph {
             nodes,
@@ -157,7 +199,65 @@ impl AnalysisGraph {
             by_node_id,
             by_source,
             by_target,
+            by_name,
+            imports_by_file,
+            python_modules: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Nodes named `name`, in id order.
+    pub fn nodes_named<'a>(&'a self, name: &str) -> impl Iterator<Item = &'a AnalysisNode> + 'a {
+        self.by_name
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.nodes[i])
+    }
+
+    /// IMPORTS_FROM edges held by `file`, in edge id order.
+    pub fn imports_in<'a>(&'a self, file: &str) -> impl Iterator<Item = &'a AnalysisEdge> + 'a {
+        self.imports_by_file
+            .get(file)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.edges[i])
+    }
+
+    /// CRG `_python_module_file_index`: each dotted module suffix of an indexed `.py` path
+    /// (`pkg/__init__.py` is `pkg`) mapped to that file, when exactly one file answers to it.
+    pub fn python_module_files(&self) -> &HashMap<String, String> {
+        self.python_modules.get_or_init(|| {
+            let mut files: Vec<&str> = self
+                .nodes
+                .iter()
+                .map(|n| n.file_path.as_str())
+                .filter(|f| f.ends_with(".py"))
+                .collect();
+            files.sort_unstable();
+            files.dedup();
+            let mut modules: HashMap<String, Option<&str>> = HashMap::new();
+            for file in files {
+                let stem = &file[..file.len() - 3];
+                let mut segments: Vec<&str> = stem.split('/').filter(|s| !s.is_empty()).collect();
+                if segments.last() == Some(&"__init__") {
+                    segments.pop();
+                }
+                for start in 0..segments.len() {
+                    let module = segments[start..].join(".");
+                    if module.is_empty() {
+                        continue;
+                    }
+                    let slot = modules.entry(module).or_insert(Some(file));
+                    if *slot != Some(file) {
+                        *slot = None;
+                    }
+                }
+            }
+            modules
+                .into_iter()
+                .filter_map(|(m, f)| Some((m, f?.to_string())))
+                .collect()
+        })
     }
 
     pub fn index_of(&self, qualified: &str) -> Option<usize> {
@@ -185,6 +285,17 @@ impl AnalysisGraph {
             .flatten()
             .map(|&i| &self.edges[i])
     }
+}
+
+fn evidence_from_extra(
+    extra: &serde_json::Value,
+) -> Option<Box<serde_json::Map<String, serde_json::Value>>> {
+    let object = extra.as_object()?;
+    let kept: serde_json::Map<String, serde_json::Value> = EVIDENCE_KEYS
+        .iter()
+        .filter_map(|k| Some((k.to_string(), object.get(*k)?.clone())))
+        .collect();
+    (!kept.is_empty()).then(|| Box::new(kept))
 }
 
 fn extra_is_unresolved(extra: &serde_json::Value) -> bool {

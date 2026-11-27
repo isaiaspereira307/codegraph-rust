@@ -468,6 +468,23 @@ async fn tested_by_mirrors_calls_from_tests() {
             ("assert".to_string(), test_qn, test_file, 3),
         ]
     );
+    // CRG mints TESTED_BY with a copy of the call's `extra` (receiver evidence included).
+    let extra: String = conn
+        .query_row(
+            "SELECT extra FROM edges WHERE kind = 'TESTED_BY' AND line = 3",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let call_extra: String = conn
+        .query_row(
+            "SELECT extra FROM edges WHERE kind = 'CALLS' AND line = 3",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(extra, call_extra);
+    assert!(extra.contains("\"line\""), "{extra}");
 }
 
 #[tokio::test]

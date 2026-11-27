@@ -224,14 +224,16 @@ pub const POSTPROCESS_LEVEL_KEY: &str = "postprocess_level";
 pub const POSTPROCESS_WARNING_KEY: &str = "postprocess_warning";
 
 /// Rebuilds TESTED_BY as code-review-graph does: one edge per CALLS edge whose caller is a
-/// Test node, reversed (callee -> test), keeping the call's file and line. Deleting first
-/// keeps repeated finalisation (full or incremental) idempotent.
+/// Test node, reversed (callee -> test), keeping the call's file, line and a copy of its
+/// `extra` (the receiver evidence the bare-name test fallback reads). Deleting first keeps
+/// repeated finalisation (full or incremental) idempotent.
 fn derive_tested_by(tx: &Transaction) -> Result<()> {
     tx.execute("DELETE FROM edges WHERE kind = 'TESTED_BY'", [])?;
     tx.execute(
         "INSERT INTO edges (kind, source_qualified, target_qualified, file_path, line, \
-         updated_at) \
-         SELECT 'TESTED_BY', e.target_qualified, e.source_qualified, e.file_path, e.line, ?1 \
+         extra, updated_at) \
+         SELECT 'TESTED_BY', e.target_qualified, e.source_qualified, e.file_path, e.line, \
+         COALESCE(e.extra, '{}'), ?1 \
          FROM edges e JOIN nodes n ON n.qualified_name = e.source_qualified \
          WHERE e.kind = 'CALLS' AND n.kind = 'Test'",
         [now_epoch()],
