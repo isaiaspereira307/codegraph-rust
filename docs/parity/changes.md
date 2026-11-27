@@ -282,3 +282,11 @@ do banco Rust:
 
 As três vêm de arestas `CALLS` e flows diferentes (resolução de chamadas Rust e Leiden), fora do
 escopo da task.
+
+## Fechamento do P1 (2026-11-27)
+
+Snapshot final (binário debug `397fd24`, CRG `bbdda4b`): cenário 1 impacted 0.948, arquivos
+0.976, flows 0.880, risco 32/35; cenário 2 d=1 0.995 e d=2 0.957 (flows e risco iguais); cenário
+3 arquivos/funções alterados 1.000 e risco 5/5 (impacto truncado). `update` de 2 arquivos em debug:
+CRG 15,1 s, Rust 66,3 s. Alvos não atingidos e decisões em
+[`p1-baseline.md`](p1-baseline.md#fechamento-task-15-2026-11-27).

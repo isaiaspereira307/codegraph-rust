@@ -70,6 +70,10 @@ python3 scripts/parity/check_p1.py --print /tmp/opencode/parity-p1  # all measur
 three-decimal Markdown tables), and ignores improvements. Timing in `timing.json` is recorded
 for information; the release/debug target is checked separately by `docs/parity/changes.md`.
 
+The floors were raised to the measured values when P1 closed (2026-11-27); improvements made
+after that should raise them again in `check_p1.py` and `docs/parity/p1-baseline.md` together.
+The MCP tool inventory against CRG is in `docs/parity/mcp-inventory.md`.
+
 ## LSP tier evaluation
 
 `docs/parity/lsp-tier.md` records the `fast` × `balanced` × `full` comparison. The harness does

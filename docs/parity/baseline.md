@@ -1213,3 +1213,9 @@ temporario que liga a extracao/filtro de `References` no `fast`, sem LSP. Nessa 
 REFERENCES sobe de 0.000 para 1.000 e o ARI de corpus para 1.000, mas o grafo Rust cresce de
 63 para 68 arestas no corpus (+7,9%) e de 139 para 144 na sonda (+3,6%). Como o crescimento no
 corpus excede o limite de 5% do plano, o default permanece `fast` sem `References`.
+
+# P1
+
+O plano P1 (2026-11-25 a 2026-11-27) mede contra a linha de base congelada em
+[`p1-baseline.md`](p1-baseline.md), que também traz o fechamento e o critério de aceite.
+Este arquivo segue como log histórico das fases anteriores.

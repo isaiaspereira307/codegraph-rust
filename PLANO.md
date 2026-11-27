@@ -158,7 +158,7 @@ Jaccard depois do plano 1 (antes → depois, nós / CALLS / IMPORTS_FROM):
 
 | linguagem | nós | CALLS | IMPORTS_FROM |
 |---|---|---|---|
-| python | 0.51 → 1.00 | 0.12 → 0.55 → **0.92** | 0 → 1.00 |
+| python | 0.51 → 1.00 | 0.12 → 0.55 → 0.92 → **1.00** (P1) | 0 → 1.00 |
 | typescript | 0.20 → 0.44 → **1.00** | 0 → 0.13 → **1.00** | 0 → 1.00 |
 | go | 0.30 → 1.00 | 0.16 → 0.13 → **1.00** | 0 → 1.00 |
 | rust | 0.38 → 0.74 → **1.00** | 0.17 → 0.50 → **1.00** | 0 → 0.50 → **1.00** |
@@ -260,8 +260,15 @@ CALLS (0.133 vs 0.129); TS vai primeiro por também ter os piores nós, CONTAINS
    (`service.authenticate()`) seja ligado lexicalmente; "quem chama `authenticate`" perde essas
    arestas até o receptor tipado ser portado; (b) os `References` antigos de dica de tipo do
    tier `full` (`parameter_type`/`return_type`) foram removidos.
-6. Demais linguagens (C#, C/C++, Ruby, PHP, Kotlin, Swift, Dart): nenhuma resolve imports
-   ainda; corpus e fixtures a criar.
+6. ✅ Demais linguagens (C#, C/C++, Ruby, PHP, Kotlin, Swift, Dart): resolução de imports na
+   P1 Task 10 (`4eee114..5ba9370`; Kotlin com `tree-sitter-kotlin-ng` 1.1.0, Dart com
+   `tree-sitter-dart` 0.2.0). Uma sonda `<linguagem>-imports` por linguagem: 1.000 em nós, CALLS e
+   IMPORTS_FROM; INHERITS Kotlin 0.167 (o CRG grava aresta para o próprio nome) e CONTAINS Dart
+   0.833 (nós YAML do CRG). Medição em `docs/parity/p1-task10-grammars.md`.
+
+Os "fica para depois" das linguagens 1–5 acima que a P1 portou (receptor tipado e reexportação
+Python, re-exports/`#[path]`/`super::` Rust, JSX/CommonJS/workspaces TS, pacote Go via `go.mod`,
+receptor Java entre arquivos e frameworks) estão na seção "P1" abaixo; o resto segue pendente.
 
 Dívida menor registrada: hotspots de complexidade ignoram nós `Test`; atributos
 `crg_shaped`/`pre_shape_qualified_name` em todo nó (tamanho).
@@ -355,11 +362,11 @@ arquivos, entry points).
 Corrigidos depois da medição: `detect_changes` passou a somar churn por padrão, como o MCP
 do CRG, e `*.min.js`/`.min.css`/`.min.json` saem da coleta (flows do Rust no CRG: 542 → 303).
 
-Divergências a decidir:
-- A lista `tests` de `get_impact_radius` vai um salto de `TESTED_BY` além da profundidade.
-- `affected_files` inclui os próprios arquivos alterados.
-- O Rust detecta entry points Python a mais (284 contra 167 no CRG).
-- `update` debug de 2 arquivos leva 70 s, contra 18 s no CRG.
+Divergências (decididas na P1 Task 11, `docs/parity/changes.md`):
+- ✅ A lista `tests` de `get_impact_radius` fica dentro de `depth`, contando o salto `TESTED_BY`.
+- ✅ `affected_files` exclui os próprios arquivos alterados.
+- Entry points Python a mais: 268 → 199 contra 167 no CRG (alvo ≤ 5% não atingido).
+- `update` de 2 arquivos: release ≤ 1,2× o CRG; debug ~66 s contra ~15 s (alvo de debug descartado).
 
 Ferramentas MCP e comandos CLI equivalentes aos do CRG:
 
@@ -414,12 +421,13 @@ build total 20,7 s; pós-processo `flows_s` 0,48 s (inclui carregar o `AnalysisG
 `communities_s` 0,12 s; 305 flows, 162 comunidades (detector `leiden`).
 `get_architecture_overview` `minimal`: 20.174 bytes de JSON (162 comunidades, 45 pares, 5 avisos).
 
-Fica para depois:
+Fica para depois (vários itens foram fechados na P1; ver a seção P1):
 
-- Flows incrementais: o pós-processo recalcula tudo a cada `finalize` (`flows.id` muda a cada
-  build).
+- ✅ Flows incrementais (P1 Task 12): `flows.id` estável; o traço segue completo, só a escrita é
+  incremental.
 - Igualdade com o igraph: o Leiden à mão não é igual ao do igraph; o ARI fica só registrado
-  (Decisão 3 do plano).
+  (Decisão 3 do plano). Desde a P1 é independente do diretório de trabalho e dá 1.000 em todas as
+  sondas e no corpus.
 - Gaps de import não portados: ciclos de import quase nunca aparecem em bancos indexados pelo
   Rust (resolução de módulo Rust entre arquivos pendente, Fase 2). Medido no ledger da Task 10:
   8 de 1831 arestas IMPORTS_FROM deste repo ligavam dois `File`; depois do rebuild de 2026-11-24,
@@ -429,9 +437,8 @@ Fica para depois:
   então não há filtro de import type-only/pacote-pai/deferred, `load_time` é sempre true e nós
   `extra.virtual` não são excluídos do conjunto de arquivos dos ciclos.
 - Risco: o cache de churn por HEAD e o timeout persistente foram portados (ver abaixo); falhas
-  de churn só vão para o log em nível debug. Seguem pendentes, num plano próprio com medição de
-  paridade contra o CRG antes e depois (mudam score): o fallback de TESTED_BY por nome solto, a
-  isenção de arquivos de migration na checagem de testes e o fallback 0.05·flow_count.
+  de churn só vão para o log em nível debug. ✅ Fallbacks de flow_count e migrations portados na
+  P1 Task 13 (risco 32/35, alvo 34/35 não atingido; ver P1).
 - ✅ Cache de `Arc<AnalysisGraph>` por `data_version` e cache de churn por (raiz, HEAD)
   (plano `docs/superpowers/plans/2026-11-24-cache-analise-churn.md`). `GraphQuery` guarda o
   `AnalysisGraph` por marcador de mudança (`data_version` + `total_changes`); o churn é guardado
@@ -441,12 +448,11 @@ Fica para depois:
   (release): `hub_nodes` 172 ms → 6,5 ms na segunda chamada (a carga do grafo, ~165 ms, deixa de
   se repetir entre ferramentas); churn 118 ms → 1,3 ms. O Brandes das ferramentas de bridge
   continua rodando a cada chamada que não bate no cache de resultado do executor.
-- `crates/codegraph-graph/src/analysis/insights.rs` tem 676 linhas (hubs, bridges, gaps, ciclos,
-  surprising, questions): candidato a dividir.
-- `nodes.extra` sobrescrito no re-parse: `write.rs` faz `extra = excluded.extra`, o que apaga
-  chaves do CRG em bancos escritos pelas duas ferramentas.
-- `GraphQuery::get_hub_nodes(min_degree)` legado agora só é usado em teste: remover ou migrar.
-- Tempo e memória do pós-processo em corpus grande (50k+ nós) não medidos.
+- ✅ `insights.rs` dividido em um módulo por análise (P1 Task 14, `dbd9f51`).
+- ✅ `nodes.extra` agora é mesclado no re-parse (P1 Task 13, `55cbd7b`).
+- ✅ `GraphQuery::get_hub_nodes` legado removido (P1 Task 14, `b81b294`).
+- ✅ Pós-processo medido a 50k nós (`docs/parity/scale.md`): comunidades e memória lineares,
+  memberships de flow ~n^1,8 (igual ao CRG).
 - ✅ Sufixo `@L1` nos nós `File` (plano `docs/superpowers/plans/2026-11-24-higiene-licenca-e-sufixo-l1.md`):
   o writer dava `base@L<linha>` enquanto um UUID antigo ainda ocupava o nome e o mantinha para
   sempre. `cg_nodes.base_qualified` + normalização no `finalize` (nós, `cg_nodes` e arestas);
@@ -559,9 +565,54 @@ Em ordem; cada item ganha plano próprio em `docs/superpowers/plans/`:
    `nix` para `[target.'cfg(unix)'.dependencies]` com guardas `cfg(unix)` em `process.rs` e
    `codegraph.rs`).
 
-Adiado ("por ora não"): linguagens restantes da Fase 2 (item 6), demais itens da Fase 5
-(refactor, multi-repo, wiki, visualização, plataformas extras, embeddings) e o plano de
-paridade de risco (TESTED_BY por nome solto, migrations, fallback de flow_count).
+Adiado ("por ora não"): demais itens da Fase 5 (refactor, multi-repo, wiki, visualização,
+plataformas extras, embeddings). As linguagens restantes e a paridade de risco entraram na P1.
+
+## P1 — Paridade e qualidade ✅ (2026-11-25 a 2026-11-27)
+
+Plano `docs/superpowers/plans/2026-11-25-p1-paridade-e-qualidade.md` (15 tasks, commits
+`8ced807..HEAD`); ledger `.superpowers/sdd/2026-11-25-p1-paridade-e-qualidade/progress.md`.
+Fechamento e critério de aceite em `docs/parity/p1-baseline.md`; `scripts/parity/check_p1.py`
+guarda 151 pisos, elevados aos valores finais.
+
+Entregue:
+
+- Linha de base congelada e detector de regressão (`p1_snapshot.sh`, `check_p1.py`).
+- `qualified_name` canônico: idêntico indexando por `.`, caminho absoluto ou `./../fx/.`.
+- Python: receptor tipado (anotação, construtor, `q.lib.f()`, `mod.Thing().go()`), reexportação de
+  pacote e shims `sys.modules`, imports no corpo da função valendo para o arquivo. Corpus python
+  CALLS 0.923 → 1.000, ARI 0.403 → 1.000; sonda python-imports CALLS 0.684 → 0.909.
+- Rust: re-exports, `#[path]`, `super::` limitado à raiz do crate, receptor tipado.
+- TS/JS: JSX/TSX, `memo`/`forwardRef`, `require`/`import()`, aliases npm/workspaces, funções
+  atribuídas a membro, guarda morta. Go: import do diretório do pacote via `go.mod`/`replace`/
+  `vendor`. Java: receptor de outro arquivo, WebFlux funcional e eventos Spring.
+- Tier `balanced` (LSP) avaliado e recusado: só rust-analyzer disponível, CALLS cai para 0.429
+  (`docs/parity/lsp-tier.md`). `fast` segue padrão.
+- Imports nas 7 linguagens restantes (Fase 2, item 6).
+- Semântica do impacto acertada (`tests` dentro de `depth`, `affected_files` sem os alterados).
+- Flows com ID estável (356/356 entre builds) e escrita incremental; `import_context` nas arestas
+  de import e filtro de ciclos igual ao CRG; fallbacks de risco (flow_count, migrations); merge de
+  `nodes.extra` em vez de sobrescrever.
+- Análises determinísticas: desempate por chave relativa ao repo (comunidades, flows, hubs,
+  pontes, lacunas, surpresas); `insights.rs` dividido; `GraphQuery::get_hub_nodes` legado removido.
+- Escala medida a 12k/25k/50k nós (`docs/parity/scale.md`). Herança no `AnalysisGraph` medida e
+  recusada; `OVERRIDES` descartado (o CRG não emite): `docs/parity/analysis-heritage.md`.
+- Inventário MCP: 21 das 31 ferramentas do CRG com equivalente, 10 ausentes (Fase 5 ou removidas
+  por desenho), 7 só no Rust (`docs/parity/mcp-inventory.md`).
+
+Alvos não atingidos (medidos e documentados, sem plano):
+
+- Risco por função no cenário 1: 32/35, alvo 34/35. Causa: CALLS/flows/comunidades, não os
+  fallbacks (R17).
+- Entry points Python no repo do CRG: 199 contra 167 (alvo Δ ≤ 5%). Faltam receptor por anotação
+  de retorno/atributo `self.x` e nomes de `def` aninhado.
+- `update` de 2 arquivos: release dentro de 1,2× o CRG; debug 66 s contra 15 s do CRG (alvo de
+  debug descartado, R11). O custo é `resolution_exact_lexical`, que re-resolve todas as arestas a
+  cada `update`.
+
+Pendências menores registradas no ledger: `REFERENCES` desligado no `fast` (ligá-lo cresce o grafo
+7,9%); inserts em lote de `flow_memberships` (`flows_store_s` 219 s a 50k); ordem de pontes com
+empate difere da do CRG; `python_module_files` sem normalizar `.`.
 
 ## Ordem sugerida e marcos
 
@@ -572,3 +623,4 @@ paridade de risco (TESTED_BY por nome solto, migrations, fallback de flow_count)
 5. ~~Fase 3 → **MVP**: binário instalável que substitui o CRG no fluxo de revisão do Claude Code~~ ✅.
 6. ~~Fase 4 (análise de grafo)~~ ✅; Fase 5 conforme o uso real pedir.
 7. ~~Distribuição (release, Homebrew, Action)~~ ✅ entregue; resta o primeiro release.
+8. ~~P1 (paridade e qualidade)~~ ✅. Próximo: P0 (primeiro release, tap, Windows) ou Fase 5.

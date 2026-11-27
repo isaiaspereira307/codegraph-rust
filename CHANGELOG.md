@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed - Parity and quality (P1)
+
+- Parser parity with code-review-graph: Python typed receivers, package re-exports and
+  `sys.modules` shims; Rust re-exports, `#[path]` and `super::` bounds; TS/JS JSX, CommonJS,
+  workspace aliases and member-assigned functions; Go package imports via `go.mod`/`replace`/`vendor`;
+  Java cross-file receivers and framework edges. Import resolution for Swift, C/C++, C#, Ruby,
+  PHP, Kotlin and Dart. `qualified_name` is identical whatever path the project is indexed by.
+- Flow IDs are stable across builds; post-processing writes only what changed. Import edges carry
+  `extra.import_context`; risk scoring ports the flow-membership and migration fallbacks;
+  re-parsing merges `nodes.extra` instead of overwriting it. Analysis ties break by repo-relative
+  keys, so communities and flows no longer depend on the working directory.
+- Parity floors in `scripts/parity/check_p1.py` raised to the final measurements; results in
+  `docs/parity/p1-baseline.md`, scale in `docs/parity/scale.md`, MCP inventory in
+  `docs/parity/mcp-inventory.md`.
+
 ### Added - Distribution
 
 - Release workflow (`.github/workflows/release.yml`): on a `v*` tag it builds native binaries for

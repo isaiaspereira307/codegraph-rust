@@ -133,3 +133,49 @@ debug com 3 repetições na Task 11; estes valores são apenas o registro da lin
   lineares, flows superlineares pelo número de memberships (igual ao CRG). Herança no
   `AnalysisGraph` medida e recusada, `OVERRIDES` descartado:
   [`analysis-heritage.md`](analysis-heritage.md).
+
+## Fechamento (Task 15, 2026-11-27)
+
+Snapshot final com o binário debug de `397fd24` e CRG `bbdda4b`:
+
+```bash
+bash scripts/parity/p1_snapshot.sh <scratch>/p1-final
+python3 scripts/parity/check_p1.py <scratch>/p1-final   # P1 baseline OK: 151 floors
+```
+
+Pisos elevados ao valor medido (R21; o Leiden é determinístico desde a Task 14a):
+
+| métrica | piso antigo | piso novo |
+|---|---|---|
+| corpus python CALLS / resolvido | 0.923 / 0.833 | 1.000 / 1.000 |
+| corpus python entry points / membros (média, mín.) | 0.750 / 0.833, 0.500 | 1.000 / 1.000, 1.000 |
+| corpus python ARI | 0.403 | 1.000 |
+| sonda python CONTAINS | 0.902 | 0.958 |
+| sonda python-imports CALLS / resolvido / CONTAINS | 0.684 / 0.786 / 0.909 | 0.909 / 0.941 / 1.000 |
+| sonda rust-imports CONTAINS | 0.737 | 1.000 |
+| risco por função, cenário 1 | 31/35 | 32/35 |
+
+Critério de aceite do P1:
+
+| métrica | alvo | medido | status |
+|---|---|---|---|
+| 5 linguagens prioritárias | sem queda; python CALLS ≥ 0.95 | todas 1.000 em nós/CALLS/IMPORTS_FROM/ARI | ✅ |
+| 7 linguagens restantes | nós ≥ 0.95, IMPORTS_FROM ≥ 0.90, CALLS ≥ 0.80 | 1.000 nas 7 sondas; INHERITS Kotlin 0.167 e CONTAINS Dart 0.833 ([detalhes](p1-task10-grammars.md)) | ✅ |
+| `qualified_name` nos 3 modos de caminho | idêntico | idêntico (Task 2) | ✅ |
+| cenários de mudança | sem queda; risco ≥ 34/35; entry points Δ ≤ 5% | impacted 0.948 / 0.995 / 0.957 (d=2 rebaixado na Task 11, decisão documentada); risco 32/35; entry points Python no repo do CRG 199 contra 167 | ❌ risco e entry points ([changes.md](changes.md)) |
+| `update` de 2 arquivos | release ≤ 1,2× CRG; debug ≤ 2× release | release atingido (Task 11); debug 66,3 s contra CRG 15,1 s nesta rodada; alvo de debug descartado (R11) | ✅ release, debug descartado |
+| flows | ID estável; sem queda | 356/356 IDs estáveis (Task 12) | ✅ |
+| escala | 50k nós medidos | [scale.md](scale.md) | ✅ |
+| ferramentas MCP | inventário contra as 31 do CRG | 21 com equivalente, 10 ausentes (Fase 5 ou removidas por desenho), 7 só no Rust: [mcp-inventory.md](mcp-inventory.md) | ✅ |
+
+Ficam abertos, sem plano: risco 32/35 (a causa é CALLS/flows/comunidades, não fallbacks; R17),
+entry points Python a mais no repo do CRG (receptor por anotação de retorno/atributo `self.x`, nomes de
+`def` aninhado), `REFERENCES` desligado no `fast`, e o `update` dominado por
+`resolution_exact_lexical` (re-resolve todas as arestas a cada execução).
+
+Verificação do fechamento: `cargo fmt --all -- --check` limpo; `cargo test -p codegraph-parser
+-p codegraph-mcp -p codegraph-graph` e `cargo test -p codegraph-mcp --test e2e_mcp_tools` verdes.
+`cargo clippy -p codegraph-parser -p codegraph-mcp -p codegraph-graph --all-targets -- -D warnings`
+falha nos 23 diagnósticos antigos de `codegraph-core`; sem `-D warnings`, os crates
+`codegraph-parser`, `codegraph-mcp`, `codegraph-mcp-core` e `codegraph-graph` têm 92 avisos
+(alguns em extratores novos da P1, como `ruby.rs`), sem limpeza planejada.
